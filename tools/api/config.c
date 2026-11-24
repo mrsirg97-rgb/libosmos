@@ -4,6 +4,7 @@
 
 #include "osmos/run/engine.h" /* (OSMOS_MAX_LANES: osmos-serve's lanes at most) */
 #include "config.h"
+#include "osmos/err.h"
 
 /* osmos.json read whole and checked: a field of the wrong type, or one this reader does not know, refused by name
    (a misspelt setting is not silently its default) */
@@ -12,7 +13,7 @@
 
 static bool fail(char *err, const char *what, const char *key)
 {
-  snprintf(err, API_ERR, "osmos.json: %s%s%s", key ? key : "", key ? ": " : "", what);
+  osmos_fail(err, "osmos.json: %s%s%s", key ? key : "", key ? ": " : "", what);
   return false;
 }
 
@@ -31,6 +32,44 @@ static bool num(const Json *v, double *out, const char *key, char *err)
   *out = v->type == JSON_INT ? atof(v->s) : v->f;
   if (*out <= 0)
     return fail(err, "a positive number", key);
+  return true;
+}
+
+/* osmos.json's slots object: keep (a bool), dir (a path), cap / min (whole counts), gb / ram_gb / days (numbers) -
+   each its type, past 0; another key refused */
+static bool slots(Config *c, const Json *v, char *err)
+{
+  if (v->type != JSON_OBJECT)
+    return fail(err, "an object (keep, dir, cap, gb, ram_gb, min, days)", "slots");
+  for (size_t i = 0; i < v->n; i++)
+  {
+    const char *k = v->key[i];
+    const Json *x = v->item[i];
+    double d = 0;
+    if (!strcmp(k, "keep"))
+    {
+      if (x->type != JSON_TRUE && x->type != JSON_FALSE)
+        return fail(err, "true or false", "slots.keep");
+      c->slots_off = x->type == JSON_FALSE;
+      continue;
+    }
+    if (!strcmp(k, "dir"))
+    {
+      if (!str(x, c->slot_dir, sizeof c->slot_dir, "slots.dir", err))
+        return false;
+      continue;
+    }
+    double *at = !strcmp(k, "cap") ? &c->slot_cap : !strcmp(k, "gb") ? &c->slot_gb : !strcmp(k, "ram_gb") ? &c->slot_ram_gb
+               : !strcmp(k, "min") ? &c->slot_min : !strcmp(k, "days") ? &c->slot_days : NULL;
+    char name[48];
+    snprintf(name, sizeof name, "slots.%.32s", k);
+    if (!at)
+      return fail(err, "a key slots does not take (keep, dir, cap, gb, ram_gb, min, days)", name);
+    const bool count = !strcmp(k, "cap") || !strcmp(k, "min");
+    if ((count && x->type != JSON_INT) || !num(x, &d, name, err) || d > 1e7)
+      return fail(err, count ? "a whole count above 0" : "a number above 0", name);
+    *at = d;
+  }
   return true;
 }
 
@@ -71,7 +110,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "no_guess"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_guess = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
-  if (!strcmp(k, "npu")) /* 0.7.0: the NPU beside the GPU (forward_npu) */
+  if (!strcmp(k, "npu")) /* the NPU beside the GPU (forward_npu) */
     return str(v, c->npu, sizeof c->npu, k, err);
   if (!strcmp(k, "npu_share"))
     return (v->type == JSON_INT || v->type == JSON_FLOAT) && (c->npu_share = v->type == JSON_INT ? atof(v->s) : v->f) > 0 &&
@@ -81,7 +120,7 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "stream_ngram"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stream_ngram = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
-  if (!strcmp(k, "temperature")) /* 0.14.0: 0 greedy */
+  if (!strcmp(k, "temperature")) /* 0: greedy */
     return (v->type == JSON_INT || v->type == JSON_FLOAT) &&
                    (c->temperature = v->type == JSON_INT ? atof(v->s) : v->f) >= 0 && c->temperature < 100
                ? true
@@ -91,12 +130,23 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
                    c->top_p <= 1
                ? true
                : fail(err, "a share above 0, 1 at most", k);
-  if (!strcmp(k, "top_k")) /* 0.15.2: 0 every token */
+  if (!strcmp(k, "top_k")) /* 0: every token */
     return v->type == JSON_INT && v->s[0] != '-' && strlen(v->s) <= 9 ? (c->top_k = (unsigned)atol(v->s), true)
                                                                          : fail(err, "an integer, 0 (every token) or more", k);
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "slots"))
+    return slots(c, v, err);
+  if (!strcmp(k, "stats"))
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->stats = v->type == JSON_TRUE, true
+                                                         : fail(err, "true or false", k);
+  if (!strcmp(k, "profile"))
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->profile = v->type == JSON_TRUE, true
+                                                         : fail(err, "true or false", k);
+  if (!strcmp(k, "rope_stages")) /* (its form osmos-serve's to refuse: lfm3_stages_parse) */
+    return v->type == JSON_STRING && v->s[0] ? str(v, c->rope_stages, sizeof c->rope_stages, k, err)
+                                             : fail(err, "a string, from:factor,...", k);
   if (!strcmp(k, "max_context") || !strcmp(k, "parallel") || !strcmp(k, "max_tokens"))
   {
     if (v->type != JSON_INT || !num(v, &x, k, err) || x > 1e7)
@@ -110,17 +160,17 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   return fail(err, "not a setting osmos-api knows", k);
 }
 
-bool config_read(const char *path, Config *c, char err[API_ERR])
+bool config_read(const char *path, Config *c, char err[OSMOS_ERR])
 {
   memset(c, 0, sizeof *c);
   c->parallel = 1, c->top_p = 1;
   FILE *f = fopen(path, "rb");
   if (!f)
-    return snprintf(err, API_ERR, "%s: could not be opened", path), false;
+    return osmos_fail(err, "%s: could not be opened", path), false;
   char *text = malloc(CONFIG_MAX);
   const size_t n = text ? fread(text, 1, CONFIG_MAX, f) : 0;
   fclose(f);
-  char jerr[JSON_ERR];
+  char jerr[OSMOS_ERR] = "";
   Json *j = n && n < CONFIG_MAX ? json_parse(text, n, jerr) : NULL;
   free(text);
   if (!j || j->type != JSON_OBJECT)
@@ -137,7 +187,7 @@ bool config_read(const char *path, Config *c, char err[API_ERR])
 }
 
 bool config_argv(Config *c, const char *engine, int eos, const char *answer_after, char *argv[CONFIG_ARGS_MAX],
-                 char err[API_ERR])
+                 char err[OSMOS_ERR])
 {
   int n = 0;
   snprintf(c->eng, sizeof c->eng, "%s", engine);
@@ -172,6 +222,28 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--stream-ngram";
   if (c->kv_q8)
     argv[n++] = "--kv-q8";
+  if (c->profile)
+    argv[n++] = "--profile";
+  if (c->stats)
+    argv[n++] = "--stats";
+  if (c->slots_off)
+    argv[n++] = "--no-slots";
+  if (c->slot_dir[0])
+    argv[n++] = "--slot-dir", argv[n++] = c->slot_dir;
+  const struct
+  {
+    const char *flag;
+    double v;
+  } slot_nums[] = {{"--slot-cap", c->slot_cap}, {"--slot-gb", c->slot_gb}, {"--slot-ram-gb", c->slot_ram_gb},
+                   {"--slot-min", c->slot_min}, {"--slot-days", c->slot_days}};
+  for (size_t i = 0; i < sizeof slot_nums / sizeof *slot_nums; i++)
+    if (slot_nums[i].v > 0)
+    {
+      snprintf(c->num[7 + i], sizeof c->num[7 + i], "%g", slot_nums[i].v);
+      argv[n++] = (char *)slot_nums[i].flag, argv[n++] = c->num[7 + i];
+    }
+  if (c->rope_stages[0])
+    argv[n++] = "--rope-stages", argv[n++] = c->rope_stages;
   if (c->npu[0])
     argv[n++] = "--npu", argv[n++] = c->npu;
   if (c->npu[0] && c->npu_share > 0)

@@ -1,5 +1,5 @@
 // the lane's bits are not its residency's: forward_lane over 20 layers at two budgets - the tight one streaming far
-// more of each step's experts, read while the ready ones run (hip_lane.c: those in GPU memory first, the reading
+// more of each step's experts, read while the ready ones run (hip_ds4_lane.c: those in GPU memory first, the reading
 // ones after) - an 8-token prompt, then 24 tokens a step at a time; every step's stream out the same bits at both.
 // a token's rows summed in any order but ascending expert id fails it. and the lane's CPU half at the tight budget
 // (forward_lane's cpu_threads: the experts not in GPU memory computed on the CPU) - the same bits again, the CPU's
@@ -15,9 +15,10 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 
@@ -35,17 +36,23 @@ constexpr int kCpuThreads = 6;
 
 static uint64_t run(Weights* w, const std::vector<int32_t>& ids, uint64_t budget, int cpu, uint64_t* streamed,
                     uint64_t* on_cpu) {
-  char ferr[FORWARD_ERR] = "";
-  Forward* f = forward_create(w, kLayers, kCtx, budget, ferr);
+  char ferr[OSMOS_ERR] = "";
+  osmos_clear(ferr);
+  ForwardOptions o = {kLayers, kCtx, budget, nullptr, FORWARD_MAX_TOKENS};
+  o.lane = true, o.cpu_threads = cpu; /* (the lane's CPU half made with the forward) */
+  Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "  %s\n", ferr);
-  CHECK(f && forward_lane(f, cpu, NULL, ferr));
+  CHECK(f);
+  osmos_clear(ferr);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   std::vector<Seq*> ss(kPrompt, s);
+  osmos_clear(ferr);
   CHECK(forward_batch(f, ss.data(), ids.data(), kPrompt, ferr));
   std::vector<float> st((size_t) w->geo.hc * w->geo.n_embd);
   uint64_t h = 1469598103934665603ull;
   for (int p = kPrompt; p < kIds; p++) {
+    osmos_clear(ferr);
     const bool ok = forward_step(f, s, ids[p], ferr);
     if (!ok) std::fprintf(stderr, "  step %d: %s\n", p, ferr);
     CHECK(ok);

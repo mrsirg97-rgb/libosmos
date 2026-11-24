@@ -1,6 +1,7 @@
-/* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4.c: its step; hip_hy4_layer.c: a
+/* the hy4 forward's and sequence's insides (hip_hy4_make.c: the forward made; hip_hy4_step.c: its step; hip_hy4_layer.c: a
    layer's blocks; hip_hy4_seq.c: a sequence) */
 #pragma once
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 
@@ -11,13 +12,14 @@
 #include "osmos/hy4/forward.h"
 #include "osmos/mem/rowread.h"
 #include "osmos/model/engram.h"
+#include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
 #define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
-#define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a step
-                              of 4,096 at 1M was 4.3 GB of scratch; a block a token, the same bits) */
+#define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a
+                              block a token, the same bits) */
 #define HY4_DFLY_KEEP (HY4_MAX_BACK + 1) /* a step's last rows whose drafting snapshot a sequence keeps (a verify's) */
 
 /* matrices that read the same input (a layer's normed attention or FFN input), for a one-token step: each type's
@@ -37,6 +39,7 @@ typedef struct Hy4Joint
 
 struct Hy4Forward
 {
+  OsmosLedger *ledger; /* borrowed (Hy4Options'): every allocation of the forward, its sequences and its drafter */
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
@@ -45,7 +48,7 @@ struct Hy4Forward
   uint32_t *kb_xo, *kb_yo, *vb_xo, *vb_yo;        /* a head's x16 and y offsets (head h's slice of the rows) */
   int32_t *hcnt;                                  /* every head's token count (a chunk's) */
   uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
-                        read only when its group completes - 0.11.0; was a row a position, 6 KB a token) */
+                        read only when its group completes) */
   void **dev;                                     /* the model's tensors on the GPU, by index in its table */
   float *fn_attn[HY4_MAX_LAYERS], *fn_ffn[HY4_MAX_LAYERS], *fn_out; /* iHC's mixes, F32 (the file's, or decoded) */
   float *freqs_swa, *freqs_sparse;                                  /* the ropes' frequencies */
@@ -67,6 +70,7 @@ struct Hy4Forward
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;
   int32_t *overflow;
+  OverflowFlag ovf; /* the flags' reset (osmos/gpu/overflow.h): owed when one failed */
   void *st;                   /* the step's stream (every launch) */
   Hy4Joint j_attn[HY4_MAX_LAYERS], j_ffn[HY4_MAX_LAYERS];
   float *jo_attn, *jo_ffn;    /* their outputs (a token's) */
@@ -96,6 +100,7 @@ struct Hy4Forward
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
   float *ixk, *ixkn, *ixq, *ixw, *scores; /* the indexer (ixkn: the step's keys normed, before their rows) */
+  void *ix_spread;                        /* its spread selection's scratch (hy4_ix_spread_bytes): the forward's own */
   int32_t *sel, *n_sel;
   float *emb, *ekv;                    /* Engram's projection's input and output */
   float *ga, *up, *act;                /* the MLPs */
@@ -110,13 +115,15 @@ struct Hy4Forward
   uint32_t rows;
   hy4_tap_fn tap;
   void *tap_arg;
-  struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_dfly.c) */
+  struct Hy4Dfly *dfly;                /* DFly2, when loaded (hip_hy4_draft.c) */
   int dfly_slot[HY4_MAX_LAYERS];       /* a target layer's draft layer reading it, -1 none */
-  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
+  GpuBufs bufs; /* every GPU and pinned buffer of the forward, recorded as made (hy4_alloc, the step's want[]) -
+                   freed from the record at its destroy, the last made first */
 };
 
 struct Hy4Seq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Hy4Forward *f;
   int32_t pos;
   uint32_t back, prompt_end;
@@ -140,8 +147,10 @@ typedef struct Hy4Run
   uint32_t off, len;
 } Hy4Run;
 
-bool hy4_fail(char *err, const char *why);
-bool hy4_alloc(void *p, uint64_t bytes);
+/* a GPU buffer, or a pinned host one, recorded in b (its ledger's: the forward's, a sequence's or the drafter's
+   record - each freed from it at its owner's destroy) */
+bool hy4_alloc(GpuBufs *b, void *p, uint64_t bytes);
+bool hy4_pinned(GpuBufs *b, void *p, uint64_t bytes);
 /* y = W x for n tokens (W the tensor on the GPU, any type the matvec reads): a token's sums its own */
 bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, const float *x, uint32_t n, float *y,
              bool read);
@@ -160,11 +169,12 @@ bool hy4_joint(Hy4Forward *f, const Hy4Joint *j, uint32_t cols, const float *x, 
 bool hy4_mat_raw(Hy4Forward *f, uint32_t type, const void *w, uint32_t rows, uint32_t cols, const float *x, uint32_t n,
                  float *y, bool read);
 /* a BF16 tensor's values as F32 on the host (read from its file; NULL on failure), an F32 matrix [rows][cols] as Q8_0
-   on the GPU (ggml's rounding) - hip_hy4_dfly.c's */
-float *hy4_host_f32(const Gguf *g, const GgufTensor *t);
-bool hy4_q8_up(const float *x, uint64_t rows, uint32_t cols, void **dev);
-/* DFly2's weights and buffers freed (hip_hy4_dfly.c; none loaded: nothing) */
+   on the GPU (ggml's rounding) - hip_hy4_draft.c's */
+bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev);
+/* DFly2's weights and buffers freed (hip_hy4_draft.c; none loaded: nothing) */
 void hy4_dfly_free(Hy4Forward *f);
+uint64_t hy4_dfly_bytes(const Hy4Forward *f); /* what DFly2 holds (its record): 0 none */
+bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]); /* Hy4Options' dfly: create's */
 
 /* the latent MoE (hip_hy4_moe.c): the router, the experts (the matvecs, or read: the matrix cores), the shared
    expert, the combine norm - into f->y */
@@ -178,3 +188,11 @@ static inline const void *hy4_dev(const Hy4Forward *f, const GgufTensor *t)
   return f->dev[t - f->w->model->tensors];
 }
 static inline const float *hy4_fv(const Hy4Forward *f, const GgufTensor *t) { return (const float *)hy4_dev(f, t); }
+
+/* hip_hy4_resident.c's, for hip_hy4_make.c */
+bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out);
+bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err);
+bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err);
+bool hy4_freqs(Hy4Forward *f, float base, uint32_t dim, float **out);
+bool hy4_joints_make(Hy4Forward *f, uint32_t *most);
+bool hy4_upload(Hy4Forward *f, char *err);

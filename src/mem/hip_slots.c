@@ -2,6 +2,9 @@
 #include <hsa/hsa.h>
 #include <hsa/hsa_ext_amd.h>
 
+#include <stdlib.h>
+
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/mem/hip_slots.h"
 
 /* the GPU's coarse-grained global pool, and the CPU agent its memory is opened to */
@@ -12,7 +15,11 @@ typedef struct Where
   bool has_pool, has_cpu;
 } Where;
 
-static Where where;
+struct HipSlots
+{
+  Where where;
+  OsmosLedger *ledger; /* borrowed */
+};
 
 static hsa_status_t coarse(hsa_amd_memory_pool_t p, void *arg)
 {
@@ -43,28 +50,41 @@ static hsa_status_t agent(hsa_agent_t a, void *arg)
 
 static void *alloc(uint64_t bytes, void *ctx)
 {
-  const Where *w = ctx;
+  HipSlots *h = ctx;
+  const Where *w = &h->where;
   void *dev = NULL;
-  if (!w->has_pool || !w->has_cpu || hsa_amd_memory_pool_allocate(w->pool, bytes, 0, &dev) != HSA_STATUS_SUCCESS)
+  if (!w->has_pool || !w->has_cpu || !ledger_reserve(h->ledger, bytes))
     return NULL;
+  if (hsa_amd_memory_pool_allocate(w->pool, bytes, 0, &dev) != HSA_STATUS_SUCCESS)
+    return ledger_unreserve(h->ledger, bytes), NULL;
   if (hsa_amd_agents_allow_access(1, &w->cpu, NULL, dev) != HSA_STATUS_SUCCESS)
   {
     (void)hsa_amd_memory_pool_free(dev);
-    return NULL;
+    return ledger_unreserve(h->ledger, bytes), NULL;
   }
+  ledger_keep(h->ledger, dev, bytes);
   return dev;
 }
 
 static void release(void *dev, void *ctx)
 {
-  (void)ctx;
+  HipSlots *h = ctx;
+  ledger_release(h->ledger, dev);
   (void)hsa_amd_memory_pool_free(dev);
 }
 
-Slots hip_slots(void)
+HipSlots *hip_slots_create(OsmosLedger *l, char err[OSMOS_ERR])
 {
-  /* the runtime up (HSA under it), then the pool and the CPU once: without them every alloc is refused */
-  if (!where.has_pool && hipInit(0) == hipSuccess)
-    (void)hsa_iterate_agents(agent, &where);
-  return (Slots){alloc, release, &where};
+  HipSlots *h = calloc(1, sizeof *h);
+  if (!h)
+    return osmos_fail(err, "out of memory (the GPU's slots)"), NULL;
+  h->ledger = l;
+  /* the runtime up (HSA under it), then the pool and the CPU: without them every alloc is refused */
+  if (hipInit(0) == hipSuccess)
+    (void)hsa_iterate_agents(agent, &h->where);
+  return h;
 }
+
+void hip_slots_destroy(HipSlots *h) { free(h); }
+
+Slots hip_slots(HipSlots *h) { return (Slots){alloc, release, h}; }

@@ -219,7 +219,7 @@ size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *id
   for (size_t i = 0; i + 1 < len; i++)
     queue(b, buf, start, size, key, (long)i, (long)i + 1, heap, &nh);
   /* the lowest-ranked pair merged, the leftmost among equals, until no pair is a merge - llama.cpp's queue: each
-     merge's new pairs queued, a stale one skipped (0.7.1: the word rescanned each merge, quadratic in its length) */
+     merge's new pairs queued, a stale one skipped */
   while (nh)
   {
     const Pair p = heap_pop(heap, &nh);

@@ -108,7 +108,7 @@ int main() {
   float y[1];
   CHECK(!cpu_mv_known(13) && !cpu_mv_rows(13, x, 256, 0, 1, x, 256, 1, y, 1));  // Q5_K: no CPU decode
   CHECK(!cpu_mv_rows(16, x, 255, 0, 1, x, 256, 1, y, 1) && !cpu_mv_rows(16, x, 256, 2, 1, x, 256, 1, y, 1));
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (const char* name : which == TestModel::kUd ? kUdExperts : kGsqExperts) expert(g, name, 7);

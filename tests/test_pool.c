@@ -237,7 +237,7 @@ static void check(const Pool *p, const PoolUnit *u, size_t n, uint64_t budget)
 
 static void test_refusals(int fd)
 {
-  char err[POOL_ERR];
+  char err[OSMOS_ERR] = "";
   const PoolUnit none = {.n_parts = 0};
   const PoolUnit four = {.n_parts = 4};
   const PoolUnit zero = {.part = {{fd, 0, 0}}, .n_parts = 1};
@@ -256,7 +256,7 @@ static void test_refusals(int fd)
 
 static void test_cold_to_pinned(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const PoolUnit u[] = {{.part = {{fd, 100, 3 * KB}, {fd, 9 * KB + 7, 50}}, .n_parts = 2},
                         {.part = {{fd, 20 * KB, KB}}, .n_parts = 1}};
   Pool *p = make(u, 2, 64 * KB, err);
@@ -286,7 +286,7 @@ static void test_cold_to_pinned(int fd)
 
 static void test_room(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[4];
   for (int i = 0; i < 4; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -321,7 +321,7 @@ static void test_room(int fd)
 /* units of two sizes: memory of the wrong size is kept spare, freed when room is wanted, reused when its size is */
 static void test_sizes(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const PoolUnit u[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1},
                         {.part = {{fd, 8 * KB, 4 * KB}}, .n_parts = 1},
                         {.part = {{fd, 16 * KB, 2 * KB}}, .n_parts = 1},
@@ -354,7 +354,7 @@ static void test_sizes(int fd)
    choice; the allocator's first while the budget has room; units of another size only when none of its size can go */
 static void test_same_size(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const PoolUnit u[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1},
                         {.part = {{fd, 8 * KB, 4 * KB}}, .n_parts = 1},
                         {.part = {{fd, 16 * KB, 2 * KB}}, .n_parts = 1},
@@ -394,7 +394,7 @@ static void test_same_size(int fd)
 /* a failed read: cold again, its memory spare, its holds kept; a pin reads it again, into that memory */
 static void test_failed(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const PoolUnit u[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1}, {.part = {{fd, 4 * KB, 4 * KB}}, .n_parts = 1}};
   Pool *p = make(u, 2, 8 * KB, err);
   assert(p);
@@ -424,7 +424,7 @@ static void test_failed(int fd)
 /* the prefetch: a want reads a cold unit without a hold, taking room only from units wanted later than it */
 static void test_want(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[4];
   for (int i = 0; i < 4; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -477,7 +477,7 @@ static void test_want(int fd)
    before any unit wanted from now on, the least recently released of the stale first, and a want may take its room */
 static void test_stale(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[5];
   for (int i = 0; i < 5; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -524,7 +524,7 @@ static void test_stale(int fd)
    unit read for it the first to go after - the decode's units kept over the prompt's */
 static void test_pass(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[5];
   for (int i = 0; i < 5; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -573,7 +573,7 @@ static void test_pass(int fd)
    its old place is not its place - it goes first */
 static void test_pass_fresh(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[3];
   for (int i = 0; i < 3; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -603,7 +603,7 @@ static void test_pass_fresh(int fd)
    time passes it is the first stale to go */
 static void test_want_fresh(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[3];
   for (int i = 0; i < 3; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -635,7 +635,7 @@ static void test_want_fresh(int fd)
 /* pool_unit_bytes is what a pin takes: units of unaligned ranges, one to three parts, at a read alignment and none */
 static void test_unit_bytes(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const PoolUnit u[3] = {{.part = {{fd, 7, 5000}}, .n_parts = 1},
                          {.part = {{fd, 4095, 2}, {fd, 9000, 8192}}, .n_parts = 2},
                          {.part = {{fd, 1, 1}, {fd, 4096, 4096}, {fd, 12345, 3000}}, .n_parts = 3}};
@@ -668,7 +668,7 @@ static void test_unit_bytes(int fd)
    furthest of its size); a unit not cold, or no room, FULL with nothing changed */
 static void test_place(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[3];
   for (int i = 0; i < 3; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -698,7 +698,7 @@ static void test_place(int fd)
    next unit of its size; a held, reading or cold one is not dropped */
 static void test_drop(int fd)
 {
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[3];
   for (int i = 0; i < 3; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -731,7 +731,7 @@ static void test_drop(int fd)
 static int cycle(int fd, bool ahead)
 {
   enum { N = 6, ROUNDS = 4 };
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   PoolUnit u[N];
   for (int i = 0; i < N; i++)
     u[i] = (PoolUnit){.part = {{fd, (uint64_t)(10 * i) * KB, 4 * KB}}, .n_parts = 1};
@@ -785,7 +785,7 @@ static void test_random(int fd_a, int fd_b)
       u[i].part[k] = (PoolRange){fd, RND() % ((1 << 20) - bytes), bytes};
     }
   }
-  char err[POOL_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const uint64_t budget = 120 * KB;
   Pool *p = make(u, N, budget, err);
   if (!p)
@@ -859,7 +859,7 @@ static void al_free(void *dev, void *ctx) { (void)ctx, free(dev); }
 
 static void test_read_align(int fd)
 {
-  char err[POOL_ERR];
+  char err[OSMOS_ERR] = "";
   const int odd = file("odd.bin", (1 << 20) + 100); /* a size not a multiple of the alignment */
   const PoolUnit u[2] = {{.part = {{fd, 4096 * 3 + 2048, 10000}, {fd, 7, 4096}, {fd, 8192, 4096}}, .n_parts = 3},
                          {.part = {{odd, (1 << 20) + 50, 40}}, .n_parts = 1}}; /* 1: its aligned range past the end */
@@ -929,7 +929,7 @@ static void test_arena_room(int fd)
   uint8_t *m = aligned_alloc(ARENA_GRAIN, bytes);
   Arena *ar = arena_create(m, bytes);
   assert(m && ar);
-  char err[POOL_ERR];
+  char err[OSMOS_ERR] = "";
   memset(&reads, 0, sizeof reads);
   Pool *p = pool_create(u, U, budget, (Slots){ar_alloc, ar_free, ar}, (Fetcher){fake_fetch, &reads, fake_need},
                         ARENA_GRAIN, NULL, NULL, err);

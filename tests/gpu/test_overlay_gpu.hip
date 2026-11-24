@@ -13,9 +13,10 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 
 #define CHECK(x)                                                                 \
@@ -42,7 +43,7 @@ static uint64_t fnv(const void* p, size_t n, uint64_t h) {
 
 // the model at `first` (with `overlay`, or none): a prompt, then kNew greedy steps, every logits row and token hashed
 static Run decode(const std::string& first, const std::string& overlay) {
-  char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", err[FORWARD_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   Gguf* ov = overlay.empty() ? nullptr : gguf_create(overlay.c_str(), gerr);
   CHECK(g && (overlay.empty() || ov));
@@ -50,24 +51,32 @@ static Run decode(const std::string& first, const std::string& overlay) {
   Weights* w = weights_create_with(&wo, werr);
   if (!w) std::fprintf(stderr, "  weights: %s\n", werr);
   CHECK(w);
-  const ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens, true};
+  ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens, true};
+  o.lane = true;
+  osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward: %s\n", err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  osmos_clear(err);
+  CHECK(f);
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   std::vector<int32_t> p(kPrompt);
   uint32_t r = 4242;
   for (auto& x : p) r = r * 1664525u + 1013904223u, x = (int32_t) ((r >> 8) % (V - 1000)) + 100;
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, kPrompt));
   std::vector<Seq*> ss(kPrompt, s);
+  osmos_clear(err);
   CHECK(forward_batch(f, ss.data(), p.data(), kPrompt, err));
   int32_t t;
+  osmos_clear(err);
   CHECK(forward_greedy(f, kPrompt - 1, 1, &t, err));
   std::vector<float> lg(V);
   Run run = {1469598103934665603ull, forward_identity(f)};
   for (int i = 0; i < kNew; i++) {
+    osmos_clear(err);
     CHECK(forward_step(f, s, t, err));
+    osmos_clear(err);
     CHECK(forward_greedy(f, 0, 1, &t, err) && hipDeviceSynchronize() == hipSuccess);
     CHECK(hipMemcpy(lg.data(), forward_logits(f), (size_t) V * 4, hipMemcpyDeviceToHost) == hipSuccess);
     run.hash = fnv(&t, 4, fnv(lg.data(), lg.size() * 4, run.hash));

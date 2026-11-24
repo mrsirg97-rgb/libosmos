@@ -10,6 +10,7 @@
 // gfx1151, the UD-IQ3_XXS set, ~/Models/qwen38/DFlash2/dflash2-Q8_0.gguf and the reference; skipped (77) without them.
 #include <map>
 
+#include "osmos/err.h"
 #include "q4x_ref.h"
 
 extern "C" {
@@ -57,7 +58,7 @@ static double rel_l2(const std::vector<float>& a, const std::vector<float>& b) {
 }
 
 static void step(Q4xForward* f, Q4xSeq* s, const int32_t* tok, uint32_t n) {
-  char err[Q4X_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   if (!q4x_batch(f, s, tok, n, 0, err)) std::fprintf(stderr, "%s\n", err), std::exit(1);
 }
 
@@ -79,34 +80,44 @@ static bool source(void* ctx, void* b, uint64_t n) {
 // refused)
 static std::vector<std::vector<int32_t>> pass(Q4xForward* f, const std::vector<int32_t>& ids, int32_t P,
                                               const std::vector<Round>& rounds, bool junk) {
-  char err[Q4X_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xSeq* s = q4x_seq_create(f, err);
   CHECK(s);
   int32_t d[8];
   float cf[8];
   g_round = -1;
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(f, s, ids[0], 7, 0, 0, d, cf, err) == 7);  // position 0: no context to seed, a draft from none
   if (junk) {
+    osmos_clear(err);
     Q4xSeq* other = q4x_seq_create(f, err);
     Q4xSeq* const both[2] = {other, s};
     const uint32_t lens[2] = {kJunk + 3, (uint32_t) P};
     std::vector<int32_t> tok(lens[0], kJunkToken);
     tok.insert(tok.end(), ids.begin(), ids.begin() + P);
+    osmos_clear(err);
     CHECK(other && q4x_step(f, both, lens, 2, tok.data(), 0, err));
+    osmos_clear(err);
     CHECK(q4x_dflash_seed(f, s, 0, P / 2, err) && q4x_dflash_seed(f, s, P / 2, P, err));
     q4x_seq_destroy(other);
   } else {
     step(f, s, ids.data(), (uint32_t) P);
+    osmos_clear(err);
     CHECK(q4x_dflash_draft(f, s, ids[P], 7, 0, 0, d, cf, err) == -1 && std::strstr(err, "not seeded"));  // not yet
+    osmos_clear(err);
     CHECK(!q4x_dflash_seed(f, s, 0, P + 1, err));                                                       // past the step
+    osmos_clear(err);
     CHECK(q4x_dflash_seed(f, s, 0, P, err));
   }
+  osmos_clear(err);
   CHECK(!q4x_dflash_seed(f, s, P, P + 1, err));  // past the step and the position
   std::vector<std::vector<int32_t>> out;
   for (size_t r = 0; r < rounds.size(); r++) {
     const Round& R = rounds[r];
     CHECK(q4x_seq_position(s) == R.start);
     g_round = (int) r;
+    osmos_clear(err);
     const int n = q4x_dflash_draft(f, s, ids[R.start], 7, 0, 0, d, cf, err);
     if (n != 7) std::fprintf(stderr, "round %zu: %d (%s)\n", r, n, err), std::exit(1);
     out.emplace_back(d, d + n);
@@ -121,6 +132,7 @@ static std::vector<std::vector<int32_t>> pass(Q4xForward* f, const std::vector<i
     }
     int32_t d2[8];
     float cf2[8];
+    osmos_clear(err);
     CHECK(q4x_dflash_draft(f, s, ids[R.start], 7, kConfMin, kCumMin, d2, cf2, err) == want);
     CHECK(!want || (std::memcmp(d2, d, want * 4) == 0 && std::memcmp(cf2, cf, want * 4) == 0));
     g_floored += want, g_drafts += 7;
@@ -128,15 +140,19 @@ static std::vector<std::vector<int32_t>> pass(Q4xForward* f, const std::vector<i
     if (junk) tok.insert(tok.end(), kJunk, kJunkToken);
     step(f, s, tok.data(), (uint32_t) tok.size());
     if (junk && r % 2) {  // rolled back first: the dropped tokens past the position, refused; the kept fed
+      osmos_clear(err);
       CHECK(q4x_seq_rollback(s, kJunk) && !q4x_dflash_seed(f, s, R.start, R.start + (int32_t) tok.size(), err));
+      osmos_clear(err);
       CHECK(q4x_dflash_seed(f, s, R.start, R.start + R.produced, err));
       continue;
     }
+    osmos_clear(err);
     CHECK(q4x_dflash_seed(f, s, R.start, R.start + (int32_t) tok.size(), err));
     if (junk) CHECK(q4x_seq_rollback(s, kJunk));
   }
   if (!junk) {
     g_state.clear();
+    osmos_clear(err);
     CHECK(q4x_seq_save_to(s, sink, &g_state, err));
   }
   q4x_seq_destroy(s);
@@ -147,7 +163,7 @@ int main() {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   std::printf("[test_q4x_dflash_gpu] start\n");
   int ndev = 0;
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", err[Q4X_FWD_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", err[OSMOS_ERR] = "";
   const std::string ref = home_path(kRef);
   FILE* fi = std::fopen((ref + "/ids.txt").c_str(), "r");
   FILE* fp = std::fopen((ref + "/prompt.txt").c_str(), "r");
@@ -175,14 +191,18 @@ int main() {
   std::fclose(fi), std::fclose(fp), std::fclose(fr), std::fclose(fc);
   CHECK(rounds.size() > 10 && rounds[0].start == P);
 
+  osmos_clear(werr);
   Q4xWeights* w = q4x_weights_create(model, nullptr, werr);
   CHECK(w);
+  osmos_clear(werr);
   Q4xDflash* df = q4x_dflash_create(draft, w, werr);
   CHECK(df);
   const int32_t wrong[5] = {5, 15, 25, 35, 44};
-  Q4xOptions o = {kCtx, kStep, false, wrong, 5, df};
+  Q4xOptions o = {kCtx, kStep, false, wrong, 5, df, FIT_BUDGET_NOW};
+  osmos_clear(err);
   CHECK(!q4x_forward_create_with(w, nullptr, &o, err) && std::strstr(err, "tap "));  // taps not the drafter's
   o.tap_layers = nullptr, o.n_taps = 0;
+  osmos_clear(err);
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);
   CHECK(f);
@@ -224,30 +244,42 @@ int main() {
   // loaded into a sequence whose rings hold the prompt's context, one into a new one: the same drafts
   int32_t a[8], b[8];
   const int32_t y = ids[rounds.back().start + rounds.back().produced];
+  osmos_clear(err);
   Q4xSeq *used = q4x_seq_create(f, err), *fresh = q4x_seq_create(f, err);
   CHECK(used && fresh);
   step(f, used, ids.data(), (uint32_t) P);
+  osmos_clear(err);
   CHECK(q4x_dflash_seed(f, used, 0, P, err));
   size_t at = 0;
+  osmos_clear(err);
   CHECK(q4x_seq_load_from(used, g_state.size(), source, &at, err));
   at = 0;
+  osmos_clear(err);
   CHECK(q4x_seq_load_from(fresh, g_state.size(), source, &at, err));
   float ca[8], cb[8];
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(f, used, y, 7, 0, 0, a, ca, err) == 7);
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(f, fresh, y, 7, 0, 0, b, cb, err) == 7);
   CHECK(std::memcmp(a, b, sizeof a - sizeof *a) == 0);
   // a seed past a gap: the context from it on. the used sequence emptied by a load of an empty state (its rings
   // still the prompt's), the prompt again and its second half seeded - against a new sequence the same way
   std::vector<uint8_t> empty;
+  osmos_clear(err);
   Q4xSeq* none = q4x_seq_create(f, err);
+  osmos_clear(err);
   CHECK(none && q4x_seq_save_to(none, sink, &empty, err));
   g_state.swap(empty), at = 0;
+  osmos_clear(err);
   CHECK(q4x_seq_load_from(used, g_state.size(), source, &at, err) && q4x_seq_position(used) == 0);
   for (Q4xSeq* q : {used, none}) {
     step(f, q, ids.data(), (uint32_t) P);
+    osmos_clear(err);
     CHECK(q4x_dflash_seed(f, q, P / 2, P, err));
   }
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(f, used, ids[P], 7, 0, 0, a, ca, err) == 7);
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(f, none, ids[P], 7, 0, 0, b, cb, err) == 7);
   CHECK(std::memcmp(a, b, sizeof a - sizeof *a) == 0);
   q4x_seq_destroy(used), q4x_seq_destroy(fresh), q4x_seq_destroy(none);
@@ -260,7 +292,8 @@ int main() {
   // positions dropped must not stand in for the window's oldest (a ring of the window alone aliased them: up to 6 stale
   // keys read as context). A: W + 100 seeded, 8 more seeded, rolled back, 1 seeded; B: the same W + 101 straight
   const uint32_t W = (uint32_t) df->geo.window, kBig = 2 * W;
-  Q4xOptions ob = {kBig, 512, false, nullptr, 0, df};
+  Q4xOptions ob = {kBig, 512, false, nullptr, 0, df, FIT_BUDGET_NOW};
+  osmos_clear(err);
   Q4xForward* g = q4x_forward_create_with(w, nullptr, &ob, err);
   CHECK(g);
   std::vector<int32_t> toks(W + 109);
@@ -269,24 +302,30 @@ int main() {
     for (uint32_t at = from; at < to; at += 512) {
       const uint32_t n = to - at < 512 ? to - at : 512;
       step(g, q, toks.data() + at, n);
+      osmos_clear(err);
       CHECK(q4x_dflash_seed(g, q, (int32_t) at, (int32_t) (at + n), err));
     }
   };
+  osmos_clear(err);
   Q4xSeq *ra = q4x_seq_create(g, err), *rb = q4x_seq_create(g, err);
   CHECK(ra && rb);
   read(ra, 0, W + 100);
   std::vector<int32_t> eight(toks.begin() + W + 100, toks.begin() + W + 108);
   for (int32_t& x : eight) x = kJunkToken;  // another turn's tokens: seeded, then dropped
   step(g, ra, eight.data(), 8);
+  osmos_clear(err);
   CHECK(q4x_dflash_seed(g, ra, (int32_t) W + 100, (int32_t) W + 108, err) && q4x_seq_rollback(ra, 8));
   read(ra, W + 100, W + 101);
   read(rb, 0, W + 101);
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(g, ra, toks[W + 101], 7, 0, 0, a, ca, err) == 7);
+  osmos_clear(err);
   CHECK(q4x_dflash_draft(g, rb, toks[W + 101], 7, 0, 0, b, cb, err) == 7);
   CHECK(std::memcmp(a, b, 7 * 4) == 0 && std::memcmp(ca, cb, 7 * 4) == 0);
   // a seed after another step (a batch of more than 64 sequences is several: the later ones' taps over its): refused
   step(g, ra, toks.data(), 4);
   step(g, rb, toks.data(), 4);
+  osmos_clear(err);
   CHECK(!q4x_dflash_seed(g, ra, (int32_t) W + 101, (int32_t) W + 105, err) && std::strstr(err, "another step"));
   q4x_seq_destroy(ra), q4x_seq_destroy(rb);
   q4x_forward_destroy(g);

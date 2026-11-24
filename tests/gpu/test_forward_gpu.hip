@@ -31,10 +31,11 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/gpu/mm.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 
 #include "test_fit.h"
@@ -249,16 +250,18 @@ int main() {
     std::printf("[test_forward_gpu] skipped: no oracle dump (oracle/layer_dump.py) or no GPU\n");
     return 77;
   }
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create((mdir + "DeepSeek-V4.1-Flash-1017-GSQ-RCO-IQ2_XXS-00001-of-00004.gguf").c_str(), err);
   Gguf* eg = gguf_create((mdir + "DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf").c_str(), err);
   CHECK(g && eg);
   Weights* w = weights_create(g, eg, werr);
   CHECK(w);
   CHECK(kLayers <= w->geo.n_layers);
+  osmos_clear(ferr);
   CHECK(!forward_create(w, 0, 64, kBudget, ferr) && !forward_create(w, kLayers, 64, 64ull << 20, ferr));
   std::printf("  refusals: 0 layers; a budget below the layers' weights (%s)\n", ferr);
   Forward* f = nullptr;
+  osmos_clear(ferr);
   TestFit fit = {[&](uint64_t b) { return (f = forward_create(w, kLayers, 64, b, ferr)) != nullptr; },
                  [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
                  [&] { forward_destroy(f), f = nullptr; }};
@@ -277,6 +280,7 @@ int main() {
     P.d.clear();
     P.force = run == 1;
     forward_probe(f, run < 2 ? probe : nullptr, &P);
+    osmos_clear(ferr);
     Seq* s = seq_create(f, ferr);
     CHECK(s);
     uint64_t h = 1469598103934665603ull;
@@ -319,13 +323,18 @@ int main() {
   // a step's most tokens its own (forward_create_with's max_tokens): a batch of them taken, one more refused
   {
     const ForwardOptions o = {kLayers, (uint32_t) MM_MAX_TOKENS + 64, kBudget, nullptr, MM_MAX_TOKENS};
+    osmos_clear(ferr);
     CHECK(!forward_create_with(w, nullptr, ferr));
+    osmos_clear(ferr);
     Forward* small = forward_create_with(w, &o, ferr);
     CHECK(small);
+    osmos_clear(ferr);
     Seq* s0 = seq_create(small, ferr);
     std::vector<int32_t> toks(MM_MAX_TOKENS + 1, 0);
     std::vector<Seq*> ss(MM_MAX_TOKENS + 1, s0);
+    osmos_clear(ferr);
     CHECK(!forward_batch(small, ss.data(), toks.data(), MM_MAX_TOKENS + 1, ferr));
+    osmos_clear(ferr);
     CHECK(forward_batch(small, ss.data(), toks.data(), MM_MAX_TOKENS, ferr));
     seq_destroy(s0);
     forward_destroy(small);
@@ -334,19 +343,25 @@ int main() {
   {  // a small step's forward (max_tokens 500: its buffers 512 rows): a batch of 500 taken, 501 refused, and the ids
      // a token at a time the stream's bits of the forward above (print[2])
     const ForwardOptions o = {kLayers, 1024, kBudget, nullptr, 500};
+    osmos_clear(ferr);
     Forward* small = forward_create_with(w, &o, ferr);
     CHECK(small);
+    osmos_clear(ferr);
     Seq* s0 = seq_create(small, ferr);
     std::vector<int32_t> toks(501, 0);
     std::vector<Seq*> ss(501, s0);
+    osmos_clear(ferr);
     CHECK(!forward_batch(small, ss.data(), toks.data(), 501, ferr));
+    osmos_clear(ferr);
     CHECK(forward_batch(small, ss.data(), toks.data(), 500, ferr));
     seq_destroy(s0);
+    osmos_clear(ferr);
     Seq* s = seq_create(small, ferr);
     CHECK(s);
     uint64_t h = 1469598103934665603ull;
     std::vector<float> out((size_t) w->geo.hc * w->geo.n_embd);
     for (int p = 0; p < P.T; p++) {
+      osmos_clear(ferr);
       CHECK(forward_step(small, s, (int32_t) ids.v[p], ferr));
       CHECK(hipMemcpy(out.data(), forward_stream(small), out.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
       for (size_t i = 0; i < out.size() * 4; i++) h = (h ^ ((const uint8_t*) out.data())[i]) * 1099511628211ull;

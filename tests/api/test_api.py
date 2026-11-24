@@ -70,6 +70,7 @@ class Served:
     model = MODEL
     settings = {}  # a class's own pack settings beside these
     env = {}  # a class's own environment for osmos-api
+    args = []  # a class's own flags for osmos-api
 
     @classmethod
     def setUpClass(cls):
@@ -79,7 +80,7 @@ class Served:
             json.dump(dict({"pack": "test", "model": cls.model, "max_context": 4096, "no_guess": True}, **cls.settings), f)
         cls.port = free_port()
         env = dict(os.environ, FAKE_DIR=cls.dir, **cls.env)
-        cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE], env=env,
+        cls.proc = subprocess.Popen([API, "--config", cls.cfg, "--port", str(cls.port), "--engine", FAKE] + cls.args, env=env,
                                     stderr=subprocess.DEVNULL)
         for _ in range(200):
             try:
@@ -351,6 +352,59 @@ class Api(Served, unittest.TestCase):
         while time.time() - t0 < 3 and not any(l.startswith("STOP ") for l in self.log()):
             time.sleep(0.05)
         self.assertTrue(any(l.startswith("STOP ") for l in self.log()), "no STOP within 3 s")
+
+    def test_6m_fields_allowlist(self):  # 0.16.0: a field osmos does not know refused, named - never ignored (a
+        self.ready()                       # misspelled max_token ran the request unbounded); a client's own labels taken
+        base = {"messages": [{"role": "user", "content": "x"}], "max_tokens": 2, "reasoning_effort": "none"}
+        for bad in ({"max_token": 2}, {"foo": 1}, {"functions": []}):
+            r = self.post(dict(base, **bad))
+            self.assertEqual(r.status, 400, bad)
+            self.assertIn(next(iter(bad)), r.read().decode())
+        r = self.post(dict(base, store=True))
+        self.assertEqual(r.status, 400)
+        self.assertIn("store", r.read().decode())
+        ok = dict(base, model="osmos-test", user="rig", metadata={"k": "v"}, parallel_tool_calls=True, store=False)
+        r = self.post(ok)
+        self.assertEqual(r.status, 200, r.read())
+
+    def test_6l_request_deadline(self):  # 0.16.0: a request whole within its deadline from its first byte - 10 s for
+        self.ready()                       # its headers, a second a MB of body past them - a trickle cut (408), not
+        for head_first in (True, False):   # held while each byte beats the 10 s idle (a byte every 9 s: hours)
+            s = socket.create_connection(("127.0.0.1", self.port))
+            body = json.dumps({"messages": [{"role": "user", "content": "x"}]}).encode()
+            head = b"POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Length: %d\r\n\r\n" % len(body)
+            trickle = head if head_first else body
+            if not head_first:
+                s.sendall(head)
+            t0, got = time.time(), b""
+            s.settimeout(1.0)
+            for b in trickle:
+                try:
+                    s.send(bytes([b]))
+                except OSError:
+                    break
+                try:
+                    got = s.recv(4096)
+                    if got:
+                        break
+                except socket.timeout:
+                    pass
+                time.sleep(1.0)
+                if time.time() - t0 > 30:
+                    break
+            s.close()
+            took = time.time() - t0
+            self.assertIn(b"408", got, "the %s trickled: no 408 (%.1f s)" % ("headers" if head_first else "body", took))
+            self.assertLess(took, 16)
+
+    def test_6k_parse_budget(self):  # 0.16.0: a tree's memory bounded (json_parse_within) - the body's and a call's
+        self.ready()                   # arguments' alike; a body past API_BODY_MAX (8 MB, from 32) refused unread
+        tiny = "[" + ",".join(["0"] * (1 << 19)) + "]"  # ~1 MB of tiny values: a tree ~65x its bytes, past 4 x 8 MB
+        r = self.post(None, raw=tiny.encode())
+        self.assertIn(r.status, (400, 413))
+        self.assertIn("memory budget", r.read().decode())
+        r = self.post(None, raw=b"x" * (9 << 20))
+        self.assertEqual(r.status, 413)
 
     def test_6j_early_refusals_read(self):  # 0.7.1: a refusal before the body was read reached the client as a reset
         self.ready()                         # (the socket closed with its bytes unread), and Content-Length was lax
@@ -783,10 +837,65 @@ class Browser(Served, unittest.TestCase):
 
 
 @unittest.skipUnless(os.path.exists(MODEL), "no UD-IQ1_M first shard (the tokenizer's)")
+class AllowedOrigin(Served, unittest.TestCase):
+    """--allow-origin (0.16.0): a named origin's requests taken - its preflight answered, every response it reads,
+    a stream's and an error's too, carrying CORS's Access-Control-Allow-Origin (its own, never *) and Vary: Origin;
+    any other origin refused as before (0.15.2)"""
+    ALLOWED = "http://localhost:5173"
+    args = ["--allow-origin", ALLOWED, "--allow-origin", "https://app.example"]
+
+    def send(self, headers, method="POST", path="/v1/chat/completions", body=None):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        b = body if body is not None else {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+                                           "reasoning_effort": "none"}
+        c.request(method, path, body=json.dumps(b) if method == "POST" else None, headers=headers)
+        r = c.getresponse()
+        return r.status, dict((k.lower(), v) for k, v in r.getheaders()), r.read()
+
+    def test_1_preflight(self):
+        self.ready()
+        st, h, _ = self.send({"Origin": self.ALLOWED, "Access-Control-Request-Method": "POST",
+                              "Access-Control-Request-Headers": "content-type, authorization"}, "OPTIONS")
+        self.assertEqual(st, 204)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        self.assertIn("POST", h.get("access-control-allow-methods", ""))
+        self.assertIn("content-type", h.get("access-control-allow-headers", "").lower())
+        self.assertIn("Origin", h.get("vary", ""))
+        st, _, _ = self.send({"Origin": "https://evil.example", "Access-Control-Request-Method": "POST"}, "OPTIONS")
+        self.assertEqual(st, 403)
+
+    def test_2_responses_carry_it(self):
+        self.ready()
+        self.reply("ok" + EOS)
+        st, h, _ = self.send({"Origin": self.ALLOWED, "Content-Type": "application/json"})
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, body={"messages": []})  # an error's too
+        self.assertEqual(st, 400)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        self.reply("ok" + EOS)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, body={"messages": [{"role": "user", "content": "hi"}],
+                                                             "max_tokens": 2, "stream": True, "reasoning_effort": "none"})
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+        st, h, _ = self.send({"Origin": self.ALLOWED}, "GET", "/health")
+        self.assertEqual(st, 200)
+        self.assertEqual(h.get("access-control-allow-origin"), self.ALLOWED)
+
+    def test_3_others_refused(self):
+        self.ready()
+        for origin in ("https://evil.example", "null", "http://localhost:5174", self.ALLOWED + "/"):
+            st, h, b = self.send({"Origin": origin})
+            self.assertEqual(st, 403, origin)
+            self.assertNotIn("access-control-allow-origin", h)
+        st, h, _ = self.send({})  # no Origin: a local client's, as ever, no CORS header
+        self.assertNotIn("access-control-allow-origin", h)
+
+
 class KeepAlive(Served, unittest.TestCase):
     """0.11.2: a stream silent past the keep-alive (a long prompt's read) gets SSE comments - a client's idle timeout
     not taken for a dead server (its retry read the prompt again from the start, and timed out again)"""
-    env = {"OSMOS_API_KEEPALIVE_MS": "1000"}
+    args = ["--keepalive-ms", "1000"]  # (0.16.0: the env OSMOS_API_KEEPALIVE_MS, an option now)
 
     def test_a_silent_read_kept_alive(self):
         self.ready()
@@ -877,6 +986,65 @@ class KvQ8(Served, unittest.TestCase):
         self.assertIn("kv_q8", r.stderr)
 
 
+class Profile(Served, unittest.TestCase):
+    """osmos.json's profile and rope_stages: osmos-serve's --profile and --rope-stages (0.16.0: the INK2_PROFILE and
+    OSMOS_LFM3_STAGES env knobs as options); profile a bool alone, rope_stages a string alone"""
+    settings = {"profile": True, "rope_stages": "0:1,160000:4"}
+
+    def test_0_passed_on(self):
+        self.ready()
+        args = self.log()[0].split()
+        self.assertIn("--profile", args)
+        self.assertEqual(args[args.index("--rope-stages") + 1], "0:1,160000:4")
+
+    def test_1_refused(self):
+        for bad in ({"profile": 1}, {"rope_stages": 4}, {"rope_stages": ""}):
+            d = tempfile.mkdtemp()
+            cfg = os.path.join(d, "osmos.json")
+            with open(cfg, "w") as f:
+                json.dump({"pack": "test", "model": MODEL, "max_context": 4096, **bad}, f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn(next(iter(bad)), r.stderr)
+
+
+class SlotsAndStats(Served, unittest.TestCase):
+    """osmos.json's slots and stats: osmos-serve's --no-slots / --slot-* and --stats (0.16.0: the env knobs
+    OSMOS_SLOT_KEEP, _DIR, _CAP, _GB, _RAM_GB, _MIN, _DAYS and OSMOS_STATS, options now); each its type and range"""
+    settings = {"slots": {"keep": True, "dir": "/tmp/osmos-slots-test", "cap": 6, "gb": 12.5, "ram_gb": 4,
+                          "min": 2048, "days": 3}, "stats": True}
+
+    def test_0_passed_on(self):
+        self.ready()
+        args = self.log()[0].split()
+        for flag, value in (("--slot-dir", "/tmp/osmos-slots-test"), ("--slot-cap", "6"), ("--slot-gb", "12.5"),
+                            ("--slot-ram-gb", "4"), ("--slot-min", "2048"), ("--slot-days", "3")):
+            self.assertEqual(args[args.index(flag) + 1], value, flag)
+        self.assertIn("--stats", args)
+        self.assertNotIn("--no-slots", args)
+
+    def test_1_refused(self):
+        for bad in ({"slots": {"keep": 1}}, {"slots": {"cap": -1}}, {"slots": {"gb": "x"}}, {"slots": {"what": 1}},
+                    {"slots": []}, {"stats": 1}):
+            d = tempfile.mkdtemp()
+            cfg = os.path.join(d, "osmos.json")
+            with open(cfg, "w") as f:
+                json.dump({"pack": "test", "model": MODEL, "max_context": 4096, **bad}, f)
+            r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                               capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(r.returncode, 0, bad)
+            self.assertIn(next(iter(bad)), r.stderr)
+
+
+class NoSlots(Served, unittest.TestCase):
+    settings = {"slots": {"keep": False}}
+
+    def test_0_passed_on(self):
+        self.ready()
+        self.assertIn("--no-slots", self.log()[0].split())
+
+
 class Npu(Served, unittest.TestCase):
     """osmos.json's npu (the NPU's kernels' directory) and npu_share: osmos-serve's --npu and --npu-share (0.7.0:
     forward_npu); a share in (0, 1) alone, the directory a string, the share nothing without it"""
@@ -929,6 +1097,19 @@ class QwenApi(Served, unittest.TestCase):
     def setUpClass(cls):
         super().setUpClass()
         cls.tpl = qwen_template()
+
+    def test_parse_budget_arguments(self):  # 0.16.0: a call's arguments re-parsed (its template takes an object) -
+        self.ready()                          # their tree bounded as the body's (API_TREE_MAX), refused past it
+        tiny = "[" + ",".join(["0"] * (1 << 19)) + "]"
+        call = {"messages": [{"role": "user", "content": "x"},
+                             {"role": "assistant", "content": None,
+                              "tool_calls": [{"id": "c", "type": "function",
+                                              "function": {"name": "f", "arguments": tiny}}]},
+                             {"role": "tool", "tool_call_id": "c", "content": "ok"},
+                             {"role": "user", "content": "y"}]}
+        r = self.post(call)
+        self.assertEqual(r.status, 400)
+        self.assertIn("memory budget", r.read().decode())
 
     def prompt(self, messages, tools=None, thinking=True, effort=None, preserve=None):
         kw = {"messages": messages, "add_generation_prompt": True, "enable_thinking": thinking}

@@ -4,11 +4,13 @@
 // tok/s (past 256 tokens), the answer's tok/s and a hash of its tokens (the same hash: the same tokens). a prompt
 // file is token ids, comma separated (tools/bench/prompts.py writes them).
 // environment: MODEL (a first shard: unsloth's UD-IQ1_M, say; ENGRAM its Engram file where it has one) or MODEL_DIR
-// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's
-// osmos-picks.bin), GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json),
-// CPU_THREADS (forward_lane's CPU half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids),
-// PICKS_OUT=file (every pick of the run, [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed
-// a layer ahead: ForwardOptions' no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for the model's: weights_create_with).
+// (ds1017's, default ~/models/ds1017), PICKS (forward_create_ranked's profile: the model's osmos-picks.bin),
+// GREEDY=1 (the picks forward_greedy's), DRAFT=dir (DSpark: dspark.bin, dspark.json), CPU_THREADS (forward_lane's CPU
+// half), MAX_CTX (default 4096), IDS=file (the undrafted answers' token ids), PICKS_OUT=file (every pick of the run,
+// [layer][expert] uint64: a profile for PICKS), NO_GUESS=1 (no experts guessed a layer ahead: ForwardOptions'
+// no_guess), AHEAD_LIMIT=bytes (the reads ahead read at once: its ahead_limit), OVERLAY=file (tensors standing in for
+// the model's: weights_create_with); CPU_CORES, ALL_ROWS, NPU / NPU_SHARE, DRAFT_CONF / DRAFT_CUM / DRAFT_MAX where
+// they are read.
 // prints "window prompt|decode <start> <end> <tokens>" (epoch seconds) for each prompt read and answer: energy by
 // tools/power.py's samples in them (tools/bench/energy.py).
 // ROUTES_OUT=file (every layer's routing as it runs, the "route_idx" probe: per record int32 layer, position, n,
@@ -31,8 +33,8 @@ extern "C" {
 #include "osmos/run/fit.h"
 #include "osmos/run/gpu.h"
 #include "osmos/cpu/lane.h"
-#include "osmos/run/forward.h"
-#include "osmos/run/drafter.h"
+#include "osmos/ds4/forward.h"
+#include "osmos/ds4/drafter.h"
 #include "osmos/run/engine.h"  // the drafting floors (osmos-serve's)
 }
 
@@ -68,7 +70,7 @@ static FILE* g_ids;             // IDS=file: each undrafted answer's token ids, 
 
 static int32_t pick(Forward* f, std::vector<float>& lg, uint32_t V, uint32_t row) {
   if (g_greedy) {
-    char e[FORWARD_ERR] = "";
+    char e[OSMOS_ERR] = "";
     int32_t id = -1;
     if (!forward_greedy(f, row, 1, &id, e)) std::fprintf(stderr, "greedy: %s\n", e), std::_Exit(1);
     return id;
@@ -88,7 +90,7 @@ static double epoch() {  // seconds since the epoch: tools/power.py's samples ar
 }
 
 static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& ids, int n, uint64_t* h, bool windows = true) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Seq* s = seq_create(f, err);
   CHECK(s);
   const uint32_t P = (uint32_t) ids.size(), V = w->geo.n_vocab;
@@ -113,7 +115,7 @@ static double answer(Forward* f, const Weights* w, const std::vector<int32_t>& i
   const auto t0 = std::chrono::steady_clock::now();
   const double te0 = epoch();
   if (g_draft) {
-    char err2[FORWARD_ERR] = "";
+    char err2[OSMOS_ERR] = "";
     CHECK(drafter_seed(g_draft, s, (int32_t) P > kRing ? (int32_t) P - kRing : 0, (int32_t) P, err2));
     int32_t pos = (int32_t) P, dr[DRAFTER_BLOCK];
     float cf[DRAFTER_BLOCK];
@@ -175,7 +177,7 @@ int main(int argc, char** argv) {
   const char* md = std::getenv("MODEL_DIR");
   const std::string home = std::getenv("HOME") ? std::getenv("HOME") : "",
                     mdir = md ? std::string(md) + "/" : home + "/models/ds1017/";
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   // MODEL: a model's first shard (unsloth's UD: its Engram its own, ENGRAM unset); else ds1017's in MODEL_DIR
   const char* mp = std::getenv("MODEL");
   const char* ep = std::getenv("ENGRAM");
@@ -234,29 +236,32 @@ int main(int argc, char** argv) {
   } b{w, o, cpu_threads, cpu_pin, nullptr};
   auto unbuild = [](void* ctx) {
     Built* z = (Built*) ctx;
-    drafter_destroy(g_draft), forward_destroy(z->f);
+    forward_destroy(z->f); /* (its drafter with it) */
     g_draft = nullptr, z->f = nullptr;
   };
-  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[FIT_ERR]) -> bool {
+  auto build = [](void* ctx, uint64_t budget, uint64_t* built, uint64_t* room, char err[OSMOS_ERR]) -> bool {
     Built* z = (Built*) ctx;
-    char ferr[FORWARD_ERR] = "";
+    char ferr[OSMOS_ERR] = "";
     z->o.budget = budget;
-    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) && forward_lane(z->f, z->cpu_threads, z->cpu_pin, ferr);
-    if (ok && std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu): NPU=<its kernel's dir>, NPU_SHARE
-      ok = forward_npu(z->f, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr);
-    if (ok && std::getenv("DRAFT")) ok = (g_draft = drafter_create(z->f, std::getenv("DRAFT"), ferr)) != nullptr;
+    /* the forward whole: its lane, the NPU (NPU=<its kernels' dir>, NPU_SHARE), the drafter (DRAFT=<dir>) */
+    z->o.lane = true, z->o.cpu_threads = z->cpu_threads, z->o.cpu_cores = z->cpu_pin;
+    z->o.npu = std::getenv("NPU");
+    z->o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
+    z->o.drafter = std::getenv("DRAFT");
+    bool ok = (z->f = forward_create_with(z->w, &z->o, ferr)) != nullptr;
+    g_draft = ok ? forward_drafter(z->f) : nullptr;
     Seq* s = ok ? seq_create(z->f, ferr) : nullptr;  // an answer's sequence counted, then let go
     ok = ok && s && forward_room(z->f, room);
     seq_destroy(s);
     if (!ok) {
-      drafter_destroy(g_draft), forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
-      return std::snprintf(err, FIT_ERR, "%s", ferr), false;
+      forward_destroy(z->f), g_draft = nullptr, z->f = nullptr;
+      return std::snprintf(err, OSMOS_ERR, "%s", ferr), false;
     }
     *built = forward_budget(z->f);
     return true;
   };
   uint64_t sized_to = 0;
-  char zerr[FIT_ERR] = "";
+  char zerr[OSMOS_ERR] = "";
   if (sized ? !fit_sized(build, unbuild, &b, FIT_HEADROOM, &sized_to, zerr)
             : !build(&b, budget, &sized_to, &sized_to, zerr))
     std::fprintf(stderr, "build: %s\n", zerr), std::_Exit(1);
@@ -282,8 +287,8 @@ int main(int argc, char** argv) {
   if (const char* ip = std::getenv("IDS")) CHECK((g_ids = std::fopen(ip, "w")));
   std::printf("loaded %.0fs\n", std::chrono::duration<double>(std::chrono::steady_clock::now() - l0).count());
   uint64_t h = 1469598103934665603ull;
-  answer(f, w, read_ids(argv[4]), 64, &h, false);  // the warm-up, as maya's bench: no energy windows (0.7.1: energy.py
-                                                   // summed it into the questions', where q4x_bench has none)
+  answer(f, w, read_ids(argv[4]), 64, &h, false);  // the warm-up, as maya's bench: no energy windows (energy.py
+                                                   // would sum it into the questions')
   for (int i = 5; i < argc; i++) {
     h = 1469598103934665603ull;
     g_drafted = g_accepted = g_rounds = 0, g_draft_ms = g_verify_ms = 0;
@@ -320,7 +325,6 @@ int main(int argc, char** argv) {
     std::printf("picks: %llu to %s\n", (unsigned long long) total, po);
   }
   if (routes) forward_probe(f, nullptr, nullptr), std::fclose(routes);
-  drafter_destroy(g_draft);
-  forward_destroy(f);
+  forward_destroy(f); /* (its drafter with it) */
   return 0;
 }

@@ -10,6 +10,7 @@
 #include <unistd.h>
 
 #include "api.h"
+#include "osmos/err.h"
 
 /* osmos-serve as the child: started with --parallel (every line carries its rid), its lines read by one thread and
    handed to the run they name; a run's GEN written under the lock. the child gone: every run ends with why */
@@ -72,7 +73,7 @@ static void run_line(Run *r, const char *what, const char *l)
     pthread_mutex_lock(&r->mu);
     r->prompt_n = total, r->prompt_ms = ms, r->reused = reused;
     pthread_mutex_unlock(&r->mu);
-    /* a request's prompt: what it reused and from where, what it read (0.11.3: a long wait's cause in the log -
+    /* a request's prompt: what it reused and from where, what it read (a long wait's cause in the log -
        held: the conversation as kept; rollback, prompt-point, user-point: back to there; slot: a kept one taken
        back; none: read whole) - a line a step, how far it is (held: the tokens in the state so far) */
     const unsigned to_read = total > reused ? total - reused : 0, done = held > reused ? held - reused : 0;
@@ -152,18 +153,18 @@ static void *reader(void *arg)
   return NULL;
 }
 
-bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR])
+bool engine_start(Engine *e, char *const argv[], bool spec, char err[OSMOS_ERR])
 {
   int in[2], out[2];
   if (pipe2(in, O_CLOEXEC) || pipe2(out, O_CLOEXEC))
-    return snprintf(err, API_ERR, "pipes: %s", strerror(errno)), false;
+    return osmos_fail(err, "pipes: %s", strerror(errno)), false;
   pthread_mutex_init(&e->mu, NULL);
   pthread_mutex_init(&e->wmu, NULL);
   pthread_cond_init(&e->ready_cv, NULL);
   e->spec = spec, e->next_rid = 1;
   e->pid = fork();
   if (e->pid < 0)
-    return snprintf(err, API_ERR, "fork: %s", strerror(errno)), false;
+    return osmos_fail(err, "fork: %s", strerror(errno)), false;
   if (e->pid == 0)
   {
     prctl(PR_SET_PDEATHSIG, SIGTERM); /* this server gone (rig's stop): the engine with it */
@@ -176,7 +177,7 @@ bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR])
   e->in_fd = in[1], e->out_fd = out[0];
   signal(SIGPIPE, SIG_IGN); /* a write to a closed connection or a dead child: an error, not the end */
   if (pthread_create(&e->reader, NULL, reader, e))
-    return snprintf(err, API_ERR, "the engine's reader did not start"), false;
+    return osmos_fail(err, "the engine's reader did not start"), false;
   return true;
 }
 
@@ -189,20 +190,20 @@ bool engine_ready(Engine *e)
 }
 
 Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, const Sampling *s,
-                char err[API_ERR])
+                char err[OSMOS_ERR])
 {
   Run *r = calloc(1, sizeof *r);
   size_t cap = 64 + 12 * n;
   char *msg = malloc(cap);
   if (!r || !msg)
-    return free(r), free(msg), snprintf(err, API_ERR, "out of memory"), NULL;
+    return free(r), free(msg), osmos_fail(err, "out of memory"), NULL;
   pthread_mutex_init(&r->mu, NULL);
   pthread_cond_init(&r->cv, NULL);
   pthread_mutex_lock(&e->mu);
   if (!e->ready || e->dead)
   {
     pthread_mutex_unlock(&e->mu);
-    return free(r), free(msg), snprintf(err, API_ERR, "the engine is not ready"), NULL;
+    return free(r), free(msg), osmos_fail(err, "the engine is not ready"), NULL;
   }
   r->rid = e->next_rid++;
   r->next = e->runs, e->runs = r; /* registered before its GEN: no line of it comes unclaimed */
@@ -210,10 +211,10 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
   size_t w = (size_t)snprintf(msg, cap, "GEN %u rid=%lld spec=%d ", max_new, r->rid, e->spec ? 1 : 0);
   if (mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
     w += (size_t)snprintf(msg + w, cap - w, "mark=%u ", mark);
-  if (s && s->temperature > 0) /* sampled (0.14.0): the tokens of (seed, position) - the same seed, the same answer */
+  if (s && s->temperature > 0) /* sampled: the tokens of (seed, position) - the same seed, the same answer */
   {
     w += (size_t)snprintf(msg + w, cap - w, "temp=%.9g top_p=%.9g seed=%llu ", s->temperature, s->top_p, s->seed);
-    if (s->top_k) /* 0.15.2 */
+    if (s->top_k)
       w += (size_t)snprintf(msg + w, cap - w, "top_k=%u ", s->top_k);
   }
   for (size_t i = 0; i < n; i++)
@@ -259,7 +260,7 @@ void engine_release(Engine *e, Run *r)
 }
 
 /* the end: QUIT sent (osmos-serve sets every conversation aside and writes its RAM's to their folder) and the engine's
-   exit awaited, wait_s at most - then killed. true when it exited by itself (0.7.1: a stop killed it, by PDEATHSIG) */
+   exit awaited, wait_s at most - then killed. true when it exited by itself */
 bool engine_quit(Engine *e, int wait_s)
 {
   pthread_mutex_lock(&e->wmu);

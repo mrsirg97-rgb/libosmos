@@ -5,6 +5,7 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/qtype.h"
 
@@ -177,7 +178,8 @@ static void test_round_trip(void)
   {
     Buf w = model(three, 3, align, 0, 0, &kv, 8);
     const char *path = write_file("one.gguf", &w);
-    char err[GGUF_ERR] = "";
+    char err[OSMOS_ERR] = "";
+    osmos_clear(err);
     Gguf *g = gguf_create(path, err);
     if (!g)
       fprintf(stderr, "  gguf_create: %s\n", err);
@@ -227,7 +229,8 @@ static void test_split(void)
   const char *first = write_file("m-00001-of-00002.gguf", &a);
   char p1[512];
   snprintf(p1, sizeof p1, "%s", first);
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Gguf *g = gguf_create(p1, err);
   if (!g)
     fprintf(stderr, "  gguf_create: %s\n", err);
@@ -240,10 +243,12 @@ static void test_split(void)
   snprintf(p2, sizeof p2, "%s/m-00002-of-00002.gguf", dir);
   unlink(p2);
   err[0] = 0;
+  osmos_clear(err);
   assert(gguf_create(p1, err) == NULL && strstr(err, "00002") != NULL);
-  char refused[GGUF_ERR];
+  char refused[OSMOS_ERR];
   snprintf(refused, sizeof refused, "%s", err);
   /* the first shard alone (its metadata: a tokenizer's): read without its siblings, only its own tensors */
+  osmos_clear(err);
   Gguf *h = gguf_header(p1, err);
   assert(h && h->n_files == 1 && h->n_tensors == 2 && gguf_kv(h, "split.count") && !gguf_tensor(h, "c.iq1_m"));
   gguf_destroy(h);
@@ -255,6 +260,7 @@ static void test_split(void)
     char po[512];
     snprintf(po, sizeof po, "%s", odd);
     err[0] = 0;
+    osmos_clear(err);
     assert(gguf_create(po, err) == NULL && strstr(err, "-00001-of-00002"));
   }
   free(a.b);
@@ -274,7 +280,8 @@ static void test_truncated(void)
   {
     Buf cut = {w.b, n, n};
     const char *path = write_file("cut.gguf", &cut);
-    char err[GGUF_ERR] = "";
+    char err[OSMOS_ERR] = "";
+    osmos_clear(err);
     Gguf *g = gguf_create(path, err);
     if (n < w.len - last_pad)
     {
@@ -325,7 +332,8 @@ static void test_corrupt(void)
     memcpy(c.b, w.b, w.len);
     memcpy(c.b + patches[i].at, &patches[i].value, (size_t)patches[i].width);
     const char *path = write_file("bad.gguf", &c);
-    char err[GGUF_ERR] = "";
+    char err[OSMOS_ERR] = "";
+    osmos_clear(err);
     Gguf *g = gguf_create(path, err);
     if (g)
       fprintf(stderr, "  %s: accepted\n", patches[i].what);
@@ -335,7 +343,8 @@ static void test_corrupt(void)
   /* a duplicate tensor name */
   const Spec dup[] = {three[0], three[0]};
   Buf d = model(dup, 2, 0, 0, 0, NULL, 0);
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   assert(gguf_create(write_file("dup.gguf", &d), err) == NULL && err[0] != 0);
   free(d.b);
   free(w.b);
@@ -351,8 +360,9 @@ static void test_mxfp8(void)
   const Spec mx[] = {{"e.mxfp8", 43, 2, {64, 32}, vals / 32 * 33}, three[0]};
   const Spec f8[] = {{"e.f8_e4m3", 43, 2, {64, 32}, vals}, three[0]};
   const Spec small[] = {{"e.short", 43, 2, {64, 32}, vals / 2}, {"z.f32", 0, 1, {1024}, 4096}}; /* (past its MXFP8) */
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Buf w = model(mx, 2, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   Gguf *g = gguf_create(write_file("mxfp8.gguf", &w), err);
   assert(g && g->tensors[0].type == QTYPE_MXFP8 && g->tensors[0].bytes == vals / 32 * 33);
   check_whole(g);
@@ -361,6 +371,7 @@ static void test_mxfp8(void)
   for (size_t n = 1; n <= 2; n++)
   {
     w = model(f8, n, 0, 0, 0, NULL, 0);
+    osmos_clear(err);
     g = gguf_create(write_file("f8.gguf", &w), err);
     assert(g && g->tensors[0].type == QTYPE_F8_E4M3 && g->tensors[0].bytes == vals);
     check_whole(g);
@@ -369,12 +380,15 @@ static void test_mxfp8(void)
   }
   const Spec own[] = {{"e.own", QTYPE_F8_E4M3, 2, {64, 32}, vals}}; /* osmos's id named by a file */
   w = model(own, 1, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   assert(!gguf_create(write_file("f8own.gguf", &w), err) && strstr(err, "does not know"));
   free(w.b);
   w = model(small, 2, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   assert(!gguf_create(write_file("f8short.gguf", &w), err) && strstr(err, "overlap"));
   free(w.b);
   w = model(small, 1, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   assert(!gguf_create(write_file("f8shortone.gguf", &w), err) && strstr(err, "leave"));
   free(w.b);
   printf("  type 43: MXFP8's blocks read; a byte a value read as F8_E4M3, before a tensor or alone; neither, or the id 0x12B, refused\n");
@@ -388,14 +402,16 @@ static void test_nvfp4(void)
   const Spec nv[] = {{"blk.0.ffn_up_exps.weight", 40, 3, {256, 16, 4}, vals / 64 * 36},
                      {"blk.0.ffn_up_exps.scale", 0, 1, {4}, 4 * 4}};
   const Spec odd[] = {{"e.nvfp4", 40, 2, {96, 16}, 96 * 16 / 64 * 36}};
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Buf w = model(nv, 2, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   Gguf *g = gguf_create(write_file("nvfp4.gguf", &w), err);
   assert(g && g->tensors[0].bytes == vals / 64 * 36 && g->tensors[1].bytes == 16);
   check_whole(g);
   gguf_destroy(g);
   free(w.b);
   w = model(odd, 1, 0, 0, 0, NULL, 0);
+  osmos_clear(err);
   assert(!gguf_create(write_file("nvfp4odd.gguf", &w), err));
   free(w.b);
   printf("  type 40: NVFP4's blocks read, an expert tensor and its scale; a row of 96 values (1.5 blocks) refused\n");
@@ -419,7 +435,8 @@ static void test_mutations(void)
       c.b[s % c.len] = (uint8_t)(s >> 32);
     }
     const char *path = write_file("mut.gguf", &c);
-    char err[GGUF_ERR] = "";
+    char err[OSMOS_ERR] = "";
+    osmos_clear(err);
     Gguf *g = gguf_create(path, err);
     if (g)
     {
@@ -447,7 +464,8 @@ static void test_ds1017(void)
     printf("  ds1017: not on this machine, skipped\n");
     return;
   }
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Gguf *g = gguf_create(p, err);
   if (!g)
     fprintf(stderr, "  gguf_create: %s\n", err);
@@ -457,6 +475,7 @@ static void test_ds1017(void)
   assert(t && t->type == 29 && t->n_dims == 3 && t->dims[0] == 5120 && t->dims[1] == 2304 && t->dims[2] == 384);
   gguf_destroy(g);
   snprintf(p, sizeof p, "%s/models/ds1017/DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf", home);
+  osmos_clear(err);
   g = gguf_create(p, err);
   assert(g && g->n_files == 1 && g->n_tensors == 2);
   check_whole(g);

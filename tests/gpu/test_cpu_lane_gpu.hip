@@ -151,7 +151,7 @@ int main() {
     std::printf("[test_cpu_lane_gpu] skipped: no ds1017 or UD-IQ1_M, no GPU or no AVX-512 VNNI\n");
     return 77;
   }
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   if (which == TestModel::kUd)

@@ -1,11 +1,15 @@
 /* osmos-api: the engine as an OpenAI-compatible server (DESIGN.md, "osmos-api").
 
      osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] [--ctx N|Nk|Nm]
+               [--allow-origin <origin>]... [--keepalive-ms N]
      osmos-api --tokenize --model <first shard>     (stdin's text as the prompt's ids, one line: for tests)
+     osmos-api --version
 
    POST /v1/chat/completions, GET /v1/models, GET /health (503 while the engine loads). osmos-serve - beside this
    binary unless --engine names another - runs as the child with the pack's settings (osmos.json, the installer's);
-   its exit ends this server (the launcher restarts it) */
+   its exit ends this server (the launcher restarts it). --allow-origin (repeatable): a web page's origin whose
+   requests are taken - its preflight answered, every response carrying CORS's headers for it; any other browser's
+   request (an Origin header) refused. --ctx overrides the pack's max_context; --keepalive-ms a stream's keep-alive */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
@@ -30,9 +34,9 @@
 #define API_PORT 8091  /* the installer's first (tools/install/rig.py PORT_BASE) */
 #define API_CONNS 16   /* connections at once: past it a 503 (a local client's handful; the engine runs few) */
 #define API_POLL_MS 1000
-#define API_IDLE_S 10  /* a request's bytes awaited this long at most: an idle connection closed, not held (0.7.1) */
-#define API_STALL_S 60
-#define API_QUIT_S 120 /* the engine's end awaited this long on a stop: its conversations written to their folder */ /* a reply's send blocked this long: its client taken as gone (a stream's run STOPped) */
+#define API_IDLE_S 10  /* a request's bytes awaited this long at most: an idle connection closed, not held */
+#define API_STALL_S 60 /* a reply's send blocked this long: its client taken as gone (a stream's run STOPped) */
+#define API_QUIT_S 120 /* the engine's end awaited this long on a stop: its conversations written to their folder */
 
 static const char *opt(int argc, char **argv, const char *name, const char *dflt)
 {
@@ -82,23 +86,32 @@ static bool host_ours(const char *host)
 
 static void answer(Http *h)
 {
-  char err[API_ERR];
+  char err[OSMOS_ERR] = "";
   const int status = http_read(h, err);
   if (status)
   {
-    http_error(h->fd, status, err);
+    http_error(h, status, err);
     http_linger(h->fd, true); /* its bytes unread: drained, so the client reads the status, not a reset */
     return;
   }
-  /* a web page's request refused before anything is read into the engine (0.15.2): any page can POST text/plain to
+  /* a web page's request refused before anything is read into the engine: any page can POST text/plain to
      localhost with no preflight - a browser says its Origin, and DNS rebinding a Host not this server's */
-  if (h->origin)
-    return (void)http_error(h->fd, 403, "a browser's request (an Origin header): osmos-api serves local clients, not "
-                                        "web pages");
+  if (h->origin[0]) /* a browser's: its origin named by --allow-origin taken (CORS), any other refused */
+  {
+    bool allowed = false;
+    for (int i = 0; !allowed && i < api.n_allow; i++)
+      allowed = !strcmp(h->origin, api.allow[i]);
+    if (!allowed)
+      return (void)http_error(h, 403, "a browser's request (an Origin header): osmos-api serves local clients and the "
+                                      "origins --allow-origin names, not this page");
+    snprintf(h->cors, sizeof h->cors, "Access-Control-Allow-Origin: %s\r\nVary: Origin\r\n", h->origin);
+    if (!strcmp(h->method, "OPTIONS")) /* the preflight: what a page may send */
+      return (void)http_preflight(h);
+  }
   if (!h->host[0])
-    return (void)http_error(h->fd, 400, "no Host header (HTTP/1.1 requires one)");
+    return (void)http_error(h, 400, "no Host header (HTTP/1.1 requires one)");
   if (loopback && !host_ours(h->host))
-    return (void)http_error(h->fd, 403, "a Host not this server's (localhost, 127.0.0.1 or [::1], its port): refused");
+    return (void)http_error(h, 403, "a Host not this server's (localhost, 127.0.0.1 or [::1], its port): refused");
   char *q = strchr(h->path, '?');
   if (q)
     *q = 0;
@@ -107,7 +120,7 @@ static void answer(Http *h)
   {
     const bool ready = engine_ready(&api.engine);
     const char *b = ready ? "{\"status\": \"ok\"}" : "{\"status\": \"loading\"}";
-    http_send(h->fd, ready ? 200 : 503, "application/json", b, strlen(b));
+    http_send(h, ready ? 200 : 503, "application/json", b, strlen(b));
   }
   else if (!strcmp(h->path, "/v1/models") && get)
   {
@@ -116,20 +129,20 @@ static void answer(Http *h)
     json_dump_string(&b, api.model, strlen(api.model));
     json_puts(&b, ", \"object\": \"model\", \"owned_by\": \"osmos\"");
     char t[96];
-    const bool ready = engine_ready(&api.engine); /* 0.9.2: listed while loading, said so - and the context once known */
+    const bool ready = engine_ready(&api.engine); /* listed while loading, said so - and the context once known */
     if (ready)
       snprintf(t, sizeof t, ", \"context_length\": %u", api.engine.max_ctx), json_puts(&b, t);
     json_puts(&b, ready ? ", \"osmos\": {\"ready\": true}}]}" : ", \"osmos\": {\"ready\": false}}]}");
     if (!b.oom)
-      http_send(h->fd, 200, "application/json", b.p, b.n);
+      http_send(h, 200, "application/json", b.p, b.n);
     free(b.p);
   }
   else if (!strcmp(h->path, "/v1/chat/completions") && post)
     api_chat(&api, h);
   else if (!strcmp(h->path, "/v1/chat/completions") || !strcmp(h->path, "/v1/models"))
-    http_error(h->fd, 405, "method not allowed");
+    http_error(h, 405, "method not allowed");
   else
-    http_error(h->fd, 404, "not found (POST /v1/chat/completions, GET /v1/models, GET /health)");
+    http_error(h, 404, "not found (POST /v1/chat/completions, GET /v1/models, GET /health)");
 }
 
 static volatile sig_atomic_t stopping; /* SIGTERM / SIGINT: the engine QUIT, then this server's end */
@@ -165,7 +178,7 @@ static int listen_on(const char *host, int port)
 
 static int tokenize(const char *model)
 {
-  char err[TOKENIZER_ERR];
+  char err[OSMOS_ERR] = "";
   Gguf *g = gguf_header(model, err); /* the tokenizer: the first shard's metadata */
   Tokenizer *t = g ? tokenizer_create(g, err) : NULL;
   gguf_destroy(g);
@@ -185,7 +198,7 @@ static int tokenize(const char *model)
   return n < 0;
 }
 
-/* --ctx (0.7.3): a context length as N, Nk (x 1,024) or Nm (x 1,048,576); 0 when it is not one, or outside API_CTX */
+/* --ctx: a context length as N, Nk (x 1,024) or Nm (x 1,048,576); 0 when it is not one, or outside API_CTX */
 #define API_CTX_MIN 4096u
 #define API_CTX_MAX 1048576u /* the largest any pack's model reads (DeepSeek-V4.1's 1M; Qwen's YaRN to it) */
 static unsigned ctx_of(const char *s)
@@ -209,7 +222,7 @@ int main(int argc, char **argv)
   if (!cfg_path)
     return die("usage: osmos-api --config <pack>/osmos.json [--port N] [--host A] [--engine <osmos-serve>] "
                "[--ctx N|Nk|Nm]");
-  char err[API_ERR], self[PATH_MAX], engine[PATH_MAX];
+  char err[OSMOS_ERR], self[PATH_MAX], engine[PATH_MAX];
   const ssize_t sn = readlink("/proc/self/exe", self, sizeof self - 1);
   self[sn > 0 ? sn : 0] = 0;
   char *slash = strrchr(self, '/');
@@ -229,14 +242,12 @@ int main(int argc, char **argv)
   }
   snprintf(api.model, sizeof api.model, "osmos-%s", c.pack);
   Gguf *g = gguf_header(c.model, err); /* the tokenizer and the family alone: osmos-serve opens the model */
-  const GgufKv *arch = g ? gguf_kv(g, "general.architecture") : NULL;
+  const char *arch = gguf_arch(g);
   const GgufKv *tmpl = g ? gguf_kv(g, "tokenizer.chat_template") : NULL;
-  api.d = arch && arch->type == GGUF_STRING
-              ? dialect_of(arch->v.s, tmpl && tmpl->type == GGUF_STRING ? tmpl->v.s : NULL)
-              : NULL;
+  api.d = arch ? dialect_of(arch, tmpl && tmpl->type == GGUF_STRING ? tmpl->v.s : NULL) : NULL;
   api.tok = g && api.d ? tokenizer_create(g, err) : NULL;
   if (g && !api.d)
-    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, qwen35, inkling2, hy_v4_flash)", arch && arch->type == GGUF_STRING ? arch->v.s : "(none)");
+    snprintf(err, sizeof err, "the model: no chat dialect for its architecture %.64s (deepseek41, qwen4exp, qwen35, inkling2, hy_v4_flash)", arch ? arch : "(none)");
   gguf_destroy(g);
   if (!api.tok)
     return die(err);
@@ -248,6 +259,21 @@ int main(int argc, char **argv)
     return die(err);
   char dport[16];
   snprintf(dport, sizeof dport, "%d", API_PORT);
+  if (opt(argc, argv, "--keepalive-ms", NULL)) /* (a test's shorter one) */
+  {
+    char *e;
+    const long v = strtol(opt(argc, argv, "--keepalive-ms", NULL), &e, 10);
+    if (*e || v < 100 || v > 600000)
+      return die("--keepalive-ms: a whole number of milliseconds, 100 to 600000");
+    api.keepalive_ms = (uint32_t)v;
+  }
+  for (int i = 1; i + 1 < argc; i++) /* --allow-origin, each its own */
+    if (!strcmp(argv[i], "--allow-origin"))
+    {
+      if (api.n_allow == API_ORIGINS_MAX || !argv[i + 1][0] || strpbrk(argv[i + 1], "\r\n *"))
+        return die("--allow-origin: an origin a page says (scheme://host[:port]), 16 at most, never *");
+      api.allow[api.n_allow++] = argv[++i];
+    }
   const int port = atoi(opt(argc, argv, "--port", dport));
   const int lfd = listen_on(opt(argc, argv, "--host", "127.0.0.1"), port);
   loopback = !strncmp(opt(argc, argv, "--host", "127.0.0.1"), "127.", 4), port_bound = port;
@@ -289,9 +315,9 @@ int main(int argc, char **argv)
       pthread_mutex_unlock(&conns_mu);
       pthread_t t;
       if (!room)
-        http_error(fd, 503, "too many connections"), http_linger(fd, false), close(fd);
+        http_error(&(Http){.fd = fd}, 503, "too many connections"), http_linger(fd, false), close(fd);
       else if (pthread_create(&t, NULL, connection, (void *)(intptr_t)fd))
-        http_error(fd, 503, "no thread for it"), close(fd), pthread_mutex_lock(&conns_mu), conns--,
+        http_error(&(Http){.fd = fd}, 503, "no thread for it"), close(fd), pthread_mutex_lock(&conns_mu), conns--,
             pthread_mutex_unlock(&conns_mu);
       else
         pthread_detach(t);

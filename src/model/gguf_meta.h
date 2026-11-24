@@ -1,4 +1,4 @@
-/* a model's metadata read and checked, key by key: each read fails with the key and why in err (GGUF_META_ERR). a
+/* a model's metadata read and checked, key by key: each read fails with the key and why in err (OSMOS_ERR). a
    family's geometry reader (weights_geo.c, q4x_geo.c) builds on these; its own spellings of a key, if any, as
    aliases: a key found in either, both present and unequal refused */
 #pragma once
@@ -9,13 +9,12 @@
 
 #include "osmos/model/gguf.h"
 
-#define GGUF_META_ERR 256
 #define GGUF_META_LIST_MAX 256 /* a list's most entries (a layer list, a ratio a layer) */
 
 typedef struct GgufMeta
 {
   const Gguf *g;
-  char *err;                     /* GGUF_META_ERR bytes */
+  char *err;                     /* OSMOS_ERR bytes */
   const char *const (*aliases)[2]; /* pairs of spellings of one key, or NULL */
   size_t n_aliases;
 } GgufMeta;

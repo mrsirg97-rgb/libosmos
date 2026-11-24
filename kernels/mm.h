@@ -1,7 +1,7 @@
 // the matmul for the quantized weights, every step's however many tokens (1 .. 16): a wave a tile of 16 rows x 16
 // tokens, K in steps of 16 - the rows' 16 weights at that step decoded to f16 (quant.h's decode_h), one WMMA
 // (f32 <- f16, 16 x 16 x 16) accumulating against the tokens' f16 activations. a column's results are the same bits
-// whatever the other columns hold (measured: test_mm_gpu), so a token's are whatever it is batched with.
+// whatever the other columns hold, so a token's are whatever it is batched with.
 #pragma once
 #include <type_traits>
 
@@ -22,7 +22,7 @@ constexpr int kPad = 8;  // f16s past a row in LDS: rows 2 banks apart, so the r
 
 // a type's tile: SL values a slab, W waves a block (K split W ways), U chunks in flight a lane - the decode's latency
 // is what a single token's matmul waits on, and LDS bounds the waves that hide it, so each type takes the slab and
-// waves that fit it (mm.hip: measured)
+// waves that fit it (mm.hip's table)
 template <int SL, int W, int U>
 struct Shape {
   static constexpr int kSlab = SL, kWaves = W, kUnroll = U;
@@ -36,7 +36,7 @@ struct Shape {
 
 // the activations' layout (x16): tiled as WMMA reads them - token t's column c at (t / 16) 16 xts + (c / 16) 256 +
 // (t % 16) 16 + c % 16, xts the row's length: a wave's fragment (16 tokens x 16 columns) 512 contiguous bytes, so a
-// load touches 4 lines, not 16 (a token's row each) - measured, the activations' loads were what bound many tokens
+// load touches 4 lines, not 16 (a token's row each)
 constexpr int kFrag = kTile * kTile;
 __host__ __device__ inline uint64_t x16_at(uint32_t t, uint32_t c, uint32_t xts) {
   return (uint64_t) (t / kTile) * kTile * xts + (c / kTile) * kFrag + (t % kTile) * kTile + c % kTile;
@@ -51,23 +51,15 @@ __device__ inline void x16_put(_Float16* x16, uint32_t t, uint32_t c, uint32_t x
 }
 
 // the tiles' x double-buffered (each tile's fragments loaded under the one before's WMMAs) for a slab of few
-// fragments: a tile's G fragments are 8 G VGPRs, so a second set is cheap at G 2 (Q5_K's slabs of 32: wo_a 7.24 ->
-// 5.69 ms at 2048 tokens, the shared expert's gate 2.01 -> 1.87) and ruinous at 8 (the IQ experts' 128: a real layer
-// 15.2 -> 22.0 ms). the order of the sums is the same either way: the same bits
+// fragments: a tile's G fragments are 8 G VGPRs, so a second set is cheap at G 2 and ruinous at 8. the order of the
+// sums is the same either way: the same bits
 template <int G, int CT>
 constexpr bool kPipe = CT > 1 && G <= 2;
 
 // one column tile (a decode's 1-16 tokens): each lane decodes its row of WMMA's A operand itself (lane l: row l % 16;
 // lanes 0-15 a step's even chunk, 16-31 its odd, the halves traded across the lane halves), no LDS between the
-// decode and the WMMA - the same f16 in the same places, so the same sums. measured against the slab through LDS at a
-// token, each matrix read from DRAM (dec1 / dec_ds / exp1, low-power, 2026-11-07): Q6_K's long rows (128-value
-// slabs) +6-16% (Qwen's DeltaNet pair 183 -> 207 GB/s, attn_q 172 -> 200, its logits 179 -> 203; DeepSeek's wo_b
-// 193 -> 204, wo_a 191 -> 207), Q8_0 +13% (Qwen's hc mixers 156 / 147 -> 178 / 166), IQ4_NL +7% (142 -> 151),
-// IQ4_XS +5%; Q6_K's short rows (64-value slabs: DeepSeek's q_b, 1,280 columns) -7%, IQ2_S -10%, IQ3_XXS and Q2_0
-// level - those keep the LDS's. a token's dense reads Qwen 23.2 -> 20.7 ms, DeepSeek 34.2 -> 33.1 (Q5_K: m1.hip's
-// q_b 181 -> 143 us, its first). UD-Q4_K_XL's expert types (mmsweep q4, a token's 10 experts cold, low-power,
-// 2026-11-09, two runs): Q4_K at its 128 x 8 x 8 103-107 -> 78-80 us, Q5_1 111 -> 72-75; a 512-token prompt 247 ->
-// 409 tok/s, its ids' hash the same
+// decode and the WMMA - the same f16 in the same places, so the same sums. the types where it beat the slab through
+// LDS; Q6_K's short rows (64-value slabs) and the rest keep the LDS's
 template <quant::Type T>
 constexpr bool kRegA = !osmos_cuda && (T == quant::kQ5_K || T == quant::kQ5_KR || T == quant::kQ6_K || T == quant::kQ8_0 ||
                        T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kQ4_K || T == quant::kQ5_1);
@@ -148,13 +140,11 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
       for (int i = 0; i < NW; i++) v[i] = b[i];
     };
     // long rows' waves in step (a barrier without the fence a slab step in kLockstep: the loads in flight across it) -
-    // a line's 3.5 blocks are 3 or 4 waves', and drifting apart over a long row a line was evicted before its last
-    // wave read it: down's (17,408 columns, 34 slabs a wave) DRAM reads 1.6 times its bytes, 156 -> 177 GB/s in step.
-    // rows of 10-12 slabs a wave lose 3-8% to the barriers (gate / up, qkv, ssm_out: fp4bench MM, performance), so
-    // past kLockstepSlabs a wave alone (between the two measured)
+    // a line's 3.5 blocks are 3 or 4 waves', and drifting apart over a long row a line is evicted before its last
+    // wave reads it. shorter rows lose more to the barriers than they gain: past kLockstepSlabs alone in step
     constexpr uint32_t kLockstep = 4, kLockstepSlabs = 16;
     const uint32_t slabs = cols / SL;
-    // the loop compiled twice (a runtime barrier's branch in the one loop cost the others 5-8%)
+    // the loop compiled twice: a runtime barrier's branch in the one loop slows the others
     auto run = [&](auto in_step) {
       uint32_t k0 = wave * SL, it = 0;
       if (k0 < cols) fetch(k0, cw);
@@ -287,7 +277,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
 // slab (BM rows x SL values of K) decoded once into LDS by the block - every wave's A - and each wave's x fragments
 // its own; two slabs' LDS, the next decoded under this one's WMMAs, a barrier a slab. the order is tile's: partition p (tile's wave p) its slabs p, p + W, ... each in its 16-value steps, one
 // WMMA chain a 16 x 16 tile from zero; the partitions in turn, a running sum (run = p 0's, then run += p's) - tile's
-// part[0] + part[1] + ... - so a token's bits are tile's, whatever the batch (test_mm_gpu)
+// part[0] + part[1] + ... - so a token's bits are tile's, whatever the batch
 template <quant::Type T, class S, int RM, int RN, int WR, int WC>
 __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w0, const uint8_t* __restrict__ w1,
                                                     uint32_t rows0, uint32_t rows1, uint32_t cols,
@@ -312,7 +302,7 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
   for (int j = 0; j < RN; j++) {
     const uint32_t t0 = c0 + (wc * RN + j) * kTile;
     // a tile past the tokens loads the block's first (c0 < n: the grid's) - its WMMA skipped (live), its rows never
-    // past the x16's round16(n) (0.11.2: they read up to the block's 256 tokens, past a buffer sized to the step)
+    // past the x16's round16(n) (not the block's 256 tokens: the buffer is sized to the step)
     live[j] = t0 < n, xb[j] = x16 + x16_at(t0 < n ? t0 : c0, 0, cols);
   }
   f8 run[RM][RN], acc[RM][RN];
@@ -391,7 +381,7 @@ __global__ __launch_bounds__(256) void gemm_kernel(const uint8_t* __restrict__ w
 // RM row tiles a wave, a multi-tile step (the experts' prompt-sized matmul): tile's partition a wave (slabs w, w + W,
 // ...), its slab decoded for 16 RM rows into the wave's LDS, each x fragment then feeding RM WMMAs - tile loads a
 // fragment a WMMA. every output's sums in tile's order (its partition's slabs in turn, each its 16-value steps; the
-// partitions summed in w's order): tile's bits (test_mm_gpu, mm_group at 37 / 64 / 128 tokens). x double-buffered as
+// partitions summed in w's order): tile's bits. x double-buffered as
 // tile's kPipe. LDS: the slabs' 16 RM rows a wave, or the partial sums RM times tile's
 template <class S, int RM>
 struct RmLds {
@@ -749,9 +739,7 @@ __global__ __launch_bounds__(kWave* S::kWaves) void group_kernel(const uint8_t* 
 // 32-value groups of a row (dq, dq + 2: each half slab's one), each group's bytes by a few buffer loads (unaligned:
 // the hardware's) and its f16s quant's group decoder (its scale's work once); a half slab (64 values) at a time
 // through the wave's LDS, its 4 WMMAs; x read for the matrix's tokens alone (its other columns the WMMA's zero: no
-// column's sums read another's). a token's 8 experts (mmsweep ink2, low-power, Inkling-2's shapes): IQ1_S's gate 285
-// -> 190 us, IQ2_XXS's 222 -> 201, IQ2_S's down 251 -> 232-248; IQ3_XXS's down 250 -> 268-304 (its decode_hn runs of
-// a group already: not taken)
+// column's sums read another's). IQ3_XXS not taken: its decode_hn runs a group already
 // RDNA's alone (gfx11's buffer descriptors and WMMA's lane layout): on CUDA kOneTile is false and group_launch takes
 // group_ct's tiles
 template <quant::Type T>

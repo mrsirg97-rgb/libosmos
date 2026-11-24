@@ -1,8 +1,9 @@
-// mvsweep [experts|dense|f32|ink2|hy4] [tokens]: (hy4: Hy4-flash's Q3_K / Q4_K experts and Q8_0 attention, 1 or 6) (ink2: Inkling-2's expert types at its shapes - gate / up 2304 x 4608,
-// down 4608 x 2304 - at 1, 2, 4 or 8 tokens) the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in flight a
-// lane) timed on Qwen3.8-Flash-Next's shapes at 1, 2, 3 or 4 tokens (an expert read for that many) - each expert type's gate / up (640 x 2560) and down (2560 x 640), 10 experts
-// a call, and the dense matrices' - every call reading cold memory (its matrices rotated through 1 GiB). R and U
-// change no bit (mv.h: a lane's chunks summed in the same order); what this picks is time.
+// mvsweep [experts|dense|f32|ink2|hy4] [tokens]: the matvec kernel's shapes (kernels/mv.h: R rows a wave, U chunks in
+// flight a lane) timed on Qwen3.8-Flash-Next's shapes at 1, 2, 3 or 4 tokens (an expert read for that many) - each
+// expert type's gate / up (640 x 2560) and down (2560 x 640), 10 experts a call, and the dense matrices' - every call
+// reading cold memory (its matrices rotated through 1 GiB). ink2: Inkling-2's expert types at its shapes (gate / up
+// 2304 x 4608, down 4608 x 2304) at 1, 2, 4 or 8 tokens; hy4: Hy4-flash's Q3_K / Q4_K experts and Q8_0 attention at
+// 1 or 6. R and U change no bit (mv.h: a lane's chunks summed in the same order); what this picks is time.
 // build: hipcc -O3 -Iinclude -Ikernels --offload-arch=gfx1151 tools/bench/mvsweep.hip -o bin/mvsweep
 #include <hip/hip_runtime.h>
 

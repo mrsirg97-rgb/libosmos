@@ -77,7 +77,7 @@ static MembraneOptions options(uint32_t room_units, uint32_t stream_units, const
 
 static Membrane *make(uint32_t room_units, uint32_t stream_units, const uint32_t *warm, size_t n_warm)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const MembraneOptions o = options(room_units, stream_units, warm, n_warm);
   Membrane *m = membrane_create(&o, err);
   if (!m)
@@ -99,7 +99,7 @@ static void check_dev(uint32_t unit, const void *dev[POOL_PARTS])
 /* a unit held and waited for: its bytes the file's */
 static void take(Membrane *m, uint32_t unit)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const void *dev[POOL_PARTS];
   assert(membrane_hold(m, unit, err));
   assert(membrane_wait(m, unit, dev, err));
@@ -108,7 +108,7 @@ static void take(Membrane *m, uint32_t unit)
 
 static void visit(Membrane *m, uint32_t layer, bool passing)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   assert(membrane_visit(m, layer, passing, err));
 }
 
@@ -130,7 +130,7 @@ static uint64_t waits(const Membrane *m)
 
 static void test_refusals(void)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   MembraneOptions o = options(8, 8, NULL, 0);
   assert(!membrane_create(NULL, err) && err[0]);
   o.units = NULL;
@@ -235,7 +235,7 @@ static void test_promotion(void)
    end, which drops it - the next pick promotes it again from the stream's copy, or reads it from its file */
 static void test_copy_fails(void)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const void *dev[POOL_PARTS];
   Membrane *m = make(8, 4, NULL, 0);
   visit(m, 0, true);
@@ -295,7 +295,7 @@ static void test_guess(void)
 static void test_warm(void)
 {
   const uint32_t warm[] = {E + 5, 2 * E + 1, 3 * E + 2};
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Membrane *m = make(3, 4, warm, 3);
   assert(membrane_warm(m, err));
   for (int i = 0; i < 3; i++)
@@ -314,7 +314,7 @@ static void test_warm(void)
    - the room whole for the next request's visits (0.7.1: the pins it took stayed, every later step refused) */
 static void test_warm_failed(void)
 {
-  char path[512], err[MEMBRANE_ERR] = "";
+  char path[512], err[OSMOS_ERR] = "";
   snprintf(path, sizeof path, "%s/short.bin", dir);
   FILE *f = fopen(path, "wb");
   assert(f);
@@ -347,7 +347,7 @@ static void test_whole(void)
   uint32_t all[N];
   for (uint32_t u = 0; u < N; u++)
     all[u] = u;
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Membrane *m = make(N, 2, all, N);
   assert(!membrane_whole(m)); /* nothing read yet */
   assert(membrane_warm(m, err) && membrane_whole(m));
@@ -378,7 +378,7 @@ static void test_whole(void)
 /* more held in a visit than the room: refused with why, and the next visit sound */
 static void test_full(void)
 {
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Membrane *m = make(2, 2, NULL, 0);
   visit(m, 0, false);
   take(m, 0), take(m, 1);
@@ -436,7 +436,7 @@ static void test_drift(void)
     for (uint32_t e = 0; e < 6; e++)
       warm[nw++] = l * E + e;
   Membrane *m = make(L * 6, E, warm, nw);
-  char err[MEMBRANE_ERR] = "";
+  char err[OSMOS_ERR] = "";
   assert(membrane_warm(m, err));
   for (uint32_t r = 0; r < 12; r++)
     for (uint32_t l = 0; l < L; l++)

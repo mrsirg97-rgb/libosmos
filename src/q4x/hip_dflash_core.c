@@ -2,9 +2,10 @@
    and a norm into each layer's keys and values; a block (the anchor and masks, the target's embedding) through its
    layers (a dynamic convolution before and after the attention and the MLP), a norm, the target's output head, the
    candidate selector's greedy path. the target's calls through its DfHost (q4x's, LFM3's: each its own matrices'
-   path and stream - the core's sequence of calls each one's before it, 0.11.2) */
+   path and stream) */
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <hip/hip_runtime_api.h>
@@ -12,6 +13,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "dflash_core.h"
+#include "osmos/err.h"
 
 #define F sizeof(float)
 
@@ -26,27 +28,23 @@ static bool mat2(const DfHost *h, const GgufTensor *t0, uint32_t rows0, float *y
                  : h->mat(h->ctx, t0, rows0, cols, x, xs, n, y0, ys0) && h->mat(h->ctx, t1, rows1, cols, x, xs, n, y1, ys1);
 }
 
-static bool dalloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
-
-bool df_buffers(DfBuf *d, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx)
+bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx)
 {
   const uint64_t n = max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
   const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
   const uint64_t rows = n > B ? n : B, dyn = 2ull * Q4X_DFLASH_CONV * (D / (uint64_t)g->conv_group);
   const uint64_t ff = (uint64_t)g->ff, k = (uint64_t)g->sel_top_k, iota = (uint64_t)max_ctx + B;
-  bool ok = dalloc(&d->th, n * D * F) && dalloc(&d->k, rows * kv * F) && dalloc(&d->v, rows * kv * F) &&
-            dalloc(&d->h, B * D * F) && dalloc(&d->x, B * D * F) && dalloc(&d->xc, B * D * F) &&
-            dalloc(&d->dyn, B * dyn * F) && dalloc(&d->q, B * q * F) && dalloc(&d->att, B * q * F) &&
-            dalloc(&d->a, B * D * F) && dalloc(&d->gate, B * ff * F) && dalloc(&d->up, B * ff * F) &&
-            dalloc(&d->hn, B * D * F) && dalloc(&d->logits, B * V * F) &&
-            dalloc(&d->hp, B * (uint64_t)g->sel_rank * F) && dalloc(&d->val, B * k * F) && dalloc(&d->idx, B * k * 4) &&
-            dalloc(&d->top_p, B * F) && dalloc(&d->path, B * 4) && dalloc(&d->top_id, B * 4) &&
-            dalloc(&d->tok, B * 4) && dalloc(&d->iota, iota * 4) &&
-            hipHostMalloc((void **)&d->pin_tok, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_path, B * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_idx, B * k * 4, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_val, B * k * F, 0) == hipSuccess &&
-            hipHostMalloc((void **)&d->pin_p, B * F, 0) == hipSuccess;
+  const GpuWant want[] = {
+      {&d->th, n * D * F},     {&d->k, rows * kv * F},  {&d->v, rows * kv * F},    {&d->h, B * D * F},
+      {&d->x, B * D * F},      {&d->xc, B * D * F},     {&d->dyn, B * dyn * F},    {&d->q, B * q * F},
+      {&d->att, B * q * F},    {&d->a, B * D * F},      {&d->gate, B * ff * F},    {&d->up, B * ff * F},
+      {&d->hn, B * D * F},     {&d->logits, B * V * F}, {&d->hp, B * (uint64_t)g->sel_rank * F},
+      {&d->val, B * k * F},    {&d->idx, B * k * 4},    {&d->top_p, B * F},        {&d->path, B * 4},
+      {&d->top_id, B * 4},     {&d->tok, B * 4},        {&d->iota, iota * 4},
+  };
+  bool ok = gpu_bufs_alloc(&d->bufs, l, want, sizeof want / sizeof *want) && gpu_bufs_host(&d->bufs, l, &d->pin_tok, B * 4) &&
+            gpu_bufs_host(&d->bufs, l, &d->pin_path, B * 4) && gpu_bufs_host(&d->bufs, l, &d->pin_idx, B * k * 4) &&
+            gpu_bufs_host(&d->bufs, l, &d->pin_val, B * k * F) && gpu_bufs_host(&d->bufs, l, &d->pin_p, B * F);
   int32_t *h = ok ? malloc(iota * 4) : NULL;
   for (uint64_t i = 0; h && i < iota; i++)
     h[i] = (int32_t)i;
@@ -60,11 +58,7 @@ bool df_buffers(DfBuf *d, const Q4xDflashGeometry *g, uint32_t max_tokens, uint3
 
 void df_buffers_free(DfBuf *d)
 {
-  void **dev = (void **)d;
-  for (size_t i = 0; i < offsetof(DfBuf, pin_tok) / sizeof(void *); i++)
-    hipFree(dev[i]);
-  hipHostFree(d->pin_tok), hipHostFree(d->pin_path), hipHostFree(d->pin_idx), hipHostFree(d->pin_val);
-  hipHostFree(d->pin_p);
+  gpu_bufs_free(&d->bufs); /* (its device and pinned buffers alike: the record's) */
   memset(d, 0, sizeof *d);
 }
 
@@ -131,8 +125,7 @@ static bool block_layer(const DfHost *h, const Q4xDflash *df, DfBuf *d, const Df
 }
 
 int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, int32_t y, int32_t pos0,
-             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err,
-             uint32_t err_n)
+             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err)
 {
   const Q4xDflashGeometry *g = &df->geo;
   const uint32_t B = (uint32_t)g->block, D = (uint32_t)g->n_embd, V = (uint32_t)g->n_vocab, R = (uint32_t)g->sel_rank;
@@ -159,7 +152,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
        hipMemcpyAsync(d->pin_p, d->top_p, (B - 1) * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
        (!h->before_sync || h->before_sync(h->ctx)) && hipStreamSynchronize(s) == hipSuccess;
   if (!ok)
-    return snprintf(err, err_n, "%s", "a GPU call failed (a draft)"), -1;
+    return osmos_fail(err, "a GPU call failed (a draft)"), -1;
   if (h->after_sync && !h->after_sync(h->ctx, err))
     return -1;
   /* a draft's confidence: the head's probability of it at its place - the greatest's (q4x_top) scaled by its logit
@@ -174,7 +167,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
     while (c < K && ids[c] != d->pin_path[kept])
       c++;
     if (c == K)
-      return snprintf(err, err_n, "%s", "the selector's pick not one of its candidates"), -1;
+      return osmos_fail(err, "the selector's pick not one of its candidates"), -1;
     const float p = d->pin_p[kept] * expf(val[c] - val[0]);
     cum *= p;
     if (p < conf_min || cum < cum_min)

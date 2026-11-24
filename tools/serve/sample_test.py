@@ -45,9 +45,9 @@ def main():
     ap.add_argument("rest", nargs=argparse.REMAINDER)
     a = ap.parse_args()
     rest = a.rest[1:] if a.rest[:1] == ["--"] else a.rest
-    base = ["--model", a.model, "--dspark", a.dspark, "--max-context", "8192"] + rest
+    base = ["--model", a.model, "--dspark", a.dspark, "--max-context", "8192", "--no-slots"] + rest
     prompt = read_ids(a.ids)[:PROMPT]
-    env = dict(os.environ, OSMOS_SLOT_KEEP="0")
+    env = dict(os.environ)
 
     e = Engine(a.exe, base, env=env)
     greedy = e.gen(prompt, ANSWER, spec=0)["tokens"]

@@ -246,8 +246,7 @@ __global__ void gate_kernel(float* out, const float* gate, uint64_t n) {
 // of kTileKeys at a time for every head, each wave its head's scores (a lane 18 of the 576 dims, an xor tree), an
 // online softmax in the keys' order, its latent output (a lane 16 of the 512 dims). partials (max, sum, output) a
 // (token, head, split); the merge their order with the sink. the splits a token's own keys': its bits whatever the step
-// kSplitKeys, kTileKeys: tools/bench/mla_bench's sweep (2026-11-18, low-power, a decode's 512-window and 1,024-key
-// layers): 32 and 8 the fastest of 8..64 and 8..16 (64 us vs 64/16's 81, 16/8's 79)
+// kSplitKeys, kTileKeys: tools/bench/mla_bench's sweep
 constexpr uint32_t kHeadGroup = kWaves, kSplitKeys = 32, kTileKeys = 8, kLanes = 32;
 constexpr uint32_t kRowMax = HY4_MLA_MAX_LATENT + kMaxRope, kTokChunk = 16; /* a launch's tokens (the partials' room) */
 constexpr uint32_t kMaxSplits = HY4_MLA_MAX_KEYS / kSplitKeys;
@@ -688,7 +687,7 @@ __device__ inline uint32_t block_scan(uint32_t v, uint32_t* lds, uint32_t* total
 constexpr uint32_t kIxSpreadTokens = 16;  // a step's tokens at most whose scores ix_score_kernel spreads
 
 // each token's groups' scores, kIxTile groups a block: their keys loaded once into LDS (coalesced - a thread a group
-// reading its own key once a head read 512-byte strides 16 times: 113 ms a decode step at 128K, 2026-11-19), a
+// reading its own key once a head would read 512-byte strides 16 times), a
 // thread a (group, head)'s dot over the dims in their order, then a group's sum over the heads in theirs: score_g =
 // sum_h w_h relu(q_h . g) - the bits the select kernel's own loop gives
 constexpr uint32_t kIxTile = 32;
@@ -700,7 +699,7 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
   // a tile's keys once for every token of the step (a verify's 6 read them once, not 6 times), each token's query in
   // turn
   // (qs's rows padded too: a wave's 32 threads are 2 groups x 16 heads, so unpadded its heads' rows 512 bytes apart
-  // read one bank - a 16-way conflict every term; 1M, a token: 5.45 ms a layer before)
+  // read one bank - a 16-way conflict every term)
   __shared__ __attribute__((aligned(16))) float qs[kIxRow * 16], ks[kIxTile][kIxRow];
   __shared__ float ws[16], ds[kIxTile][16];
   const uint32_t g0 = blockIdx.x * kIxTile;
@@ -723,7 +722,7 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
     for (uint32_t e = threadIdx.x; e < n * heads; e += kThreads) {
       const uint32_t gl = e / heads, h = e % heads;
       // 4 sums a dot, the terms i % 4 apart, added (0 + 1) + (2 + 3): a dependent chain a quarter long (the scores
-      // latency-bound, not the keys' bytes: at 1M a token 1.6 ms a layer against ~0.6) - every step's the same
+      // latency-bound, not the keys' bytes) - every step's the same
       float d0 = 0, d1 = 0, d2 = 0, d3 = 0;
       const float4 *qh = (const float4*) (qs + h * kIxRow), *kg = (const float4*) ks[gl];
       for (uint32_t i = 0; i < dim / 4; i++) {
@@ -744,8 +743,7 @@ __global__ __launch_bounds__(kThreads) void ix_score_kernel(const float* q, cons
 // the same scores (each dot's 4 sums, the heads' fmaf in order: ix_score_kernel's bits) from a few blocks each over
 // many tiles - the step's queries in LDS once a block (4 tokens a pass), the next tile's keys loaded into registers
 // under this one's math. ix_score_kernel's a block a tile: its keys' load, then the queries' (8 KB a token, read by
-// every one of 8,192 blocks at 1M), then the math, serial - latency-bound at ~1.6 ms a layer a token against ~0.6 of
-// bytes
+// every one of 8,192 blocks at 1M), then the math, serial - latency-bound, not the bytes
 constexpr uint32_t kIxPTok = 4, kIxPBlocks = 160, kIxPLoads = kIxTile * kIxDim / 4 / kThreads;
 __global__ __launch_bounds__(kThreads) void ix_score_persist_kernel(const float* q, const float* w, const float* groups,
                                                                     uint32_t pool, uint32_t top, const int32_t* pos,
@@ -816,7 +814,7 @@ __global__ __launch_bounds__(kThreads) void ix_score_persist_kernel(const float*
 // a prompt's scores on the matrix cores: a block 16 tokens x 64 groups, a wave 16 of the groups; each head's 16 x 16
 // tile 8 WMMAs over the 128 dims (f16 in, F32 sums - the prompt's other matrices' read math), its weighted relu
 // summed into the score in registers, the heads in order. the keys f16 in LDS once a block, a head's queries in turn.
-// not the F32 loop's bits (f16 inputs): a prompt's selections against the reference's measured (test_hy4_indexer_gpu)
+// not the F32 loop's bits (f16 inputs): a prompt's selections checked against the reference's (test_hy4_indexer_gpu)
 constexpr uint32_t kMmTok = 16, kMmGroups = 64, kMmPad = 8, kMmRow = kIxDim + kMmPad;
 __global__ __launch_bounds__(128) void ix_score_mm_kernel(const float* q, const float* w, const float* groups,
                                                           uint32_t heads, uint32_t pool, uint32_t top,
@@ -922,8 +920,7 @@ __global__ __launch_bounds__(128) void ix_score_mm2_kernel(const float* q, const
   }
 }
 
-// the selection: a block a token, its scores the scorer's (ix_score_*: 0.11.2 - its own F32 loop removed, never
-// called, its LDS rows at another stride than it read them)
+// the selection: a block a token, its scores the scorer's (ix_score_*)
 __global__ __launch_bounds__(kThreads) void ix_select_kernel(const int32_t* pos, uint32_t pool, uint32_t top,
                                                              uint32_t max_groups, float* scores, int32_t* sel,
                                                              int32_t* n_sel, bool dense_only) {
@@ -984,8 +981,8 @@ __global__ __launch_bounds__(kThreads) void ix_select_kernel(const int32_t* pos,
 }
 
 
-// the selection spread over the GPU for a step's few tokens (a decode's, a verify's - 2026-11-19: a block a token's
-// radix over 32K groups took 113 ms a step at 128K, 0.9 s at 1M): the same picks as ix_select_kernel's - the key V
+// the selection spread over the GPU for a step's few tokens (a decode's, a verify's: a block a token's radix over
+// 32K groups leaves the GPU idle): the same picks as ix_select_kernel's - the key V
 // with count(> V) < want <= count(>= V) by four 8-bit radix passes (each a many-block histogram of the keys under the
 // prefix so far, integer atomics: exact in any order; then a block a token picks the digit), then in group order
 // every key > V and the first want - count(> V) keys == V (block counts, their offsets, the writes), then its own
@@ -1209,10 +1206,9 @@ extern "C" bool hy4_mla_attn(const float* qa, const void* cache, uint32_t slots,
   const uint32_t splits = (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1 < kMaxSplits
                               ? (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1
                               : kMaxSplits;
-  static const bool exact = getenv("HY4_MLA_F32") != nullptr;  // (a read's attention the F32 path's: A/B)
-  if (read && !exact && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
+  if (read && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
       latent + rope_dim <= kMlaRow && rope_dim <= 64) {
-    if (heads % 64 == 0 && !getenv("MLA_G2"))
+    if (heads % 64 == 0)
       mla_mm_kernel<4><<<dim3(heads / 64, n_tok), 512, 0, s>>>(qa, (const uint8_t*) cache, slots, q8, sinks, heads,
                                                                latent, rope_dim, window, sel, n_sel, sel_cap, pool, scale,
                                                                pos, o_lat);
@@ -1301,25 +1297,28 @@ extern "C" bool hy4_ix_query(float* q, float* w, uint32_t heads, uint32_t dim, u
   return ok();
 }
 
+// the spread selection's scratch: kIxSpreadTokens tokens' state, then their blocks' counts (whole IxWide's first)
+static constexpr size_t kSpreadState = (kIxSpreadTokens * sizeof(IxWide) + 255) / 256 * 256;
+extern "C" size_t hy4_ix_spread_bytes(void) { return kSpreadState + (size_t) kIxSpreadTokens * kWideBlocks * 2 * 4; }
+
 extern "C" bool hy4_ix_select(const float* q, const float* w, const float* groups, uint32_t heads, uint32_t dim,
                               uint32_t pool, uint32_t top, const int32_t* pos, uint32_t n_tok, uint32_t max_groups,
-                              float* scores, int32_t* sel, int32_t* n_sel, bool read, void* stream) {
+                              float* scores, int32_t* sel, int32_t* n_sel, bool read, void* spread_scratch,
+                              void* stream) {
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
-  // a read's scores the matrix cores' at any step size (its bits a prompt's however it is split: 0.11.2 - a read's
-  // step of kIxSpreadTokens or fewer took the F32 loop's, a prompt's last chunk or a short turn another math); a
-  // decode's or a verify's F32. the selection over many blocks for a step's few tokens, a block a token for many (the
+  // a read's scores the matrix cores' at any step size (its bits a prompt's however it is split); a decode's or a
+  // verify's F32. the selection over many blocks for a step's few tokens, a block a token for many (the
   // same picks either way: integer counts)
   const bool spread = n_tok <= kIxSpreadTokens;
-  static const bool exact = getenv("HY4_IX_F32") != nullptr;  // (a read's scores the F32 loop's: A/B)
-  if (read && !exact && dim == kIxDim && heads == 16 && !getenv("HY4_IX_MM1"))
+  if (read && dim == kIxDim && heads == 16)
     ix_score_mm2_kernel<<<dim3((max_groups + kM2Groups - 1) / kM2Groups, (n_tok + kM2Tok - 1) / kM2Tok), 128, 0,
                           st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups, scores);
-  else if (read && !exact && dim == kIxDim && heads <= 16)
+  else if (read && dim == kIxDim && heads <= 16)
     ix_score_mm_kernel<<<dim3((max_groups + kMmGroups - 1) / kMmGroups, (n_tok + kMmTok - 1) / kMmTok), 128, 0,
                          st(stream)>>>(q, w, groups, heads, pool, top, pos, n_tok, max_groups, scores);
-  else if (!read && heads == 16 && dim == kIxDim && !getenv("HY4_IX_TILE"))
+  else if (!read && heads == 16 && dim == kIxDim)
     ix_score_persist_kernel<<<kIxPBlocks, kThreads, 0, st(stream)>>>(q, w, groups, pool, top, pos, n_tok, max_groups,
                                                                      scores);
   else
@@ -1328,11 +1327,9 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
                                                                                          scores);
   ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(pos, pool, top, max_groups, scores, sel, n_sel, spread);
   if (!spread) return ok();
-  static IxWide* wst = nullptr;  // (the spread selection's scratch: kIxSpreadTokens tokens' - made once)
-  static uint32_t* wcnt = nullptr;
-  if (!wst && (hipMalloc(&wst, kIxSpreadTokens * sizeof(IxWide)) != hipSuccess ||
-               hipMalloc(&wcnt, (size_t) kIxSpreadTokens * kWideBlocks * 2 * 4) != hipSuccess))
-    return false;
+  if (!spread_scratch) return false;  // (the caller's: hy4_ix_spread_bytes, made with its forward)
+  IxWide* wst = (IxWide*) spread_scratch;
+  uint32_t* wcnt = (uint32_t*) ((char*) spread_scratch + kSpreadState);
   const hipStream_t s = st(stream);
   const dim3 grid(kWideBlocks, n_tok);
   ix_wide_init_kernel<<<n_tok, 64, 0, s>>>(pos, pool, top, wst);
@@ -1441,7 +1438,7 @@ extern "C" bool hy4_route(const int32_t* idx, const float* wtok, uint32_t n_tok,
   return ok();
 }
 
-// DFly2's draft block (0.11.0): each draft row's groups - the target layer's picks for the last accepted token (its
+// DFly2's draft block: each draft row's groups - the target layer's picks for the last accepted token (its
 // snapshot: snap_n groups ascending, the last the token's own) and every group after that one through the row's own
 // position (the block's rows, written at anchor ..): a thread a row
 __global__ void dfly_sel_kernel(const int32_t* snap, const int32_t* snap_n, int32_t anchor, uint32_t pool,

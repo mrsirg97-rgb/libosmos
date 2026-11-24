@@ -27,7 +27,7 @@ int main(void)
   FILE *f = fopen("tests/fixtures/json.txt", "r");
   assert(f);
   static char line[8192], in[4096], want[4096];
-  char err[JSON_ERR];
+  char err[OSMOS_ERR] = "";
   int good = 0, bad = 0;
   while (fgets(line, sizeof line, f))
   {
@@ -162,6 +162,41 @@ int main(void)
   printf("  invalid UTF-8 written as Python's replace reads it (%zu cases, 20000 random byte strings read back)\n",
          sizeof bytes / sizeof *bytes);
   printf("  %d inputs written back as python writes them, %d refused as it refuses them\n", good, bad);
+  /* a tree's memory budget (json_parse_within, 0.16.0): every allocation counted - a conversation (a few long
+     strings) within its body's bytes and the nodes', a body of tiny values (~65x its bytes) refused past the budget,
+     saying so; a string's buffer its own bytes (0.16.0: the rest of the input each - a million short strings
+     reserved terabytes of address space) */
+  {
+    const size_t n = 1u << 20;
+    char *conv = malloc(n + 64), *tiny = malloc(2 * n + 8);
+    size_t k = (size_t)snprintf(conv, 64, "{\"messages\":[{\"role\":\"user\",\"content\":\"");
+    memset(conv + k, 'x', n), k += n;
+    k += (size_t)snprintf(conv + k, n + 64 - k, "\"}]}");
+    char jerr[OSMOS_ERR] = "";
+    size_t used = 0;
+    Json *c = json_parse_within(conv, k, 2 * n, &used, jerr);
+    assert(c && used >= n && used < n + 4096); /* (its one long string and a few nodes) */
+    json_free(c);
+    size_t t = 0;
+    tiny[t++] = '[';
+    for (size_t i = 0; i < n / 2; i++)
+      tiny[t++] = '0', tiny[t++] = ',';
+    tiny[t - 1] = ']';
+    jerr[0] = 0;
+    assert(!json_parse_within(tiny, t, 16 * n, &used, jerr) && strstr(jerr, "memory budget"));
+    char many[8192];
+    size_t m = 0;
+    many[m++] = '[';
+    for (int i = 0; i < 1000; i++)
+      memcpy(many + m, "\"ab\",", 5), m += 5;
+    many[m - 1] = ']';
+    jerr[0] = 0;
+    Json *s = json_parse_within(many, m, 1u << 20, &used, jerr);
+    assert(s && s->n == 1000 && used < 200 * 1000); /* each string 3 bytes, not the input's rest */
+    json_free(s);
+    free(conv), free(tiny);
+    printf("  a tree's budget: a 1 MiB conversation within it, a body of tiny values refused, a string its own bytes\n");
+  }
   printf("[test_json] ok\n");
   return 0;
 }

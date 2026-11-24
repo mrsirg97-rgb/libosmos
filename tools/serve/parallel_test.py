@@ -11,7 +11,7 @@ answered while a long prompt is read.
             alone (a verify's accepted tokens are greedy's), the drafts cut to keep a round a decode step
   stop      --parallel 2: two at once, the first STOPped after a few tokens: its DONE `cancel`, fewer tokens; the
             other's answer whole and its own
-  slots     --parallel 2, OSMOS_SLOT_KEEP=1: A and B at once, then A's next turn - it reuses A from its lane
+  slots     --parallel 2, slots kept: A and B at once, then A's next turn - it reuses A from its lane
   reading   --parallel 2: a long prompt, then a short one: the short one read in one piece ahead of the long one's
             next and answering between its pieces - tokens of it before the long read's last piece
 exit 0: every check passed; 1: a check failed; 2: the engine did not start.
@@ -54,10 +54,11 @@ def main():
     if a.dspark:
         base += ["--dspark", a.dspark]
     tmp = tempfile.mkdtemp(prefix="osmos-par-")
-    env = dict(os.environ, OSMOS_SLOT_KEEP="0", OSMOS_SLOT_DIR=f"{tmp}/none")
+    env = dict(os.environ)
+    off = ["--no-slots", "--slot-dir", f"{tmp}/none"]  # (0.16.0: the slots' flags - the env's before)
     try:
         print("alone: four prompts one at a time, --parallel 1", flush=True)
-        e = Multi(a.exe, base + ["--parallel", "1"], env)
+        e = Multi(a.exe, base + ["--parallel", "1"] + off, env)
         alone = []
         for i, p in enumerate(prompts):
             e.send(i, p, NEW)
@@ -67,7 +68,7 @@ def main():
         print("        " + ", ".join(f"{len(p)} tok {h:016x}" for p, h in zip(prompts, ref)), flush=True)
 
         print(f"together: the four at once, --parallel {a.lanes}", flush=True)
-        e = Multi(a.exe, base + ["--parallel", str(a.lanes)], env)
+        e = Multi(a.exe, base + ["--parallel", str(a.lanes)] + off, env)
         t0 = time.monotonic()
         for i, p in enumerate(prompts):
             e.send(i, p, NEW)
@@ -81,7 +82,7 @@ def main():
         if a.dspark:
             for name, specs in (("all drafting", [1, 1, 1, 1]), ("two drafting, two greedy", [1, 0, 1, 0])):
                 print(f"drafted, {name}: the four at once, --parallel {a.lanes}", flush=True)
-                e = Multi(a.exe, base + ["--parallel", str(a.lanes)], env)
+                e = Multi(a.exe, base + ["--parallel", str(a.lanes)] + off, env)
                 t0 = time.monotonic()
                 for i, p in enumerate(prompts):
                     e.send(i, p, NEW, spec=specs[i])
@@ -95,7 +96,7 @@ def main():
                       f"drafts accepted; all in {wall:.1f} s)", all(same))
 
         print("stop: two at once, the first stopped after a few tokens, --parallel 2", flush=True)
-        e = Multi(a.exe, base + ["--parallel", "2"], env)
+        e = Multi(a.exe, base + ["--parallel", "2"] + off, env)
         e.send(0, prompts[0], NEW)
         e.send(1, prompts[1], NEW)
         e.wait(0, until=lambda r: len(r["tokens"]) >= 5 or "done" in r)
@@ -106,8 +107,8 @@ def main():
               r0.get("finish") == "cancel" and len(r0["tokens"]) < NEW)
         check("stop: the other's answer whole, its own", hash_tokens(r1["tokens"]) == ref[1])
 
-        print("slots: A and B at once, then A's next turn, --parallel 2, OSMOS_SLOT_KEEP=1", flush=True)
-        e = Multi(a.exe, base + ["--parallel", "2"], dict(env, OSMOS_SLOT_KEEP="1", OSMOS_SLOT_DIR=f"{tmp}/s"))
+        print("slots: A and B at once, then A's next turn, --parallel 2, slots kept", flush=True)
+        e = Multi(a.exe, base + ["--parallel", "2", "--slot-dir", f"{tmp}/s"], env)
         e.send(0, prompts[0], NEW)
         e.send(1, prompts[1], NEW)
         ra, rb = e.wait(0), e.wait(1)
@@ -123,7 +124,7 @@ def main():
 
         print("reading: a long prompt, then a short one, --parallel 2", flush=True)
         long_p = calib + gpl  # ~24K tokens of text
-        e = Multi(a.exe, base + ["--parallel", "2"], env)
+        e = Multi(a.exe, base + ["--parallel", "2"] + off, env)
         e.send(0, long_p, 8)
         e.wait(0, until=lambda r: len(r["pp"]) >= 1)
         e.send(1, prompts[3], 16)

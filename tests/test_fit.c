@@ -30,12 +30,12 @@ static uint64_t pool(const Engine *e, uint64_t budget)
   return 2 * (streamed / e->layers);
 }
 
-static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[FIT_ERR])
+static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[OSMOS_ERR])
 {
   Engine *e = ctx;
   assert(!e->live); /* the last one unbuilt first */
   if (++e->builds == e->fail_at)
-    return snprintf(err, FIT_ERR, "a build refused"), false;
+    return snprintf(err, OSMOS_ERR, "a build refused"), false;
   *built = budget ? budget : e->dense;
   const uint64_t resident = *built > e->dense ? *built - e->dense : 0;
   uint64_t used = e->other + *built + resident * e->overhead_pct / 100;
@@ -45,12 +45,23 @@ static bool build(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, c
   const int64_t truth = (int64_t)e->memory - (int64_t)(used + p);
   e->least = truth < e->least ? truth : e->least;
   if (used + p > e->memory) /* the engine refuses what does not fit (fwd_room_left) */
-    return snprintf(err, FIT_ERR, "past the memory"), false;
+    return snprintf(err, OSMOS_ERR, "past the memory"), false;
   *room = e->memory - used - p;
   if (e->wobble)
     *room = e->builds % 2 ? *room + e->wobble : (*room > e->wobble ? *room - e->wobble : 0);
   e->live = 1;
   return true;
+}
+
+/* the room a budget leaves, its true one (no wobble; 0 past the memory) - the chunks' */
+static uint64_t build_room(const Engine *e, uint64_t budget)
+{
+  const uint64_t resident = budget > e->dense ? budget - e->dense : 0;
+  uint64_t used = e->other + budget + resident * e->overhead_pct / 100;
+  if (e->chunk)
+    used = (used + e->chunk - 1) / e->chunk * e->chunk;
+  const uint64_t p = pool(e, budget);
+  return e->memory > used + p ? e->memory - used - p : 0;
 }
 
 static void unbuild(void *ctx)
@@ -90,7 +101,7 @@ int main(void)
     Engine e = {shapes[k][0] * GIB, shapes[k][1] * GIB, shapes[k][2] * GIB, shapes[k][3] * GIB, shapes[k][4],
                 shapes[k][5], 0, 0, 0, 0, 0, INT64_MAX};
     uint64_t budget = 0, built, room;
-    char err[FIT_ERR] = "";
+    char err[OSMOS_ERR] = "";
     assert(fit_sized(build, unbuild, &e, GIB, &budget, err));
     assert(e.live && e.builds <= FIT_BUILDS + 1); /* (+1: the last that fit, again, after a refused step) */
     room = e.memory - e.other - budget - (budget - e.dense) * e.overhead_pct / 100 - pool(&e, budget);
@@ -101,12 +112,12 @@ int main(void)
   }
   Engine e = {113 * GIB, 3 * GIB, 12 * GIB, 140 * GIB, 40, 0, 0, 0, 0, 1, 0, INT64_MAX}; /* the dense build refused */
   uint64_t budget = 0;
-  char err[FIT_ERR] = "";
+  char err[OSMOS_ERR] = "";
   assert(!fit_sized(build, unbuild, &e, GIB, &budget, err) && !strcmp(err, "a build refused") && !e.live);
   Engine f = {113 * GIB, 3 * GIB, 12 * GIB, 140 * GIB, 40, 0, 0, 0, 0, 2, 0, INT64_MAX}; /* a growth step refused: smaller, not fatal */
   budget = 0;
   assert(fit_sized(build, unbuild, &f, GIB, &budget, err) && f.live);
-  char refused[FIT_ERR];
+  char refused[OSMOS_ERR];
   snprintf(refused, sizeof refused, "%s", err);
   const uint64_t smaller = budget;
   /* memory in chunks wider than the window: no budget lands in it - the one kept still leaves the headroom, within a
@@ -140,7 +151,37 @@ int main(void)
     }
   printf("  the room's measure wobbling 0.05-0.25 GiB: no build past the memory, none further under the headroom than "
          "the wobble\n");
-  printf("  the dense build refused: its why (%s); a growth step refused: built smaller (%.2f GiB)\n[test_fit] ok\n",
-         refused, (double)smaller / GIB);
+  printf("  the dense build refused: its why (%s); a growth step refused: built smaller (%.2f GiB)\n", refused,
+         (double)smaller / GIB);
+  /* a flat near the edge (found by 0.16.0's phase 1 check, 0.15.2's release binary alike): memory taken in 0.93 GiB
+     chunks, the box's - a first step landing on the flat just past a chunk read nearly one room for every budget
+     over it, a little short of the headroom, so each next step crept down a fraction of the shortfall and the builds
+     ran out, the last that fit kept: 14 GiB short (84.98 GiB against 98.88). every start across a chunk: the kept
+     budget within two chunks and the slack of the best (the largest leaving the headroom, scanned) - a flat stepped
+     below gives up its own width and the sliver at its top (the streamed pool shrinking along it), never a creep */
+  {
+    int worst_at = -1;
+    double worst = 0;
+    for (int at = 0; at < 64; at++)
+    {
+      const uint64_t chunk = 93 * GIB / 100;
+      Engine q = {115 * GIB + (uint64_t)at * chunk / 64, 3 * GIB, 12 * GIB, 110 * GIB, 43, 6, chunk, 0, 0, 0, 0,
+                  INT64_MAX};
+      uint64_t best = 0, b = 0;
+      for (b = q.dense; b <= q.dense + q.experts; b += GIB / 64) /* the best, scanned */
+        if (build_room(&q, b) >= GIB)
+          best = b;
+      budget = 0;
+      assert(fit_sized(build, unbuild, &q, GIB, &budget, err) && q.live);
+      assert(build_room(&q, budget) >= GIB); /* never kept short of the headroom */
+      const double short_by = ((double)best - (double)budget) / GIB;
+      if (short_by > worst)
+        worst = short_by, worst_at = at;
+    }
+    printf("  a flat near the edge: every start across a 0.93 GiB chunk within %.2f GiB of the best (worst at %d/64)\n",
+           worst, worst_at);
+    assert(worst <= 2 * 0.93 + (double)FIT_SLACK / GIB); /* two chunks and the slack at most (0.16.0: 10.01 short) */
+  }
+  printf("[test_fit] ok\n");
   return 0;
 }

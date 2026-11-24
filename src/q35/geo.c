@@ -8,14 +8,15 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/qtype.h"
 #include "osmos/q35/forward.h"
+#include "osmos/err.h"
 
 #define ARCH "qwen35"
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
-_Static_assert(Q35_ERR == GGUF_META_ERR && Q35_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && Q35_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* the kernels' fixed shapes are q4x's (q4x_ops.h): a head 256, a DeltaNet state 128, a conv's taps 8 at most */
-bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[Q35_ERR])
+bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, NULL, 0};
   memset(g, 0, sizeof *g);
@@ -58,29 +59,22 @@ bool q35_geometry(const Gguf *model, Q35Geometry *g, char err[Q35_ERR])
   return true;
 }
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  if (err)
-    snprintf(err, Q35_ERR, "%s: %s", name, why);
-  return false;
-}
-
 /* a tensor by name, its ggml dims (cols first) as asked; with a scale (s), an NVFP4 matrix's .scale read beside it -
    1 for any other type */
 static bool find(const Gguf *g, const char *name, uint64_t d0, uint64_t d1, const GgufTensor **t, float *s, char *err)
 {
   if (!(*t = gguf_tensor(g, name)))
-    return fail(err, name, "not in the model");
+    return osmos_fail(err, "%s: %s", name, "not in the model");
   const GgufTensor *x = *t;
   if (x->dims[0] != d0 || (d1 ? x->n_dims != 2 || x->dims[1] != d1 : x->n_dims != 1))
   {
     char why[96];
     snprintf(why, sizeof why, "shape %llu x %llu, the geometry's %llu x %llu", (unsigned long long)x->dims[0],
              (unsigned long long)(x->n_dims > 1 ? x->dims[1] : 0), (unsigned long long)d0, (unsigned long long)d1);
-    return fail(err, name, why);
+    return osmos_fail(err, "%s: %s", name, why);
   }
   if (!s)
-    return x->type == QTYPE_F32 || fail(err, name, "not F32 (a norm, a gate's bias, a conv)");
+    return x->type == QTYPE_F32 || osmos_fail(err, "%s: %s", name, "not F32 (a norm, a gate's bias, a conv)");
   *s = 1.0f;
   if (x->type != QTYPE_NVFP4)
     return true;
@@ -88,19 +82,19 @@ static bool find(const Gguf *g, const char *name, uint64_t d0, uint64_t d1, cons
   snprintf(sn, sizeof sn, "%.*s.scale", (int)(strlen(name) - strlen(".weight")), name);
   const GgufTensor *st = gguf_tensor(g, sn);
   if (!st || st->type != QTYPE_F32 || st->bytes != 4)
-    return fail(err, name, "NVFP4 without its one F32 .scale beside it");
+    return osmos_fail(err, "%s: %s", name, "NVFP4 without its one F32 .scale beside it");
   const int fd = open(g->paths[st->file], O_RDONLY);
   const bool read_ok = fd >= 0 && pread(fd, s, 4, (off_t)st->offset) == 4;
   if (fd >= 0)
     close(fd);
-  return read_ok || fail(err, sn, "not read");
+  return read_ok || osmos_fail(err, "%s: %s", sn, "not read");
 }
 
-Q35Weights *q35_weights_create(const Gguf *model, char err[Q35_ERR])
+Q35Weights *q35_weights_create(const Gguf *model, char err[OSMOS_ERR])
 {
   Q35Weights *w = calloc(1, sizeof *w);
   if (!w)
-    return fail(err, "q35", "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   w->model = model;
   Q35Geometry *g = &w->geo;
   bool ok = q35_geometry(model, g, err);
@@ -108,7 +102,7 @@ Q35Weights *q35_weights_create(const Gguf *model, char err[Q35_ERR])
   const uint64_t q = (uint64_t)g->n_heads * hd, kv = (uint64_t)g->n_kv_heads * hd, vh = (uint64_t)g->ssm_v_heads;
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2 * (uint64_t)g->ssm_groups * (uint64_t)g->ssm_state + in;
   const GgufTensor *e = ok ? gguf_tensor(model, "token_embd.weight") : NULL;
-  ok = ok && (e || fail(err, "token_embd.weight", "not in the model")) && e->n_dims == 2 && e->dims[0] == D &&
+  ok = ok && (e || osmos_fail(err, "%s: %s", "token_embd.weight", "not in the model")) && e->n_dims == 2 && e->dims[0] == D &&
        (g->n_vocab = (int)e->dims[1]) > 0 && find(model, "token_embd.weight", D, e->dims[1], &w->embd, &(float){0}, err) &&
        find(model, "output_norm.weight", D, 0, &w->out_norm, NULL, err) &&
        find(model, "output.weight", D, (uint64_t)g->n_vocab, &w->output, &w->s_output, err);

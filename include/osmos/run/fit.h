@@ -1,32 +1,35 @@
 #ifndef OSMOS_RUN_FIT_H
 #define OSMOS_RUN_FIT_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stdint.h>
 
-#define FIT_HEADROOM (1ull << 30) /* GPU memory left free past the experts: the packs' measured margin (DESIGN.md,
-                                     "the budgets at 1M": every edge started; 1 GiB under ran) */
+#define FIT_HEADROOM (1ull << 30) /* GPU memory left free past the experts: the packs' measured margin */
 
-#define FIT_RAM_FREE (8ull << 30) /* the system's RAM a build leaves free by default (osmos-serve --fill: another): the
-                                     operator's rule - on this APU the GPU's memory is the system's, and one box runs
-                                     the model beside an editor, a browser, language servers and the agent harness */
+#define FIT_RAM_FREE (8ull << 30) /* the system's RAM a build leaves free by default (osmos-serve --fill: another): on
+                                     an APU the GPU's memory is the system's, and the box runs other programs */
 
+/* a family's budget asking for as many experts as this machine holds now (experts_fit_now): its own tests' and
+   benches'. a build's budget otherwise is the whole build's bytes, 0 the least (a layer's experts), in every family */
+#define FIT_BUDGET_NOW UINT64_MAX
 #define FIT_SLACK (1ull << 28) /* room past the headroom a sizing stops at: 256 MiB, a few experts' units */
-#define FIT_FIRST_COST 1.125 /* fit_sized's first step's cost a byte of budget: past the units' padding seen (6-12%) */
+#define FIT_CHUNK (1ull << 30) /* the room's steps (memory is taken in steps near this): a build on a flat short of the
+                                  headroom stepped below it by one */
+#define FIT_FIRST_COST 1.125 /* fit_sized's first step's cost a byte of budget: past the units' padding */
 #define FIT_BUILDS 6           /* builds at most past the dense one's first (and one more to keep the largest that
-                                  left the headroom): a sizing took 3-6 on this box */
-#define FIT_ERR 256
+                                  left the headroom) */
 
 /* one whole build at a budget (0: the dense weights alone): what it took (forward_budget) and the room it left
    (forward_room); false with why in err */
-typedef bool (*FitBuild)(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[FIT_ERR]);
+typedef bool (*FitBuild)(void *ctx, uint64_t budget, uint64_t *built, uint64_t *room, char err[OSMOS_ERR]);
 typedef void (*FitUnbuild)(void *ctx);
 
 uint64_t fit_budget(uint64_t built, uint64_t free_after, uint64_t headroom);
 uint64_t fit_room(uint64_t gpu_free, uint64_t ram_available, uint64_t ram_kept);
 uint64_t fit_ram_available(void);
 bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget,
-               char err[FIT_ERR]);
+               char err[OSMOS_ERR]);
 
 #endif
 
@@ -48,11 +51,11 @@ fit_ram_available
 fit_sized
   the engine built to fill this machine and left built (budget: what it took): built at 0 (the dense weights alone,
   the floor), then toward a room of the headroom plus half FIT_SLACK - each step the room past (or short of) it over
-  what a byte of budget has cost so far (measured between builds: the expert pool's room shrinks as experts become
-  resident, a resident expert's units take more than its bytes - ~6% on UD-IQ1_S at 1M), kept between the largest
-  budget that left the headroom and the smallest that did not or was refused. it stops in the window (the headroom to
-  FIT_SLACK past it), or where those two budgets close within FIT_SLACK (memory taken in steps wider than the window:
-  ~0.93 GiB on this box), or after FIT_BUILDS builds; the build it keeps leaves at least the headroom whenever one has
+  what a byte of budget has cost so far (measured between builds: a resident expert's units take more than its
+  bytes), kept between the largest budget that left the headroom and the smallest that did not or was refused. it
+  stops in the window (the headroom to FIT_SLACK past it), or where those two budgets close within FIT_SLACK (memory
+  taken in steps wider than the window), or after FIT_BUILDS builds; the build it keeps leaves at least the headroom
+  whenever one has
   (one more build, at the largest that did, if the last fell short), else the floor. false with why: the dense build
   failed, or the largest that fit did not again (unbuild has run for every build before; a failed one cleans up
   after itself).

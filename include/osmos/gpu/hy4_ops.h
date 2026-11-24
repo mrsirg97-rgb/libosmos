@@ -2,7 +2,7 @@
 #define OSMOS_GPU_HY4_OPS_H
 
 /* Hy4-flash's small steps on the GPU (kernels/hy4.hip): its iHC and Engram's ends, each the reference's
-   (modeling_hy_v4_flash.py) in F32 - DESIGN.md, "0.10.0: Hy4-flash (hy4)". ops.h's conventions: queued on `stream`,
+   (modeling_hy_v4_flash.py) in F32. ops.h's conventions: queued on `stream`,
    not waited for; false - nothing queued - for arguments they cannot run; a token's rows contiguous; reductions in a
    fixed order, so a token's bits are the same whatever the others beside it */
 
@@ -59,9 +59,10 @@ bool hy4_ix_query(float *q, float *w, uint32_t heads, uint32_t dim, uint32_t rop
                   const int32_t *pos, uint32_t n_tok, void *stream);
 bool hy4_ix_select(const float *q, const float *w, const float *groups, uint32_t heads, uint32_t dim, uint32_t pool,
                    uint32_t top, const int32_t *pos, uint32_t n_tok, uint32_t max_groups, float *scores, int32_t *sel,
-                   int32_t *n_sel, bool read, void *stream);
+                   int32_t *n_sel, bool read, void *spread_scratch, void *stream);
+size_t hy4_ix_spread_bytes(void);
 
-/* DFly2's draft block (0.11.0) */
+/* DFly2's draft block */
 #define HY4_DFLY_MAX_ROWS 8 /* a draft block's rows at most (the anchor and its masks) */
 bool hy4_dfly_sel(const int32_t *snap, const int32_t *snap_n, int32_t anchor, uint32_t pool, uint32_t top,
                   uint32_t rows, uint32_t cap, int32_t *sel, int32_t *n_sel, void *stream);
@@ -96,16 +97,15 @@ hy4_engram_update
   (hc_scale [hc][dim]). every norm HY4_ENGRAM_EPS. h in place.
 
 gated MLA, absorbed (HYV4FlashAttention, its kv_b_proj split as the file keeps it: k_b [heads][latent][nope] and v_b
-[heads][v_dim][latent], Q8_0 - read as stored). a cache row is latent + rope_dim F32 values a position (the step's
-F32 form: the sequence's cache comes with step 2); rope the reference's: rope_dim / 2 adjacent pairs, pair i by
-pos * freqs[i] (freqs: the layer kind's base^(-2i / rope_dim)), on the rope part's values in place.
+[heads][v_dim][latent], Q8_0 - read as stored). a cache row a position, hy4_mla_kv's; rope the reference's: rope_dim / 2
+adjacent pairs, pair i by pos * freqs[i] (freqs: the layer kind's base^(-2i / rope_dim)), on the rope part's values in
+place.
 
 hy4_mla_kv
   the latent and its key from kv_a's output (kva [n_tok][latent + rope_dim]): the latent RMSNorm'd (norm_w, eps), the
   key's rope part roped at pos[t]; the row into cache row pos[t] - or, slots given (a sliding layer's ring), row
   pos[t] % slots. a row hy4_mla_row_bytes: F32 [latent | rope], or q8 the latent Q8_0 (ggml's: an f16 d = amax / 127
-  a 32 values, codes round(x / d); latent a multiple of 32) then the rope part F32 - 800 bytes for Hy4's 512 + 64
-  against 2,304 (0.11.0: the context's memory a quarter).
+  a 32 values, codes round(x / d); latent a multiple of 32) then the rope part F32.
 
 hy4_mla_q
   q_b's output (q [n_tok][heads][nope + rope_dim]) to the queries the cache is read with: each head's nope part
@@ -121,22 +121,22 @@ hy4_mla_attn
   [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
   path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long);
   q8: rows hy4_mla_kv's q8 (their latent decoded d times a code, exact in F32, before any of the math).
-  flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys,
-  an online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
-  whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
+  flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys, an
+  online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
+  whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most
+  HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
   read (a prompt's step): on the matrix cores where the shape fits (16 heads a group, a row at most 576) - f16 Q, K, V
   and P, F32 sums (mla_mm_kernel: a token's output its own keys' alone, its bits whatever the step; not the F32 path's
   bits); env HY4_MLA_F32 set: the F32 path's for every step
 
 hy4_route
-  a decode's routed picks (idx/wtok: n_tok x k, each token's k experts distinct, < n_exp) as the expert matvecs'
-  tables, no host between: the picks by expert ascending, an expert's tokens ascending - row r's token gidx[r] and
-  weight wsel[r], pick m's row sidx[m]; the entries (each expert's rows in chunks of `chunk`, experts ascending) cnt,
-  xrow (its first row) and wptr (3 tables, n_tok x k apart: tab[i n_exp + e] - the membrane's addresses of expert
-  e's gate, up, down, a device table [3][n_exp]), then count 0 to
-  n_tok x k (mv_group_tok's skipped entries: a launch to that bound). a pick out of range or twice
-  in a token: *fault = 1 (the tables then not used). false, nothing queued, for k 0 or past HY4_ROUTE_MAX_K, n_exp
-  past HY4_ROUTE_MAX_EXPERTS, chunk 0, n_tok 0.
+  a decode's routed picks (idx/wtok: n_tok x k, each token's k experts distinct, < n_exp) as the expert matvecs' tables,
+  no host between: the picks by expert ascending, an expert's tokens ascending - row r's token gidx[r] and weight
+  wsel[r], pick m's row sidx[m]; the entries (each expert's rows in chunks of `chunk`, experts ascending) cnt, xrow (its
+  first row) and wptr (3 tables, n_tok x k apart: tab[i n_exp + e] - the membrane's addresses of expert e's gate, up,
+  down, a device table [3][n_exp]), then count 0 to n_tok x k (mv_group_tok's skipped entries: a launch to that bound).
+  a pick out of range or twice in a token: *fault = 1 (the tables then not used). false, nothing queued, for k 0 or past
+  HY4_ROUTE_MAX_K, n_exp past HY4_ROUTE_MAX_EXPERTS, chunk 0, n_tok 0.
 
 hy4_mla_qrope / hy4_gate_mul
   hy4_mla_q's and hy4_mla_out's ends alone (a read's absorptions on the matrix cores: mm_group a head): each head's
@@ -171,7 +171,9 @@ hy4_ix_select
   (the reference's top-k picks masked groups then, the causal mask dropping them: the same keys). else the top - 1
   with the greatest score_g = sum over the heads of w_h relu(q_h . groups[g]) (each a fixed order), ties to the
   lower group - an exact selection (the score's k-th greatest by its bits), any C - then its own: sel[t * top ..]
-  ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups).
+  ascending, n_sel[t] how many. scores: scratch for n_tok x max_groups (C at most max_groups). spread_scratch: the
+  caller's, hy4_ix_spread_bytes() of it (the selection spread over a token's groups: its state and blocks' counts) -
+  the forward's own, made when it is built.
   read (a prompt's step) past 16 tokens: the scores on the matrix cores (f16 inputs, F32 sums: a near-tie at the
   511th group may swap; env HY4_IX_F32 set: the F32 loop's)
 

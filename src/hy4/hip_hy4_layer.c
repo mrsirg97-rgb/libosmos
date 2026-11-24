@@ -110,8 +110,7 @@ static bool heads_mm(Hy4Forward *f, const void *const *tab, uint32_t heads, uint
 }
 
 /* Engram's residual. its projection on the matvec in a read too: its gate a signed square root of a normed dot - a
-   dot near 0 magnifies its input's rounding (the matrix cores' f16: layer 1 6.3e-3 of its largest against the
-   reference on osmos's own input, 2.3e-4 in F32 - the other layers' f16 error) */
+   dot near 0 magnifies its input's rounding (the matrix cores' f16 too coarse there) */
 static bool engram(Hy4Forward *f, uint32_t n, int l)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -138,7 +137,7 @@ static bool select_runs(Hy4Forward *f, const float *ixw, const float *groups, ui
   {
     const uint32_t m = len - a < HY4_SCORE_ROWS ? len - a : HY4_SCORE_ROWS, o = off + a;
     ok = hy4_ix_select(f->ixq + (uint64_t)o * IH * ID, ixw + (uint64_t)o * IH, groups, IH, ID, pool, top, f->pos + o, m, mg,
-                       f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->st);
+                       f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->ix_spread, f->st);
   }
   return ok;
 }

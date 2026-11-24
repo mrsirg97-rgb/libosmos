@@ -3,8 +3,8 @@
 
      requant_ink2_mtp <bf16 gguf> <out gguf> <mlp type> <attention type>
 
-   types by ggml's names (q8_0, q6_K, q5_K, iq4_nl). osmos-evo-inkling's drafter: q5_K q5_K (1.76 -> 1.18 GiB against
-   q8_0 q8_0, its drafts the same; q8_0 q8_0 is ink2_mtp_gguf.py's Q8_0 byte for byte). */
+   types by ggml's names (q8_0, q6_K, q5_K, iq4_nl). osmos-evo-inkling's drafter: q5_K q5_K; q8_0 q8_0 is
+   ink2_mtp_gguf.py's Q8_0 byte for byte. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -9,7 +9,7 @@
 #define ARCH "deepseek41"
 #define DIM_MAX (1 << 24)
 #define LIST_MAX WEIGHTS_MAX_LAYERS
-_Static_assert(WEIGHTS_ERR == GGUF_META_ERR && WEIGHTS_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && WEIGHTS_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 #define GATING_SQRTSOFTPLUS 4 /* deepseek41.expert_gating_func, the one this build routes by */
 #define NGRAM_MIN 2
 
@@ -91,8 +91,8 @@ static bool engram(GgufMeta *m, const Gguf *file, Geometry *g)
   const GgufKv *theirs = gguf_kv(file, ARCH ".engram.source");
   if (!src || !theirs || theirs->type != GGUF_STRING || strcmp(src->v.s, theirs->v.s) != 0)
     return meta_fail(m, ARCH ".engram.source", "the Engram file is not this model's");
-  const GgufKv *arch = gguf_kv(file, "general.architecture");
-  if (!arch || arch->type != GGUF_STRING || strcmp(arch->v.s, ARCH "-engram") != 0)
+  const char *arch = gguf_arch(file);
+  if (!arch || strcmp(arch, ARCH "-engram") != 0)
     return meta_fail(m, "general.architecture", "the Engram file is not " ARCH "-engram");
   return true;
 }
@@ -150,7 +150,7 @@ static bool ple_engram(GgufMeta *m, const Gguf *file, Geometry *g)
   return ok;
 }
 
-bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err[WEIGHTS_ERR])
+bool weights_geometry(const Gguf *model, const Gguf *file, Geometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, kAliases, N_ALIASES};
   memset(g, 0, sizeof *g);

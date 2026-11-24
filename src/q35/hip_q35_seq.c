@@ -1,5 +1,5 @@
-/* a q35 sequence (osmos/q35/forward.h, DESIGN.md "0.9.0: q35 behind the engine"): its rings of DeltaNet states and
-   conv histories, its attention caches, LSA's index - and what the engine asks of it: prompt, rollback, state, marks */
+/* a q35 sequence (osmos/q35/forward.h): its rings of DeltaNet states and conv histories, its attention caches, LSA's
+   index - and what the engine asks of it: prompt, rollback, state, marks */
 #include <hip/hip_runtime_api.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8,6 +8,7 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/model/fnv.h"
 #include "q35_impl.h"
+#include "osmos/err.h"
 
 #define STATE_MAGIC 0x53353351u /* "Q35S" */
 #define MARK_MAGIC 0x4b353351u  /* "Q35K" */
@@ -43,26 +44,26 @@ static bool reset(Q35Seq *s)
   return ok;
 }
 
-Q35Seq *q35_seq_create(Q35Forward *f, char err[Q35_ERR])
+Q35Seq *q35_seq_create(Q35Forward *f, char err[OSMOS_ERR])
 {
   if (!f)
-    return q35_fail(err, "no forward"), NULL;
+    return osmos_fail(err, "no forward"), NULL;
   const Q35Geometry *g = &f->w->geo;
   Q35Seq *s = calloc(1, sizeof *s);
   if (!s)
-    return q35_fail(err, "out of memory"), NULL;
-  s->f = f;
+    return osmos_fail(err, "out of memory"), NULL;
+  s->f = f, s->bufs.ledger = f->ledger;
   const Q35SeqBytes sb = q35_seq_bytes(g);
   const uint64_t blocks = f->max_ctx / LSA_WINDOW + 1;
   bool ok = true;
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->recurrent[l] ? q35_alloc(&s->ssm[l], Q35_SLOTS * sb.ssm) && q35_alloc(&s->conv[l], Q35_SLOTS * sb.conv)
-                         : q35_alloc(&s->kc[l], f->max_ctx * sb.kv_row) && q35_alloc(&s->vc[l], f->max_ctx * sb.kv_row) &&
-                               (!f->lsa || (q35_alloc(&s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
-                                            q35_alloc(&s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
-                                            q35_alloc(&s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4)));
+    ok = g->recurrent[l] ? q35_alloc(&s->bufs, &s->ssm[l], Q35_SLOTS * sb.ssm) && q35_alloc(&s->bufs, &s->conv[l], Q35_SLOTS * sb.conv)
+                         : q35_alloc(&s->bufs, &s->kc[l], f->max_ctx * sb.kv_row) && q35_alloc(&s->bufs, &s->vc[l], f->max_ctx * sb.kv_row) &&
+                               (!f->lsa || (q35_alloc(&s->bufs, &s->ik[l], (uint64_t)f->max_ctx * LSA_DIM * F) &&
+                                            q35_alloc(&s->bufs, &s->cent[l], blocks * LSA_BUCKETS * LSA_DIM * F) &&
+                                            q35_alloc(&s->bufs, &s->mem[l], blocks * LSA_BUCKETS * LSA_CAP * 4)));
   if (!ok || !reset(s))
-    return q35_seq_destroy(s), q35_fail(err, "GPU memory refused (a sequence's state)"), NULL;
+    return q35_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
 }
 
@@ -70,9 +71,7 @@ void q35_seq_destroy(Q35Seq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < Q35_MAX_LAYERS; l++)
-    hipFree(s->conv[l]), hipFree(s->ssm[l]), hipFree(s->kc[l]), hipFree(s->vc[l]), hipFree(s->ik[l]),
-        hipFree(s->cent[l]), hipFree(s->mem[l]);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s);
 }
 
@@ -178,42 +177,49 @@ uint64_t q35_seq_state_bytes(const Q35Seq *s)
   return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, closed_blocks(s), false, p));
 }
 
-bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[Q35_ERR])
+bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return q35_fail(err, "no sequence or sink");
+    return osmos_fail(err, "no sequence or sink");
   if (s->broken)
-    return q35_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = q35_identity(s->f), h.pos = s->pos,
   h.closed = closed_blocks(s);
   StatePart p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, h.closed, false, p), sink, ctx);
-  return !why || q35_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
+}
+
+bool q35_seq_reset(Q35Seq *s, char err[OSMOS_ERR])
+{
+  return !s ? osmos_fail(err, "no sequence") : reset(s) || osmos_fail(err, "the sequence's reset: a GPU call failed");
 }
 
 static bool refuse(Q35Seq *s, char *err, const char *why)
 {
   reset(s);
-  return q35_fail(err, why);
+  return osmos_fail(err, "%s", why);
 }
 
-bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[Q35_ERR])
+bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return q35_fail(err, "no sequence or source");
+    return osmos_fail(err, "no sequence or source");
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != q35_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
+    return refuse(s, err, bad);
+  if ((uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos) /* (checked before its parts are sized from it) */
+    return refuse(s, err, "a state whose closed blocks are past its position");
   StatePart p[MAX_PARTS];
   s->cur = 0; /* the parts' DeltaNet slots: 0 */
   const int n = parts(s, h.pos, h.closed, false, p);
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx || (uint64_t)h.closed * LSA_WINDOW > (uint64_t)h.pos ||
-      bytes != state_parts_bytes(sizeof h, p, n))
-    return refuse(s, err, "a state past this context, or not its position's size");
+  if (bytes != state_parts_bytes(sizeof h, p, n))
+    return refuse(s, err, "a state not its position's size");
   const char *why = state_parts_load(&h, sizeof h, p, n, src, ctx);
   if (why) /* the parts part written: the reset makes the sequence empty */
     return refuse(s, err, why);
@@ -229,14 +235,14 @@ uint64_t q35_seq_mark_bytes(const Q35Seq *s)
   return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, 0, true, p)) - sizeof(uint64_t); /* no sum: in memory */
 }
 
-bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[Q35_ERR])
+bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !out || bytes != q35_seq_mark_bytes(s))
-    return q35_fail(err, "no sequence, or a mark's room not its size");
+    return osmos_fail(err, "no sequence, or a mark's room not its size");
   if (s->broken)
-    return q35_fail(err, "a sequence after a failed step (its states part written): no mark of it");
+    return osmos_fail(err, "a sequence after a failed step (its states part written): no mark of it");
   if (hipDeviceSynchronize() != hipSuccess)
-    return q35_fail(err, "a GPU call failed (before the mark's save)");
+    return osmos_fail(err, "a GPU call failed (before the mark's save)");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = MARK_MAGIC, h.version = STATE_VERSION, h.identity = q35_identity(s->f), h.pos = s->pos,
@@ -244,30 +250,30 @@ bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[Q35_
   memcpy(out, &h, sizeof h);
   StatePart p[MAX_PARTS];
   const char *why = state_parts_to_host(p, parts(s, s->pos, 0, true, p), (uint8_t *)out + sizeof h);
-  return !why || q35_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
 }
 
-bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[Q35_ERR])
+bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR])
 {
   if (!s || !in || bytes != q35_seq_mark_bytes(s))
-    return q35_fail(err, "no sequence, or a mark not its size");
+    return osmos_fail(err, "no sequence, or a mark not its size");
   Header h;
   memcpy(&h, in, sizeof h);
-  if (h.magic != MARK_MAGIC || h.version != STATE_VERSION || h.identity != q35_identity(s->f) || h.pos < 0 ||
-      h.pos > s->pos)
-    return q35_fail(err, "not this model's mark, or one past the sequence's position");
+  const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));
+  if ((bad = bad ? bad : state_pos_check(h.pos, (uint32_t)s->pos))) /* (a mark at or below the sequence's position) */
+    return osmos_fail(err, "%s", bad);
   if (h.closed != closed_blocks(s)) /* LSA's blocks closed since: their buckets of keys a mark's sequence lacks */
-    return q35_fail(err, "a mark below a block LSA has closed since");
+    return osmos_fail(err, "a mark below a block LSA has closed since");
   if (s->broken)
-    return q35_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
+    return osmos_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");
   if (hipDeviceSynchronize() != hipSuccess) /* its states not still being read */
-    return q35_fail(err, "a GPU call failed (before the mark's load)");
+    return osmos_fail(err, "a GPU call failed (before the mark's load)");
   s->cur = 0;
   StatePart p[MAX_PARTS];
   if (state_parts_from_host(p, parts(s, h.pos, 0, true, p), (const uint8_t *)in + sizeof h))
   {
     reset(s);
-    return q35_fail(err, "a GPU copy failed (the mark's load): the sequence emptied");
+    return osmos_fail(err, "a GPU copy failed (the mark's load): the sequence emptied");
   }
   settle(s, &h);
   return true;

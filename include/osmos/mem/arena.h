@@ -20,16 +20,16 @@ uint64_t arena_largest(const Arena *a);
 /*
 Arena
   memory the caller owns (`base`, `bytes`) handed out in ARENA_GRAIN blocks: the pool's units in host_slots' registered
-  memory (DESIGN.md, "0.3.0: energy a token", target 1). first fit over the free extents in address order; a block
-  freed joins its free neighbours. host-only, no locks: the pool's consumer is its one caller.
+  memory. first fit over the free extents in address order; a block freed joins its free neighbours. host-only, no
+  locks: the pool's consumer is its one caller.
 
 arena_create
   over [base, base + bytes): base ARENA_GRAIN-aligned, bytes a whole number of grains (NULL otherwise, or no memory for
   the bookkeeping). the memory itself is the caller's: destroy does not free it. arena_destroy: NULL nothing to do.
 
 arena_alloc
-  `bytes` rounded up to grains, the first free extent that holds them, from its start; NULL when none holds them (the
-  pool's room: it frees and asks again, or refuses) or bytes is 0.
+  `bytes` rounded up to grains, from the start of the first free extent that holds them; NULL when none holds them or
+  bytes is 0.
 
 arena_free
   a block arena_alloc gave back, joined with its free neighbours. false: not a block of this arena's (never given, or

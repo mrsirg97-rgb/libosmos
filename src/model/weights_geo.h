@@ -6,6 +6,6 @@
 #include "osmos/model/weights.h"
 
 /* the model's metadata into g, checked (weights.h, weights_create); false with the key and why in err */
-bool weights_geometry(const Gguf *model, const Gguf *engram, Geometry *g, char err[WEIGHTS_ERR]);
+bool weights_geometry(const Gguf *model, const Gguf *engram, Geometry *g, char err[OSMOS_ERR]);
 
 #endif

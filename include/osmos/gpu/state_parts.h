@@ -32,4 +32,12 @@ const char *state_parts_load(const void *head, uint64_t head_bytes, const StateP
 const char *state_parts_to_host(const StatePart *p, int n, uint8_t *out);
 const char *state_parts_from_host(const StatePart *p, int n, const uint8_t *in);
 
+/* a loaded header's checks, every family's - each a rule and its words one place. each NULL, or why: the format and
+   model (magic, version, identity); a position within the context; a history's tokens within the vocabulary (the first
+   n of t). run before anything is sized from the header */
+const char *state_head_check(uint64_t magic, uint64_t want_magic, uint32_t version, uint32_t want_version,
+                             uint64_t identity, uint64_t want_identity);
+const char *state_pos_check(int64_t pos, uint32_t max_ctx);
+const char *state_tokens_check(const int32_t *t, int64_t n, uint32_t vocab);
+
 #endif

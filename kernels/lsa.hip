@@ -13,6 +13,7 @@
 #include "launch.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/lsa.h"
+#include "osmos/mem/ledger_hip.h"
 
 namespace {
 
@@ -269,21 +270,23 @@ extern "C" bool lsa_index_gpu(const float* src, uint32_t n, uint32_t row_stride,
 }
 
 struct LsaScratch {
+  OsmosLedger* ledger;  // borrowed: its buffers counted in it
   uint32_t max;
   uint64_t* key;
   uint32_t *hist, *picks, *gt, *eq; /* gt, eq: a chunk's counts, then its offsets */
   Sel* sel;
 };
 
-extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
+extern "C" LsaScratch* lsa_scratch_create(OsmosLedger* l, uint32_t max_buckets) {
   LsaScratch* s = (LsaScratch*) calloc(1, sizeof *s);
   if (!s) return nullptr;
-  s->max = max_buckets;
-  if (hipMalloc((void**) &s->key, (max_buckets ? max_buckets : 1) * 8ull) != hipSuccess ||
-      hipMalloc((void**) &s->hist, 256 * 4) != hipSuccess || hipMalloc((void**) &s->picks, kThreads * 4) != hipSuccess ||
-      hipMalloc((void**) &s->sel, sizeof(Sel)) != hipSuccess || hipMemset(s->hist, 0, 256 * 4) != hipSuccess ||
-      (max_buckets + kChunk - 1) / kChunk > kMaxChunks || hipMalloc((void**) &s->gt, kMaxChunks * 4) != hipSuccess ||
-      hipMalloc((void**) &s->eq, kMaxChunks * 4) != hipSuccess) {
+  s->max = max_buckets, s->ledger = l;
+  if (ledger_malloc(l, (void**) &s->key, (max_buckets ? max_buckets : 1) * 8ull) != hipSuccess ||
+      ledger_malloc(l, (void**) &s->hist, 256 * 4) != hipSuccess ||
+      ledger_malloc(l, (void**) &s->picks, kThreads * 4) != hipSuccess ||
+      ledger_malloc(l, (void**) &s->sel, sizeof(Sel)) != hipSuccess || hipMemset(s->hist, 0, 256 * 4) != hipSuccess ||
+      (max_buckets + kChunk - 1) / kChunk > kMaxChunks || ledger_malloc(l, (void**) &s->gt, kMaxChunks * 4) != hipSuccess ||
+      ledger_malloc(l, (void**) &s->eq, kMaxChunks * 4) != hipSuccess) {
     lsa_scratch_destroy(s);
     return nullptr;
   }
@@ -292,8 +295,9 @@ extern "C" LsaScratch* lsa_scratch_create(uint32_t max_buckets) {
 
 extern "C" void lsa_scratch_destroy(LsaScratch* s) {
   if (!s) return;
-  (void) hipFree(s->key), (void) hipFree(s->hist), (void) hipFree(s->picks), (void) hipFree(s->sel),
-      (void) hipFree(s->gt), (void) hipFree(s->eq);
+  void* b[] = {s->key, s->hist, s->picks, s->sel, s->gt, s->eq};
+  for (void* p : b)
+    if (p) (void) ledger_free(s->ledger, p);
   free(s);
 }
 

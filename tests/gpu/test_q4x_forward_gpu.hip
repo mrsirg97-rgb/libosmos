@@ -95,7 +95,7 @@ static bool same_rows(const Q4xForward* f, uint32_t at, uint32_t rows, const std
 // a sequence twice, or one past max_ctx, refused with every position kept
 static void shared_steps(Q4xForward* f, const std::vector<int32_t>& ids, const std::vector<float>& logits,
                          uint32_t vocab) {
-  char ferr[Q4X_FWD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Q4xSeq *a = q4x_seq_create(f, ferr), *b = q4x_seq_create(f, ferr), *c = q4x_seq_create(f, ferr);
   CHECK(a && b && c && q4x_batch(f, a, ids.data(), 100, 0, ferr) && q4x_batch(f, c, ids.data(), 200, 0, ferr));
   std::vector<int32_t> toks(ids.begin() + 100, ids.begin() + 103);
@@ -126,7 +126,7 @@ static void shared_steps(Q4xForward* f, const std::vector<int32_t>& ids, const s
 static void long_step(const Q4xWeights* w, const std::vector<int32_t>& ids, uint32_t vocab) {
   constexpr uint32_t kA = 1000, kB = 2000, kLong = kA + kB, kAround = 16;  // rows each side of the bound
   static_assert(kLong > MM_MAX_TOKENS && kB <= MM_MAX_TOKENS, "a step past the bound, its references within it");
-  char ferr[Q4X_FWD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Q4xForward* f = q4x_forward_create(w, nullptr, kCtx, kLong, ferr);
   CHECK(f);
   std::vector<int32_t> ta(kA), tb(kB), tl(kLong);  // the dump's ids, over and over
@@ -175,7 +175,7 @@ int main() {
   std::printf("[test_q4x_forward_gpu] start\n");
   int ndev = 0;
   Ref probe0;
-  char err[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(home_path(kQwenFirst).c_str(), err);
   const std::vector<int32_t> ids = dump_ids();
   if (!g || !ref_read("result_norm", &probe0) || ids.size() != kTok || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {

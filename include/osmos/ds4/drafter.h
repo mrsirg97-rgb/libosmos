@@ -1,0 +1,55 @@
+#ifndef DRAFTER_H
+#define DRAFTER_H
+
+#include "osmos/err.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "osmos/ds4/forward.h"
+
+/* DeepSeek's DSpark (its config.json): a round's block, the token y and DRAFTER_BLOCK - 1 noise tokens after it, each
+   row a draft; the noise token; the routed experts a row picks */
+#define DRAFTER_BLOCK 5
+#define DRAFTER_NOISE 128799
+#define DRAFTER_TOPK 3
+
+typedef struct Drafter Drafter;
+
+bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR]);
+
+int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, int32_t drafts[DRAFTER_BLOCK],
+                  float conf[DRAFTER_BLOCK], char err[OSMOS_ERR]);
+
+#endif
+
+/*
+Drafter
+  DeepSeek-V4.1-Flash's DSpark drafter beside a Forward (DeepSeek's inference/model.py DSparkBlock / forward_spec):
+  three blocks - each the trunk's layer in small (hyper-connections, window attention, 128 routed experts of which a row
+  picks DRAFTER_TOPK, a shared one) - whose window is a ring of keys made from the trunk's taps (the streams' mean
+  entering its target layers, through main_proj and main_norm); a round runs the block [y, noise x 4] at the sequence's
+  next positions through them, then the trunk's head and a rank-256 markov bias of each row's previous token give each
+  row's draft (greedy), and a confidence head its confidence. its weights (dir/dspark.bin, experts IQ2_XS) in GPU memory
+  of their own, outside the Forward's budget; its products the matvec's (F32 sums). drafts change no bit of the trunk's:
+  they are only proposals, which a batched forward verifies.
+
+made with its forward (ForwardOptions' drafter: dir's dspark.json, dspark.bin), the forward's own - forward_drafter
+  borrows it, forward_destroy destroys it. the forward taps from its first step - at the target layers the model's GGUF
+  names, else those dspark.json does, checked before the forward's GPU memory is taken: the forward refused, why said,
+  for a drafter it cannot read, target layers neither names (or both, unequal), taps its main_proj does not take, or GPU
+  memory refused.
+
+drafter_seed
+  s's ring rows for its positions from .. to - 1 of f's last step (each one's taps, keys for every block): after a
+  prompt (its last 128 positions), a step, or a verify (its accepted rows only: a rejected row's would overwrite a
+  position still in the window). only to - window .. to - 1 are seeded (the ring holds a window). false with why for
+  a position the last step did not tap - the step's taps are its last FWD_MAX_BATCH rows across every sequence in it,
+  so a step of several prompts past that (rows counted after the decoder skip's compaction) taps only the last ones'
+  ends: seed each prompt from a step of its own (osmos-serve reads one prompt a step).
+
+drafter_draft
+  a round at s's next position, y the token there (not yet stepped): up to DRAFTER_BLOCK drafts, each with its
+  confidence, the longest run whose confidences are each at least conf_min and whose product is at least cum_min (a
+  row's head and markov step only run once its confidence passes: conf[i] depends on draft i - 1, not on draft i).
+  the count, or -1 with why in err. s's own state is not touched.
+*/

@@ -1,6 +1,6 @@
 /* latent sparse attention's read, the host's reference (osmos/lsa.h). Ward's costs and the centroids' sums in double:
    lsa.py's F32 ran on a GPU, its reduction orders the device's, so no F32 order here is its bits - double makes this
-   read one answer, the one the GPU's read is held to; its agreement with lsa.py's sets is measured (tests/test_lsa) */
+   read one answer, the one the GPU's read is held to */
 #include "osmos/lsa.h"
 
 #include <math.h>

@@ -6,6 +6,7 @@
 
 #include "osmos/mem/fetchq.h"
 #include "osmos/mem/resident.h"
+#include "osmos/err.h"
 
 struct Resident
 {
@@ -41,7 +42,7 @@ static void on_read(uint32_t unit, bool ok, void *arg)
 static bool check(const PoolUnit *u, size_t i, uint64_t *size, char *err)
 {
   if (u->n_parts < 1 || u->n_parts > POOL_PARTS)
-    return snprintf(err, POOL_ERR, "unit %zu: %d parts (1 to %d)", i, u->n_parts, POOL_PARTS), false;
+    return osmos_fail(err, "unit %zu: %d parts (1 to %d)", i, u->n_parts, POOL_PARTS), false;
   *size = 0;
   for (int k = 0; k < u->n_parts; k++)
   {
@@ -50,7 +51,7 @@ static bool check(const PoolUnit *u, size_t i, uint64_t *size, char *err)
     if (p->bytes == 0 || (p->fd < 0 && p->offset != 0) ||
         (p->fd >= 0 && (fstat(p->fd, &st) != 0 || p->offset >= (uint64_t)st.st_size ||
                         p->bytes > (uint64_t)st.st_size - p->offset)))
-      return snprintf(err, POOL_ERR, "unit %zu part %d: 0 bytes, or past its file", i, k), false;
+      return osmos_fail(err, "unit %zu part %d: 0 bytes, or past its file", i, k), false;
     *size += up(p->bytes);
   }
   return true;
@@ -70,11 +71,11 @@ static bool lay_out(Resident *r, char *err)
       cap = size > RESIDENT_ARENA ? size : RESIDENT_ARENA;
       uint8_t *a = r->slots.alloc(cap, r->slots.ctx);
       if (!a)
-        return snprintf(err, POOL_ERR, "GPU memory refused (%llu bytes held)", (unsigned long long)r->bytes), false;
+        return osmos_fail(err, "GPU memory refused (%llu bytes held)", (unsigned long long)r->bytes), false;
       r->arena[r->n_arena++] = a, r->bytes += cap, used = 0;
     }
     r->dev[i] = r->arena[r->n_arena - 1] + used;
-    uint64_t at = 0; /* (0.7.1: an int's, wrapped by a first part of 2 GiB or more) */
+    uint64_t at = 0; /* (not an int: a first part of 2 GiB or more wraps one) */
     for (int k = 0; k < r->u[i].n_parts; k++)
       r->off[i][k] = at, at += up(r->u[i].part[k].bytes);
     used += size;
@@ -82,12 +83,12 @@ static bool lay_out(Resident *r, char *err)
   return true;
 }
 
-Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, int threads, char err[POOL_ERR])
+Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, int threads, char err[OSMOS_ERR])
 {
   err[0] = 0;
   Resident *r = calloc(1, sizeof *r);
   if (!r)
-    return snprintf(err, POOL_ERR, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
   pthread_mutex_init(&r->mu, NULL);
   pthread_cond_init(&r->cv, NULL);
   r->slots = slots, r->n = n_units;
@@ -96,7 +97,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
   r->arena = calloc(m, sizeof *r->arena); /* at most an arena a unit */
   if (!r->u || !r->dev || !r->off || !r->arena)
   {
-    snprintf(err, POOL_ERR, "out of memory");
+    osmos_fail(err, "out of memory");
     resident_destroy(r);
     return NULL;
   }
@@ -106,7 +107,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
   bool ok = lay_out(r, err);
   if (ok && n_units && !(q = fetchq_create(threads, (uint32_t)n_units, on_read, r)))
   {
-    snprintf(err, POOL_ERR, "the readers could not start");
+    osmos_fail(err, "the readers could not start");
     ok = false;
   }
   for (size_t i = 0; ok && i < n_units; i++)
@@ -127,7 +128,7 @@ Resident *resident_create(const PoolUnit *units, size_t n_units, Slots slots, in
   fetchq_destroy(q);
   if (ok && r->failed)
   {
-    snprintf(err, POOL_ERR, "%zu of %zu reads failed", r->failed, n_units);
+    osmos_fail(err, "%zu of %zu reads failed", r->failed, n_units);
     ok = false;
   }
   if (!ok)

@@ -1,12 +1,11 @@
-// tools/bench/bench_common.h - what the bench tools share, once (0.7.1: copies of it had drifted)
+// tools/bench/bench_common.h - what the bench tools share, once
 #pragma once
 #include <cmath>
 #include <cstddef>
 #include <vector>
 
 // the q-quantile of sorted values as numpy's np.quantile (its default, "linear") gives it - kld_compare.py's - so a
-// run's median and p99 are the same digits whichever tool printed them (0.7.1: kld.hip and q4x_kld.hip took
-// sorted[n / 2] and sorted[floor(0.99 n)], numpy interpolates)
+// run's median and p99 are the same digits whichever tool printed them
 static inline double bench_quantile(const std::vector<double>& sorted, double q) {
   if (sorted.empty()) return NAN;
   const double at = q * (double) (sorted.size() - 1);

@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "osmos/text/json.h"
+#include "osmos/err.h"
 
 /* the reader: RFC 8259 by recursive descent, Python's json.loads' meaning for what it reads (json.h) */
 
@@ -12,14 +13,19 @@ typedef struct Cur
   const char *start, *p, *end;
   char *err;
   int depth;
+  size_t budget, used; /* the tree's bytes at most (json_parse_within), and taken: every allocation counted */
 } Cur;
 
-static Json *fail(Cur *c, const char *why)
+/* the bytes an allocation takes counted against the budget: false past it */
+static bool spend(Cur *c, size_t n)
 {
-  if (!c->err[0])
-    snprintf(c->err, JSON_ERR, "json: %s at byte %td", why, c->p - c->start);
-  return NULL;
+  if (n > c->budget - c->used)
+    return false;
+  c->used += n;
+  return true;
 }
+
+static Json *fail(Cur *c, const char *why) { return osmos_fail(c->err, "json: %s at byte %td", why, c->p - c->start), NULL; }
 
 static void ws(Cur *c)
 {
@@ -36,11 +42,14 @@ static bool take(Cur *c, const char *lit)
   return true;
 }
 
-static Json *node(JsonType t)
+static Json *node(Cur *c, JsonType t)
 {
+  if (!spend(c, sizeof(Json)))
+    return fail(c, "past its memory budget");
   Json *j = calloc(1, sizeof *j);
-  if (j)
-    j->type = t;
+  if (!j)
+    return fail(c, "out of memory");
+  j->type = t;
   return j;
 }
 
@@ -91,10 +100,17 @@ size_t json_utf8_len(const unsigned char *p, size_t left)
   return c < least[n] || (c >= 0xD800 && c <= 0xDFFF) || c > 0x10FFFF ? 0 : n;
 }
 
-/* a string's text (after its opening quote) into a new buffer: *len its bytes */
+/* a string's text (after its opening quote) into a new buffer of its own bytes: *len them. its span to the closing
+   quote sized first (an escape only shrinks it), never the input's whole rest */
 static char *string(Cur *c, size_t *len)
 {
-  char *o = malloc((size_t)(c->end - c->p) + 1);
+  const char *q = c->p;
+  while (q < c->end && *q != '"')
+    q += *q == '\\' && q + 1 < c->end ? 2 : 1;
+  const size_t span = (size_t)(q - c->p);
+  if (!spend(c, span + 1))
+    return fail(c, "past its memory budget"), NULL;
+  char *o = malloc(span + 1);
   size_t n = 0;
   if (!o)
     return fail(c, "out of memory"), NULL;
@@ -134,8 +150,8 @@ static char *string(Cur *c, size_t *len)
         cp = 0xFFFD;
     }
     else if (cp >= 0xDC00 && cp <= 0xDFFF) /* a lone surrogate (a JS string cut between a pair's halves, as
-                                              JSON.stringify writes it): U+FFFD, as lenient decoders take it - 0.11.2,
-                                              refused: the conversation's every later request refused with it */
+                                              JSON.stringify writes it): U+FFFD, as lenient decoders take it - refused,
+                                              the conversation's every later request would be */
       cp = 0xFFFD;
     n += put_utf8(o + n, cp);
   }
@@ -182,8 +198,12 @@ static Json *number(Cur *c)
     flt = true;
   }
   const size_t n = (size_t)(c->p - s);
-  Json *j = node(flt ? JSON_FLOAT : JSON_INT);
-  char *text = j ? malloc(n + 1) : NULL;
+  Json *j = node(c, flt ? JSON_FLOAT : JSON_INT);
+  if (!j)
+    return NULL; /* (its cause said) */
+  if (!spend(c, n + 1))
+    return free(j), fail(c, "past its memory budget");
+  char *text = malloc(n + 1);
   if (!text)
     return free(j), fail(c, "out of memory");
   memcpy(text, s, n), text[n] = 0;
@@ -204,8 +224,12 @@ static Json *number(Cur *c)
 
 static Json *value(Cur *c);
 
-static bool grow(Json *j, size_t cap)
+/* a container's slots to cap: false, its cause said (the budget, or out of memory) */
+static bool grow(Cur *c, Json *j, size_t cap)
 {
+  const size_t was = j->n, each = sizeof *j->item + (j->type == JSON_OBJECT ? sizeof *j->key + sizeof *j->klen : 0);
+  if (!spend(c, (cap - was) * each)) /* (the new slots: the old ones counted when they came) */
+    return fail(c, "past its memory budget"), false;
   Json **it = realloc(j->item, cap * sizeof *it);
   if (it)
     j->item = it;
@@ -217,9 +241,9 @@ static bool grow(Json *j, size_t cap)
       j->key = k;
     if (kl)
       j->klen = kl;
-    return k && kl;
+    return (k && kl) || (fail(c, "out of memory"), false);
   }
-  return it != NULL;
+  return it || (fail(c, "out of memory"), false);
 }
 
 /* an object's keys in order: bytes, then length, then where they came - each key's first place at its run's head */
@@ -247,8 +271,7 @@ static void merge_sort(const Json *j, size_t *x, size_t *tmp, size_t n)
 }
 
 /* an object's duplicate keys made one (Python's dict: the first's place, the last's value) once it closes - by a
-   merge sort of its keys, n log n whatever the keys (a key compared with every earlier one was n^2: one 1 MB body
-   held a core 67 s) */
+   merge sort of its keys, n log n whatever the keys (a client's body bounds no key count) */
 static bool dedupe(Json *j)
 {
   if (j->n < 2)
@@ -292,10 +315,10 @@ static bool dedupe(Json *j)
 static Json *container(Cur *c, JsonType t)
 {
   const char close = t == JSON_ARRAY ? ']' : '}';
-  Json *j = node(t);
+  Json *j = node(c, t);
   size_t cap = 0;
   if (!j)
-    return fail(c, "out of memory");
+    return NULL; /* (its cause said) */
   ws(c);
   if (c->p < c->end && *c->p == close)
     return c->p++, j;
@@ -315,8 +338,8 @@ static Json *container(Cur *c, JsonType t)
     Json *v = value(c);
     if (!v)
       return free(key), json_free(j), NULL;
-    if (j->n == cap && !grow(j, cap = cap ? 2 * cap : 4))
-      return free(key), json_free(v), json_free(j), fail(c, "out of memory");
+    if (j->n == cap && !grow(c, j, cap = cap ? 2 * cap : 4)) /* (its cause said) */
+      return free(key), json_free(v), json_free(j), NULL;
     j->item[j->n] = v;
     if (key)
       j->key[j->n] = key, j->klen[j->n] = klen;
@@ -346,35 +369,42 @@ static Json *value(Cur *c)
     c->p++;
     size_t n;
     char *s = string(c, &n);
-    j = s ? node(JSON_STRING) : NULL;
+    j = s ? node(c, JSON_STRING) : NULL;
     if (j)
       j->s = s, j->len = n;
     else if (s)
       free(s), fail(c, "out of memory");
   }
   else if (take(c, "true"))
-    j = node(JSON_TRUE);
+    j = node(c, JSON_TRUE);
   else if (take(c, "false"))
-    j = node(JSON_FALSE);
+    j = node(c, JSON_FALSE);
   else if (take(c, "null"))
-    j = node(JSON_NULL);
+    j = node(c, JSON_NULL);
   else
     j = number(c);
   c->depth--;
   return j;
 }
 
-Json *json_parse(const char *text, size_t len, char err[JSON_ERR])
+Json *json_parse_within(const char *text, size_t len, size_t budget, size_t *used, char err[OSMOS_ERR])
 {
   err[0] = 0;
-  Cur c = {text, text, text + len, err, 0};
+  Cur c = {text, text, text + len, err, 0, budget, 0};
   Json *j = text ? value(&c) : NULL;
+  if (used)
+    *used = c.used;
   if (!j)
     return fail(&c, "no value");
   ws(&c);
   if (c.p != c.end)
     return json_free(j), fail(&c, "data after the value");
   return j;
+}
+
+Json *json_parse(const char *text, size_t len, char err[OSMOS_ERR])
+{
+  return json_parse_within(text, len, SIZE_MAX, NULL, err);
 }
 
 void json_free(Json *j)

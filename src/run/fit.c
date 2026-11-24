@@ -36,7 +36,7 @@ static uint64_t next(uint64_t built, uint64_t room, uint64_t target, double cost
   return step >= 0 ? built + (uint64_t)step : (-step < (double)built ? built - (uint64_t)-step : 0);
 }
 
-bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[FIT_ERR])
+bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[OSMOS_ERR])
 {
   const uint64_t target = headroom + FIT_SLACK / 2; /* the window's middle: a step's error either side stays in it */
   uint64_t built = 0, room = 0;
@@ -46,9 +46,10 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
   uint64_t ok = dense, over = UINT64_MAX; /* the largest budget that left the headroom (or the floor), the smallest
                                             that did not or was refused */
   uint64_t last = built, last_room = room;
+  uint64_t prev = built, prev_room = room; /* the build before last: two budgets, one room - a flat */
   /* GPU memory a byte of budget takes: measured from two builds, at least 1 - until then FIT_FIRST_COST, the most the
-     units' padding has been (the box's 6%, the 12% test_fit models), so the first step, the longest, lands short of
-     the target, not past it into the RAM kept free (at 1: 90 GiB over 6% padding went 5 GiB past) */
+     units' padding has been, so the first step, the longest, lands short of the target, not past it into the RAM
+     kept free */
   double cost = FIT_FIRST_COST;
   bool live = true;
   for (int i = 1; i < FIT_BUILDS; i++)
@@ -58,6 +59,17 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
     if (live && room < headroom && built <= dense)
       break; /* short at the floor: nothing smaller */
     uint64_t want = next(last, last_room, target, cost);
+    /* on a flat short of the headroom - two budgets, the room moved less than half as far (a byte of budget costs at
+       least a byte off a flat: only the streamed pool's drift moves it there) - the room moves in steps, not with the
+       budget, so the shortfall says nothing of how far: stepped below the flat by one step, not crept across it a
+       fraction at a time */
+    const uint64_t moved = prev_room > last_room ? prev_room - last_room : last_room - prev_room;
+    const uint64_t apart = prev > last ? prev - last : last - prev;
+    if (live && last_room < headroom && prev_room < headroom && apart && moved < apart / 2)
+    {
+      const uint64_t low = prev < last ? prev : last;
+      want = low > dense + FIT_CHUNK ? low - FIT_CHUNK : dense;
+    }
     if (over != UINT64_MAX && (want >= over || want <= ok))
       want = ok + (over - ok) / 2; /* outside the bracket: its middle */
     if (over != UINT64_MAX && over - ok <= FIT_SLACK)
@@ -74,10 +86,11 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
     {
       /* a byte of budget takes at least a byte of the room (both its bounds: the GPU's and the RAM's; the units'
          padding past it): a measure under 1 is the room's own wobble (MemAvailable's), and a step over it would go
-         past the target by the wobble over the cost - the box's 98.99 -> 104.06 GiB, 2.79 GiB of RAM left (0.15.0) */
+         past the target by the wobble over the cost */
       const double c = ((double)last_room - (double)room) / ((double)built - (double)last);
       cost = c >= 1.0 ? c : 1.0;
     }
+    prev = last, prev_room = last_room;
     last = built, last_room = room;
     if (room >= headroom)
       ok = built > ok ? built : ok;

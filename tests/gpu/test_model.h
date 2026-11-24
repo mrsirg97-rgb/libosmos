@@ -47,7 +47,7 @@ inline TestModel test_model(char* path, size_t n) {
 // the test model's weights (and its GGUFs, for the caller to destroy after them): ds1017's Engram is a file of its
 // own, UD-IQ1_M's in its shards. NULL where they do not load
 inline Weights* test_weights(const char* path, TestModel which, Gguf** g, Gguf** eg) {
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   std::string dir(path);
   dir = dir.substr(0, dir.rfind('/') + 1);
   *g = gguf_create(path, err);

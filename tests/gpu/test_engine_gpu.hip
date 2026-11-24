@@ -12,14 +12,15 @@
 #include <string>
 #include <vector>
 
+#include "osmos/err.h"
 #include "state_stream.h"
 
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/drafter.h"
+#include "osmos/ds4/drafter.h"
 #include "osmos/run/engine.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 #include "test_fit.h"
@@ -143,7 +144,7 @@ int main() {
   // the family's own calls, as osmos-serve made them before 0.4.0 (forward_lane 0: its decode's order)
   Run direct;
   {
-    char gerr[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+    char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
     Gguf* g = gguf_create(path, gerr);
     const WeightsOptions wo = {g, nullptr, nullptr};
     Weights* w = g ? weights_create_with(&wo, werr) : nullptr;
@@ -152,17 +153,18 @@ int main() {
           fx.round_tokens == (uint32_t) ((w->geo.n_experts - 1) / w->geo.n_used) &&
           fx.seed_window == (uint32_t) w->geo.window && fx.native_ctx > 0);
     ForwardOptions fo = {(int) w->geo.n_layers, kCtx, kBudget, nullptr, 0, true};
+    fo.lane = true, fo.drafter = ddir.c_str(); /* (the forward whole: its lane and its drafter, the engine's) */
     Forward* f = nullptr;
     Drafter* d = nullptr;
-    TestFit fit = {[&](uint64_t b) {  // (the forward, its lane and drafter: everything this part holds)
+    TestFit fit = {[&](uint64_t b) {
                      fo.budget = b;
-                     return (f = forward_create_with(w, &fo, ferr)) && forward_lane(f, 0, NULL, ferr) &&
-                            (d = drafter_create(f, ddir.c_str(), ferr));
+                     return (f = forward_create_with(w, &fo, ferr)) && (d = forward_drafter(f));
                    },
                    [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
-                   [&] { drafter_destroy(d), d = nullptr, forward_destroy(f), f = nullptr; }};
+                   [&] { d = nullptr, forward_destroy(f), f = nullptr; }};
     uint64_t budget = 0;  // (test_fit: the test's own, or this machine's fill where it is smaller)
     CHECK(test_fit(fit, kBudget, &budget));
+    osmos_clear(ferr);
     Seq* s = seq_create(f, ferr);
     CHECK(s);
     std::vector<Seq*> ss(OSMOS_MAX_BLOCK + 1 > kPrompt ? OSMOS_MAX_BLOCK + 1 : kPrompt, s);
@@ -182,8 +184,7 @@ int main() {
         },
         [&](uint32_t n) { return seq_rollback(s, n); });
     seq_destroy(s);
-    drafter_destroy(d);
-    forward_destroy(f);
+    forward_destroy(f); /* (its drafter with it) */
     weights_destroy(w);
     gguf_destroy(g);
   }
@@ -200,6 +201,9 @@ int main() {
   CHECK(osmos_room(e, &room) && room > 0);
   OsmosStats st;
   osmos_stats(e, &st);
+  if (!(st.budget > 0 && st.budget <= kBudget))  // (the whole build's budget a ceiling: built never past it)
+    std::fprintf(stderr, "  built %llu bytes against a budget of %llu (%+lld)\n", (unsigned long long) st.budget,
+                 (unsigned long long) kBudget, (long long) st.budget - (long long) kBudget);
   CHECK(st.budget > 0 && st.budget <= kBudget);
   OsmosSeq* s = oseq_create(e, err);
   CHECK(s && oseq_position(s) == 0 && oseq_reach(s) == 0);

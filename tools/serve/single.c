@@ -7,6 +7,7 @@
 
 #include "serve.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/err.h"
 
 #define QUEUED 64 /* lines that came while a request ran, kept for after it */
 
@@ -114,8 +115,8 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   int32_t dr[OSMOS_MAX_BLOCK], picks[OSMOS_MAX_BLOCK + 1], toks[OSMOS_MAX_BLOCK + 1];
   float cf[OSMOS_MAX_BLOCK];
   if (server_eos(sv, *t) || a->produced + 1 >= a->limit) /* t the answer's last: printed, not fed (a greedy token's
-                                                            end) - its verify was work for nothing, and its rollback
-                                                            past a block's close refused, the turn failed (0.11.2) */
+                                                            end) - its verify would be work for nothing, and its
+                                                            rollback past a block's close refused */
   {
     out("T %d\n", *t), a->produced++;
     if (server_eos(sv, *t))
@@ -170,7 +171,7 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
       return -1;
   *t = picks[m];
   if (!end && (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* the context's last position: its pick printed, not
-                                                                    fed, as step_greedy's last (0.9.2: dropped) */
+                                                                    fed, as step_greedy's last */
   {
     out("T %d\n", *t), a->produced++;
     if (server_eos(sv, *t))
@@ -206,6 +207,7 @@ static void fail(Server *sv, Conv *c)
 /* one request: the prompt's rest a step at a time (PP), the answer (T), DONE */
 static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
 {
+  osmos_clear(c->err); /* (osmos/err.h: an earlier request's cause never this one's) */
   const double t0 = now_ms();
   const uint32_t n = g->n;
   if (n >= sv->max_ctx)
@@ -221,14 +223,14 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
   }
   if (!conv_continue(c, sv, g->ids, n))
   {
-    fail(sv, c); /* its state and held ids restarted as one (0.11.2: a slot's load short of memory part way left them
-                    apart - the next turn read on at the wrong position); multi.c's lane_fail as ever */
+    fail(sv, c); /* its state and held ids restarted as one (a slot's load failed part way leaves them apart);
+                    multi.c's lane_fail the same */
     return;
   }
   const uint32_t reused = c->held.n;
   if (!oseq_prompt(c->s, conv_prompt_end(c, n, g->mark)))
   {
-    snprintf(c->err, sizeof c->err, "the prompt's end not past the conversation's");
+    osmos_fail(c->err, "the prompt's end not past the conversation's");
     fail(sv, c);
     return;
   }
@@ -284,7 +286,7 @@ int serve_single(Server *sv, Conv *c)
     char why[256];
     if (!strcmp(line, "QUIT"))
       ctl.quit = true;
-    else if (!strncmp(line, "GEN ", 4) && !parse_gen(line, &g, why, sizeof why))
+    else if (!strncmp(line, "GEN ", 4) && !gen_parse(line, &g, why, sizeof why))
       out("ERR %s\n", why);
     else if (!strncmp(line, "GEN ", 4))
     {

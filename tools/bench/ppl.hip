@@ -18,7 +18,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 #include "osmos/run/engine.h"
 }
 
@@ -44,7 +44,7 @@ int main(int argc, char** argv) {
   CHECK(ids.size() >= n && n > 1);
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
   const char* op = std::getenv("OVERLAY");
@@ -64,12 +64,12 @@ int main(int argc, char** argv) {
     std::fclose(pf);
     o.picks = picks.data();
   }
+  /* the forward whole: its lane (as the engine's), the NPU beside the GPU (NPU=<its kernels' dir>, NPU_SHARE
+     of a layer's pairs) */
+  o.lane = true, o.npu = std::getenv("NPU");
+  o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-  CHECK(forward_lane(f, 0, NULL, ferr));
-  if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
-    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
-      std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   const size_t V = (size_t) w->geo.n_vocab;

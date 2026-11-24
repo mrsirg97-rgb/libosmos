@@ -1,6 +1,7 @@
 #ifndef OSMOS_TEXT_CHAT_LFM3_H
 #define OSMOS_TEXT_CHAT_LFM3_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 
@@ -11,18 +12,17 @@
 #define LCHAT_EOS "<|im_end|>"
 
 bool lchat_render(const Json *messages, const Json *tools, ChatMode mode, bool preserve, JsonBuf *out,
-                  char err[CHAT_ERR]);
-bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[CHAT_ERR]);
+                  char err[OSMOS_ERR]);
+bool lchat_parse(const char *text, size_t len, ChatMode mode, const Json *tools, JsonBuf *out, char err[OSMOS_ERR]);
 bool lchat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, const Json *tools,
-                        JsonBuf *out, char err[CHAT_ERR]);
+                        JsonBuf *out, char err[OSMOS_ERR]);
 extern const char *const lchat_refused[]; /* special tokens' text a completion can't hold (NULL-terminated) */
 
 #endif
 
 /*
-LFM3's chat template (the tokenizer.chat_template of vibes1.7b's GGUF: LiquidAI's LFM3-1.7B's, the checkpoint's own
-chat_template.jinja): the port held to it byte for byte as transformers renders it (tests/test_chat_lfm3.c,
-tools/gen_chat_fixtures_lfm3.py). text only.
+LFM3's chat template (LiquidAI's, the checkpoint's own chat_template.jinja), ported byte for byte as transformers
+renders it. text only.
 
 lchat_render
   messages (a JSON array: a role and content - a string, text parts or null; an assistant's thinking / reasoning /

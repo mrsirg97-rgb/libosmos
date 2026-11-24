@@ -3,16 +3,18 @@
 
 /* DFlash2's drafter for any target (hip_dflash_core.c: z-lab's DFlash2DraftModel on the q4x_df_* kernels): its
    buffers, its context's seed and its block's draft - the math one, the target's own calls (its matrices, its
-   embedding and head, its stream, its checks) through a DfHost. q4x's (src/q4x/hip_dflash.c) and LFM3's
-   (src/lfm3/hip_lfm3_dflash.c) each a host: their bits as before the core (0.11.2) */
+   embedding and head, its stream, its checks) through a DfHost: q4x's (src/q4x/hip_q4x_draft_dflash.c), LFM3's
+   (src/lfm3/hip_lfm3_draft.c) */
 
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/bufs.h"
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/q4x/dflash.h"
 
-/* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out. device
-   pointers first, then the pinned (df_buffers_free's order) */
+/* the drafter's buffers: a seed's max_tokens context rows, a block's, the selector's, pinned copies out - each made
+   through one ledger and freed by name, never as an array of the struct's first pointers */
 typedef struct DfBuf
 {
   float *th;            /* [max_tokens][n_embd]: the context's taps through fc, then its hidden norm */
@@ -24,6 +26,7 @@ typedef struct DfBuf
   int32_t *tok, *iota; /* device: the block's tokens (y, then masks); 0 .. max_ctx + block (a run's positions) */
   int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
   float *pin_val, *pin_p;
+  GpuBufs bufs;        /* the device buffers' record (osmos/gpu/bufs.h: its ledger the pinned ones' too) */
 } DfBuf;
 
 /* a target's calls the drafter's math goes through - each on its own stream, its own matrices' path */
@@ -51,13 +54,12 @@ typedef struct DfRings
   uint32_t ring;
 } DfRings;
 
-bool df_buffers(DfBuf *d, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx);
+bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx);
 void df_buffers_free(DfBuf *d);
 bool df_seed(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, const float *taps, int32_t from,
              uint32_t n);
 int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, int32_t y, int32_t pos0,
-             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err,
-             uint32_t err_n);
+             int32_t ctx_from, uint32_t n, float conf_min, float cum_min, int32_t *drafts, float *conf, char *err);
 
 #endif
 

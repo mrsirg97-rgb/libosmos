@@ -3,22 +3,24 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/mem/experts.h"
 #include "osmos/mem/host_slots.h"
 #include "osmos/run/fit.h"
 
 #include <hip/hip_runtime_api.h>
+#include "osmos/err.h"
 
-bool experts_create(const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
+bool experts_create(OsmosLedger *l, const PoolUnit *units, uint32_t layers, uint32_t experts, const uint32_t *order,
                     const ExpertsPlan *p, uint64_t grain, int readers, membrane_copy_fn copy, void *copy_ctx,
-                    uint64_t ahead_limit, bool warm_now, Experts *out, char err[MEMBRANE_ERR])
+                    uint64_t ahead_limit, bool warm_now, Experts *out, char err[OSMOS_ERR])
 {
   memset(out, 0, sizeof *out);
-  char perr[POOL_ERR] = "";
-  if (!(out->slots = host_slots_create(p->room + 2 * p->largest, perr)) ||
-      !(out->stream = host_slots_create(p->stream_room + 2 * p->largest, perr)))
+  char perr[OSMOS_ERR] = "";
+  if (!(out->slots = host_slots_create(l, p->room + 2 * p->largest, perr)) ||
+      !(out->stream = host_slots_create(l, p->stream_room + 2 * p->largest, perr)))
   {
-    snprintf(err, MEMBRANE_ERR, "the experts' memory refused: %s", perr);
+    osmos_fail(err, "the experts' memory refused: %s", perr);
     return experts_destroy(out), false;
   }
   const MembraneOptions mo = {units, layers, experts, p->room, p->stream_room, host_slots(out->slots),
@@ -35,11 +37,13 @@ void experts_destroy(Experts *e)
   memset(e, 0, sizeof *e);
 }
 
-uint64_t experts_fit_now(uint64_t fixed)
+uint64_t experts_fit_now(OsmosLedger *l, uint64_t fixed)
 {
-  size_t gpu_free = 0, total = 0;
-  if (hipMemGetInfo(&gpu_free, &total) != hipSuccess)
+  char err[OSMOS_ERR] = "";
+  OsmosLedger *own = l ? NULL : ledger_create(FIT_RAM_FREE, err); /* (a caller with none: the machine as it stands) */
+  if (!l && !own)
     return 1;
-  const uint64_t room = fit_room((uint64_t)gpu_free, fit_ram_available(), FIT_RAM_FREE);
-  return room > FIT_HEADROOM ? fixed + room - FIT_HEADROOM : 1;
+  const uint64_t left = ledger_left_settled(l ? l : own);
+  ledger_destroy(own);
+  return left ? fixed + left : 1;
 }

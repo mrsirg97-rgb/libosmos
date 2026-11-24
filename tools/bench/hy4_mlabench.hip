@@ -1,6 +1,6 @@
 // hy4_mlabench - Hy4-flash's MLA attention (hy4_mla_attn) at a prompt step's shapes: 2,048 tokens, the Q8_0 cache;
 // a sliding layer (64 heads, a window of 512) and a sparse one (32 heads, 512 groups of 4 a token, at a context of
-// 32K); random rows. the median of 5 after a warm-up, each on the matrix cores and (HY4_MLA_F32's) the F32 path
+// 32K); random rows. the median of 5 after a warm-up, each on the matrix cores and the F32 path (a decode's: read false)
 //   hy4_mlabench
 #include <hip/hip_runtime.h>
 

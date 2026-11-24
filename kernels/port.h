@@ -1,5 +1,5 @@
 // the GPU's own instructions behind one name each (DESIGN.md, "a second GPU: CUDA"): on HIP (gfx1151) each is the
-// builtin itself, the same code as before; on CUDA (sm_120, clang's CUDA mode) the same result by CUDA's means. the
+// builtin itself; on CUDA (sm_120, clang's CUDA mode) the same result by CUDA's means. the
 // WMMA tiles keep RDNA's wave32 layout lane for lane - a lane l < 16 holds A's row l and B's column l (16 values),
 // lanes 16 .. 31 the same again; D's element j of lane l is row 2j + l / 16, column l % 16 - so a kernel's loads and
 // stores are the same code on both

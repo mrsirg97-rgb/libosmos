@@ -2,8 +2,9 @@
 #define OSMOS_LFM3_IMPL_H
 
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
-   hip_lfm3.c (the step) */
+   hip_lfm3_step.c (the step) */
 
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -11,6 +12,7 @@
 #include "osmos/lfm3/forward.h"
 #include "osmos/q4x/dflash.h"
 #include "../q4x/dflash_core.h"
+#include "osmos/gpu/overflow.h"
 
 #define F 4ull               /* a float's bytes */
 #define LFM3_CONV_SLOTS (LFM3_MAX_BACK + 1) /* a convolution's states a sequence keeps: the current, and a rollback's */
@@ -19,6 +21,7 @@ typedef DfBuf Lfm3DfBuf; /* the drafter's buffers: the DFlash2 core's (src/q4x/d
 
 struct Lfm3Forward
 {
+  OsmosLedger *ledger; /* borrowed (Lfm3Options'): every allocation of the forward and its sequences */
   const Lfm3Weights *w;
   void **dev; /* each tensor's device copy, by the model's index */
   uint32_t max_tokens, max_ctx, logit_rows;
@@ -42,7 +45,7 @@ struct Lfm3Forward
   /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
      a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
   bool lsa;
-  uint64_t lsa_id; /* the maps file's (fnv_file): a state's index vectors and buckets theirs (lfm3_identity - 0.11.2) */
+  uint64_t lsa_id; /* the maps file's (fnv_file): a state's index vectors and buckets theirs (lfm3_identity) */
   uint32_t lsa_in;
   float *wq[LFM3_MAX_LAYERS], *wk[LFM3_MAX_LAYERS];
   LsaScratch *lsa_s;
@@ -56,6 +59,7 @@ struct Lfm3Forward
   int32_t *counts;
   float *h_ik, *h_cent;
   int32_t *h_mem;
+  OverflowFlag ovf;   /* its reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */
   void *st;
   /* a step's buffers: max_tokens rows each */
@@ -83,6 +87,7 @@ struct Lfm3Forward
 
 struct Lfm3Seq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Lfm3Forward *f;
   int32_t pos;
   uint32_t stage, turned; /* its YaRN stage; the position its last crossing turned the keys at (a rollback's floor) */
@@ -120,8 +125,10 @@ static inline LsaDims lfm3_free_dims(const Lfm3Geometry *g)
   return (LsaDims){p, half, half + p, (uint32_t)g->head_dim};
 }
 
-bool lfm3_fail(char *err, const char *why);
-bool lfm3_alloc(void *p, uint64_t bytes);
+/* a GPU buffer recorded in b (the forward's, or a sequence's: its ledger the forward's), freed from the record at its
+   owner's destroy; lfm3_free gives back one the record does not hold (a tensor's, made by the upload) */
+bool lfm3_alloc(GpuBufs *b, void *p, uint64_t bytes);
+void lfm3_free(Lfm3Forward *f, void *p);
 static inline const void *lfm3_dev(const Lfm3Forward *f, const GgufTensor *t)
 {
   return f->dev[t - f->w->model->tensors];

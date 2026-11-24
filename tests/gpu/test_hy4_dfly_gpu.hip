@@ -11,6 +11,7 @@ extern "C" {
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "osmos/err.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/hy4/forward.h"
 #include "osmos/model/gguf.h"
@@ -42,7 +43,7 @@ static void dump(const std::string& dir, const char* name, const void* dev, size
 }
 
 int main() {
-  char err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   const char* home = getenv("HOME") ? getenv("HOME") : "";
   const std::string model = getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4")
                                                      : std::string(home) + "/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf";
@@ -55,6 +56,7 @@ int main() {
     std::printf("[test_hy4_dfly_gpu] skipped: no GPU, ids, drafter or model (%s)\n", gerr);
     return 77;
   }
+  osmos_clear(err);
   Hy4Weights* w = hy4_weights_create(g, err);
   CHECK(w);
   std::vector<int> fds(g->n_files);
@@ -71,30 +73,37 @@ int main() {
     fid.assign(v.begin(), v.end());
   }
   CHECK(kPrompt > 0 && fid.size() >= kPrompt);
-  const Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
+  const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
+  Hy4Options o = {kPrompt, kPrompt + kGen + 64, HY4_DFLY_DRAFTS + 1, getenv("OSMOS_TEST_HY4_KV8") == nullptr};
+  o.budget = FIT_BUDGET_NOW;
+  o.dfly = dfly.c_str(), o.dfly_q8 = q8; /* (DFly2 made with the forward) */
+  osmos_clear(err);
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);
-  CHECK(f);
-  const bool q8 = getenv("OSMOS_TEST_DFLY_Q8") != nullptr;  // (the engine's: Q8_0; the reference's check strict in BF16)
-  if (!hy4_dfly_load(f, dfly.c_str(), q8, err)) std::printf("  refused: %s\n", err);
-  CHECK(f->dfly);
+  CHECK(f && f->dfly);
   std::printf("[test_hy4_dfly_gpu] DFly2 loaded beside the forward (%s); a prompt of %u tokens\n", dfly.c_str(), kPrompt);
   std::vector<int32_t> ids(kPrompt);
   for (uint32_t t = 0; t < kPrompt; t++) ids[t] = (int32_t) fid[t];
 
   // plain greedy: the prompt, then a token a step
+  osmos_clear(err);
   Hy4Seq* a = hy4_seq_create(f, err);
+  osmos_clear(err);
   CHECK(a && hy4_step(f, a, ids.data(), kPrompt, 1, err));
   std::vector<int32_t> plain;
   int32_t y = 0;
+  osmos_clear(err);
   CHECK(hy4_greedy(f, kPrompt - 1, 1, &y, err));  // (the prompt's last row: a step row's index)
   for (uint32_t k = 0; k < kGen; k++) {
     plain.push_back(y);
+    osmos_clear(err);
     CHECK(hy4_step(f, a, &y, 1, 1, err) && hy4_greedy(f, 0, 1, &y, err));
   }
 
   // drafted: rounds of [y, drafts] verified in one step, the rejected rolled back
+  osmos_clear(err);
   Hy4Seq* b = hy4_seq_create(f, err);
+  osmos_clear(err);
   CHECK(b && hy4_step(f, b, ids.data(), kPrompt, 1, err) && hy4_greedy(f, kPrompt - 1, 1, &y, err));
   std::vector<int32_t> out;
   uint32_t rounds = 0, drafted = 0, accepted = 0;
@@ -102,6 +111,7 @@ int main() {
   while (out.size() < kGen) {
     int32_t d[HY4_DFLY_DRAFTS];
     float c[HY4_DFLY_DRAFTS];
+    osmos_clear(err);
     const int k = hy4_seq_draft(f, b, y, HY4_DFLY_DRAFTS, 0.0f, 0.0f, d, c, err);
     if (k < 0) std::printf("  draft failed: %s\n", err);
     CHECK(k >= 0);
@@ -169,8 +179,10 @@ int main() {
     step[0] = y;
     for (int j = 0; j < k; j++) step[1 + j] = d[j];
     const uint32_t len = 1 + (uint32_t) k;  // (the decode's math, as the engine's verify: a token's bits its own)
+    osmos_clear(err);
     CHECK(hy4_step_runs(f, &b, &len, 1, step.data(), err));
     std::vector<int32_t> pick(1 + k);
+    osmos_clear(err);
     CHECK(hy4_greedy(f, 0, 1 + k, pick.data(), err));
     int acc = 0;
     while (acc < k && d[acc] == pick[acc]) acc++;

@@ -1,4 +1,4 @@
-// selprobe budget_gib step ids.txt P out.txt: the indexer's picks at one position of a long text (issue #47's trace) -
+// selprobe budget_gib step ids.txt P out.txt: the indexer's picks at one position of a long text -
 // the text's first P tokens read in `step`-token batches (their end told: seq_prompt, the prompt skip's exact path),
 // then token P stepped with a probe on, every index layer's selected rows (its "sel": the compressed rows' indices,
 // sorted) a line of out.txt: "<layer> <count> <row> <row> ...". two builds' (or two packs') picks compared tell where
@@ -18,7 +18,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 #include "osmos/run/engine.h"
 }
 
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
   CHECK(step > 0 && step <= FORWARD_MAX_TOKENS && P > 0 && ids.size() > P);
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
   const WeightsOptions wo = {g, nullptr, nullptr};
@@ -75,9 +75,9 @@ int main(int argc, char** argv) {
     std::fclose(pf);
     o.picks = picks.data();
   }
+  o.lane = true; /* (as the engine's) */
   Forward* f = forward_create_with(w, &o, ferr);
   if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-  CHECK(forward_lane(f, 0, NULL, ferr));
   Seq* s = seq_create(f, ferr);
   CHECK(s && seq_prompt(s, P));
   std::vector<Seq*> ss(step, s);

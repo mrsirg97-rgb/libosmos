@@ -27,7 +27,7 @@ extern "C" {
   } while (0)
 #define OK(c) CHECK((c) || (std::fprintf(stderr, "%s\n", err), false))
 
-static char err[Q35_ERR];
+static char err[OSMOS_ERR] = "";
 static uint32_t V;
 
 static std::vector<float> row(Q35Forward* f, uint32_t r) {
@@ -162,6 +162,7 @@ int main() {
     q35_forward_tap(f, poison, &on);
     Q35Seq *e = q35_seq_create(f, err), *h = q35_seq_create(f, err);
     OK(e && h);
+    osmos_clear(err); /* (handed down empty, osmos/err.h: the damaged state's refusal above is the first cause kept) */
     CHECK(!q35_step(f, e, t, 16, 1, err) && std::strstr(err, "f16"));
     on = false;
     q35_forward_tap(f, nullptr, nullptr);

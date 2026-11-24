@@ -1,5 +1,4 @@
-/* osmos/model/moe_route.h - a step's router picks grouped by expert: every MoE family's host tables (DeepSeek's,
-   Inkling's, Hy4-flash's), one counting sort */
+/* a step's router picks grouped by expert: every MoE family's host tables, one counting sort */
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>

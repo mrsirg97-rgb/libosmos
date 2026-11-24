@@ -171,13 +171,13 @@ static bool calls(const char *t, size_t len, size_t *i, int *last, JsonBuf *out,
 /* (NULL-terminated) encoding.py's check of the reasoning and the content */
 const char *const chat_refused[] = {CHAT_BOS, CHAT_EOS, CHAT_THINK, CHAT_THINK_END, CHAT_DSML, NULL};
 
-bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[CHAT_ERR])
+bool chat_parse(const char *text, size_t len, ChatMode mode, JsonBuf *out, char err[OSMOS_ERR])
 {
   return chat_parse_shaped(text, text, len, mode, out, err);
 }
 
 bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode mode, JsonBuf *out,
-                       char err[CHAT_ERR])
+                       char err[OSMOS_ERR])
 {
   err[0] = 0;
   const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
@@ -209,7 +209,7 @@ bool chat_parse_shaped(const char *text, const char *shape, size_t len, ChatMode
   content = real(content, off), reasoning = real(reasoning, off);
   /* the image placeholder's text (its token, or its text in plain pieces): encoding.py refuses it in a message's
      content and reasoning (chat_read's check, as its), so an answer holding it could never be sent back - refused
-     here, the completion with the error (0.7.1) */
+     here, the completion with the error */
   if (has(content, CHAT_IMAGE) || has(reasoning, CHAT_IMAGE))
     return free(tc.p), chat_fail(err, "the completion", "the image placeholder in its text");
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p, content.n);

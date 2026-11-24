@@ -44,7 +44,10 @@ int main() {
     std::printf("[test_copy_gpu] skipped: no GPU\n");
     return 77;
   }
-  const Slots s = hip_slots();
+  char serr[OSMOS_ERR] = "";
+  HipSlots* hs = hip_slots_create(nullptr, serr);
+  CHECK(hs);
+  const Slots s = hip_slots(hs);
   const uint64_t cap = kExpert + kGuard;
   uint8_t *src = (uint8_t*) s.alloc(cap, s.ctx), *dst = (uint8_t*) s.alloc(cap, s.ctx);
   CHECK(src && dst);
@@ -77,5 +80,6 @@ int main() {
               "kernel, %.3f by hipMemcpyAsync\n", (unsigned long long) kExpert, k / kReps, m / kReps);
   s.free(src, s.ctx), s.free(dst, s.ctx);
   std::printf("[test_copy_gpu] ok\n");
+  hip_slots_destroy(hs);
   return 0;
 }

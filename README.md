@@ -97,27 +97,27 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.15.0 on one Strix Halo (osmos-evo-inkling: 0.15.2, its new draft floor), the `performance` profile, nothing
-else running. Every number from the same harness:
+osmos 0.16.0 on one Strix Halo (the plain column 0.15.0's), the `performance` profile, nothing else running. Every
+number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
 and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
 
 | Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 1,018 tok/s | **45.7** / **42.2** tok/s | 28.8 tok/s |
-| `qwen38-ud-iq3_xxs` | 921 | **50.3** / **44.4** | 28.7 / 29.2 |
-| `osmos-evo-1017` | 385 | **28.4** / **24.1** | 18.8 / 19.3 |
-| `hy4-flash` | 412 | **23.3** / **20.4** | 17.4 / 17.4 |
-| `osmos-evo-inkling` (0.15.2) | 317 | 14.3 / 14.3 | 12.6 / 13.2 |
-| `osmos1.7b` (no drafter) | **4,781** | | **126.3** / **126.2** |
+| `inkling-2-mini` | 1,153 tok/s | **45.9** / **42.4** tok/s | 28.8 tok/s |
+| `qwen38-ud-iq3_xxs` | 955 | **50.4** / **44.1** | 28.7 / 29.2 |
+| `osmos-evo-1017` | 391 | **29.0** / **24.2** | 18.8 / 19.3 |
+| `hy4-flash` | 409 | **22.8** / **20.1** | 17.4 / 17.4 |
+| `osmos-evo-inkling` | 359 | 14.2 / 14.2 | 12.6 / 13.2 |
+| `osmos1.7b` (no drafter) | **5,199** | | **126.7** / **126.2** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
-45.4 tok/s drafted (28.6 plain).
+45.6 tok/s drafted (28.6 plain, 0.15.0).
 
-**Maya's three bench questions** (a CSV parser, photosynthesis for a student, a bouncing-ball web page; 256 tokens,
-temperature 0, drafted / plain):
+**Maya's three bench questions** (osmos 0.15.0; a CSV parser, photosynthesis for a student, a bouncing-ball web page;
+256 tokens, temperature 0, drafted / plain):
 
 | Pack | Code | Explanation | Web page | Plain |
 | --- | ---: | ---: | ---: | ---: |
@@ -128,16 +128,16 @@ temperature 0, drafted / plain):
 | `osmos-evo-inkling` (0.15.2) | 15.6 | 12.7 | 13.5 | 12.0-12.6 |
 | `osmos1.7b` | 126.1 | 126.4 | 122.4 | |
 
-**Agents** (`tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
+**Agents** (osmos 0.16.0; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
 prompt and task, then tool results of 150-2,000 tokens (one in ten a 5K-20K file read) and 0.5-5 s of tool time
 between turns: 98,757 new prompt tokens against up to 8,003 answer tokens, each model's own tokens, at a 131K
 context, every turn drafted where the pack has a drafter.
 
-| | `osmos1.7b` | `qwen38-ud-iq3_xxs` | `inkling-2-mini` | `osmos-evo-1017` | `hy4-flash` |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Wall time, all 32 turns | **90.2 s** | 200.2 s | 207.7 s | 463.1 s | 520.1 s |
-| First token, p50 / p95 | **0.87 / 6.2 s** | 1.93 / 25.5 s | 1.56 / 18.9 s | 7.52 / 53.9 s | 4.90 / 48.3 s |
-| Turn done, p50 / p95 | **8.8 / 13.9 s** | 17.2 / 43.2 s | 19.6 / 43.4 s | 49.5 / 95.0 s | 53.3 / 111.6 s |
+| | `osmos1.7b` | `qwen38-ud-iq3_xxs` | `inkling-2-mini` | `osmos-evo-1017` | `hy4-flash` | `osmos-evo-inkling` |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Wall time, all 32 turns | **88.4 s** | 185.2 s | 208.3 s | 434.3 s | 514.6 s | 856.4 s |
+| First token, p50 / p95 | **0.88 / 6.6 s** | 2.22 / 25.9 s | 1.94 / 20.5 s | 6.03 / 53.2 s | 4.89 / 51.0 s | 8.94 / 80.3 s |
+| Turn done, p50 / p95 | **8.2 / 12.4 s** | 13.6 / 45.3 s | 17.3 / 45.7 s | 41.7 / 84.9 s | 48.7 / 109.6 s | 87.5 / 213.2 s |
 
 Every turn answered, and every later turn continued its conversation in place. osmos sizes itself to leave 8 GiB of
 RAM free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
@@ -415,8 +415,8 @@ python3 tools/install/test_install.py
 
 ## Use as a library
 
-The engine interface over both models is `include/osmos/run/engine.h`; DeepSeek's forward is `osmos/run/forward.h`,
-and its drafter is `osmos/run/drafter.h`. Each header's contract is in a comment at its end, and every call returns
+The engine interface over both models is `include/osmos/run/engine.h`; DeepSeek's forward is `osmos/ds4/forward.h`,
+and its drafter is `osmos/ds4/drafter.h`. Each header's contract is in a comment at its end, and every call returns
 `false` or `NULL` with the reason in `err` rather than guess. `tools/bench/dbench.hip` is a complete example loop.
 
 ## Reproduce the numbers
@@ -426,7 +426,7 @@ The Speed tables: each pack through `osmos-api` on its own `osmos.json`, a fresh
 
 ```sh
 powerprofilesctl set performance
-OSMOS_SLOT_KEEP=0 bin/osmos-api --config ~/Models/osmos/<pack>/osmos.json --port 8241 &
+bin/osmos-api --config ~/Models/osmos/<pack>/osmos.json --port 8241 &   # its osmos.json with "slots": {"keep": false}
 curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Say hello."}], "max_tokens": 16}' > /dev/null   # the warm-up
 curl -s localhost:8241/v1/chat/completions -H 'Content-Type: application/json' -d '{"messages": [{"role": "user",

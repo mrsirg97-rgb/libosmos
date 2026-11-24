@@ -1,8 +1,9 @@
 // q4x_bench <first shard> <ids> [prompt] [decode] [drafter]: Qwen3.8-Flash-Next's speed - a prompt (its first
 // `prompt` ids, 512 by default, steps of 256) then `decode` greedy tokens (128): a step each, or with a drafter (the
-// MTP head, or DFlash2: its GGUF's architecture dflash2) drafted rounds (the server's: drafts after y under the engine's floors, [y, drafts] one step, the agreeing prefix
-// kept, the rest rolled back, the kept seeded). prints prompt tok/s, decode tok/s (and its slowest step or round, the
-// acceptance), and an FNV-1a of the decoded ids: plain and drafted the same (DESIGN.md, "Qwen's speed").
+// MTP head, or DFlash2: its GGUF's architecture dflash2) drafted rounds (the server's: drafts after y under the
+// engine's floors, [y, drafts] one step, the agreeing prefix kept, the rest rolled back, the kept seeded). prints
+// prompt tok/s, decode tok/s (and its slowest step or round, the acceptance), and an FNV-1a of the decoded ids: plain
+// and drafted the same (DESIGN.md, "Qwen's speed").
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/q4x_bench.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/q4x_bench
 #include <hip/hip_runtime.h>
@@ -44,7 +45,7 @@ int main(int argc, char** argv) {
   for (int32_t x; f && ids.size() < np && std::fscanf(f, "%d,", &x) == 1;) ids.push_back(x);
   if (f) std::fclose(f);
   if (ids.size() != np || !np || !nd) return std::fprintf(stderr, "q4x_bench: %zu ids, %u asked\n", ids.size(), np), 2;
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "", ferr[Q4X_FWD_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
   /* OVERLAY: a GGUF whose tensors stand in for the model's of their names (an abliteration: q4x_weights_create) */
   Gguf* ov = getenv("OVERLAY") ? gguf_create(getenv("OVERLAY"), gerr) : nullptr;
@@ -62,12 +63,10 @@ int main(int argc, char** argv) {
   const uint32_t run = np + nd + OSMOS_MAX_BLOCK,
                  ctx = getenv("Q4X_BENCH_CTX") ? (uint32_t) atoi(getenv("Q4X_BENCH_CTX")) : run;
   if (ctx < run) return std::fprintf(stderr, "q4x_bench: Q4X_BENCH_CTX below the run's %u\n", run), 2;
-  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df};
+  // the NPU beside the GPU, made with the forward: NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
+  const float npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN;
+  const Q4xOptions qo = {ctx, ctx < kStep ? ctx : kStep, getenv("Q4X_BENCH_STREAM") != nullptr, nullptr, 0, df, FIT_BUDGET_NOW, nullptr, std::getenv("NPU"), npu_share};
   Q4xForward* fw = q4x_forward_create_with(w, mtp, &qo, ferr);
-  // 0.7.0: the NPU beside the GPU (q4x_forward_npu): NPU=<its kernels' dir>, NPU_SHARE (NPU=1 builds)
-  if (fw && std::getenv("NPU") &&
-      !q4x_forward_npu(fw, std::getenv("NPU"), std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_QWEN, ferr))
-    q4x_forward_destroy(fw), fw = nullptr;
   Q4xSeq* s = fw ? q4x_seq_create(fw, ferr) : nullptr;
   if (!s) return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
   // the prompt's end told, as osmos-serve tells it (oseq_prompt): its last row's logits alone. Q4X_BENCH_ALL_ROWS: not told
@@ -83,8 +82,8 @@ int main(int argc, char** argv) {
   const uint32_t last = (np - 1) % kStep;
   if (!q4x_greedy(fw, last, 1, &y, ferr))
     return std::fprintf(stderr, "q4x_bench: %s\n", ferr), 1;
-  const double tp = now(), e1 = epoch(); /* the prompt's end: its time and its energy's window the same (0.7.1: the time
-                                           ran on through the step sweep) */
+  const double tp = now(), e1 = epoch(); /* the prompt's end: its time and its energy's window the same (not the step
+                                           sweep's) */
   if (getenv("Q4X_STEP_SWEEP")) /* a step's time by its tokens: 1 .. 8, each step rolled back */
     for (uint32_t n = 1; n <= OSMOS_MAX_BLOCK; n++) {
       const int reps = 12;

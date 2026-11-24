@@ -4,14 +4,9 @@
 
 #include "osmos/text/chat_ink2.h"
 #include "osmos/text/chat_qwen.h"
+#include "osmos/err.h"
 
 /* the template's render (osmos/text/chat_ink2.h), its branches in its order; its refusals its own words */
-
-static bool fail(char *err, const char *why)
-{
-  snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
 
 /* Python's truth of a value: null, false, 0, "", [] and {} false (NULL: an absent key's Undefined, false too) */
 static bool truthy(const Json *j)
@@ -67,7 +62,7 @@ static bool effort_line(const Json *e, JsonBuf *out, char *err)
           break;
       if (i == sizeof map / sizeof *map)
       {
-        snprintf(err, CHAT_ERR, "Unknown reasoning_effort: %.*s", (int)e->len, e->s);
+        osmos_fail(err, "Unknown reasoning_effort: %.*s", (int)e->len, e->s);
         return false;
       }
       v = map[i].v;
@@ -79,10 +74,10 @@ static bool effort_line(const Json *e, JsonBuf *out, char *err)
     else if (e->type == JSON_TRUE || e->type == JSON_FALSE)
       v = e->type == JSON_TRUE;
     else
-      return fail(err, "reasoning_effort: a name or a number");
+      return osmos_fail(err, "reasoning_effort: a name or a number");
   }
   if (v < 0.0 || v > 0.99)
-    return fail(err, "reasoning_effort must be in [0.0, 0.99]");
+    return osmos_fail(err, "reasoning_effort must be in [0.0, 0.99]");
   json_puts(out, "<|message_system|><|content_text|>Thinking effort level: ");
   if (v == 0.0)
     json_puts(out, "0");
@@ -98,7 +93,7 @@ static bool effort_line(const Json *e, JsonBuf *out, char *err)
 static bool tools_block(const Json *tools, JsonBuf *out, char *err)
 {
   if (tools->type != JSON_ARRAY)
-    return fail(err, "tools: an array");
+    return osmos_fail(err, "tools: an array");
   /* each spec built as the template's dict, then the list dumped sorted and compact */
   Json *specs = calloc(1, sizeof *specs);
   bool ok = specs && (specs->item = calloc(tools->n, sizeof *specs->item));
@@ -113,16 +108,16 @@ static bool tools_block(const Json *tools, JsonBuf *out, char *err)
   {
     const Json *tool = tools->item[i];
     if (!is_obj(tool))
-      ok = fail(err, "a tool: an object");
+      ok = osmos_fail(err, "a tool: an object");
     const Json *fn = ok && json_get(tool, "function") ? json_get(tool, "function") : tool;
     if (ok && !is_obj(fn))
-      ok = fail(err, "a tool's function: an object");
+      ok = osmos_fail(err, "a tool's function: an object");
     const Json *name = ok ? json_get(fn, "name") : NULL;
     if (ok && !name)
-      ok = fail(err, "a tool's function without a name");
+      ok = osmos_fail(err, "a tool's function without a name");
     Json *spec = ok ? calloc(1, sizeof *spec) : NULL;
     if (ok && !(spec && (spec->item = calloc(4, sizeof *spec->item))))
-      ok = fail(err, "out of memory"), free(spec), spec = NULL;
+      ok = osmos_fail(err, "out of memory"), free(spec), spec = NULL;
     if (!ok)
       break;
     const Json *d = json_get(fn, "description"), *p = json_get(fn, "parameters"), *t = json_get(tool, "type");
@@ -142,21 +137,21 @@ static bool tools_block(const Json *tools, JsonBuf *out, char *err)
   if (specs)
     free(specs->item);
   free(specs);
-  return ok || (err[0] ? false : fail(err, "out of memory"));
+  return ok || (err[0] ? false : osmos_fail(err, "out of memory"));
 }
 
 /* a tool result's header name: the name of each call (of every assistant's) whose id is its tool_call_id */
 static bool result_names(const Json *messages, const Json *id, JsonBuf *head, char *err)
 {
   if (!is_str(id))
-    return fail(err, "a tool message's tool_call_id: a string");
+    return osmos_fail(err, "a tool message's tool_call_id: a string");
   for (size_t i = 0; i < messages->n; i++)
   {
     const Json *prev = messages->item[i], *calls = json_get(prev, "tool_calls");
     if (!str_is(json_get(prev, "role"), "assistant") || !truthy(calls))
       continue;
     if (calls->type != JSON_ARRAY)
-      return fail(err, "tool_calls: an array");
+      return osmos_fail(err, "tool_calls: an array");
     for (size_t k = 0; k < calls->n; k++)
     {
       const Json *tc = calls->item[k], *tid = is_obj(tc) ? json_get(tc, "id") : NULL;
@@ -164,10 +159,10 @@ static bool result_names(const Json *messages, const Json *id, JsonBuf *head, ch
         continue;
       const Json *fn = json_get(tc, "function");
       if (!fn)
-        return fail(err, "a tool call without its function");
+        return osmos_fail(err, "a tool call without its function");
       const Json *name = is_obj(fn) ? json_get(fn, "name") : NULL;
       if (name && !is_str(name))
-        return fail(err, "a tool call's name: a string");
+        return osmos_fail(err, "a tool call's name: a string");
       if (name)
         put_str(head, name);
     }
@@ -183,7 +178,7 @@ static void block(JsonBuf *out, const JsonBuf *head, const char *kind, const cha
 static bool parts(const Json *content, const char *role, const JsonBuf *head, JsonBuf *out, char *err)
 {
   if (content->type != JSON_ARRAY)
-    return fail(err, content->type == JSON_OBJECT ? "content an object: a string or a list of parts"
+    return osmos_fail(err, "%s", content->type == JSON_OBJECT ? "content an object: a string or a list of parts"
                                                   : "content: a string or a list of parts");
   for (size_t i = 0; i < content->n; i++)
   {
@@ -194,7 +189,7 @@ static bool parts(const Json *content, const char *role, const JsonBuf *head, Js
       continue;
     }
     if (!is_obj(part))
-      return fail(err, "a content part: a string or an object");
+      return osmos_fail(err, "a content part: a string or an object");
     const Json *type = json_get(part, "type");
     if (!type || str_is(type, "text") || str_is(type, "input_text"))
     {
@@ -205,18 +200,18 @@ static bool parts(const Json *content, const char *role, const JsonBuf *head, Js
         block(out, head, ICHAT_TEXT, "", 0);
     }
     else if (str_is(type, "image") || str_is(type, "input_image") || str_is(type, "image_url"))
-      return fail(err, strcmp(role, "user") && strcmp(role, "tool")
+      return osmos_fail(err, "%s", strcmp(role, "user") && strcmp(role, "tool")
                            ? "Image content is only supported for user and tool messages"
                            : "an image part: this build reads text alone");
     else if (str_is(type, "audio") || str_is(type, "input_audio") || str_is(type, "audio_url"))
-      return fail(err, "Inkling 2 does not accept audio input");
+      return osmos_fail(err, "Inkling 2 does not accept audio input");
     else if (is_str(type))
     {
-      snprintf(err, CHAT_ERR, "Unsupported content part type: %.*s", (int)type->len, type->s);
+      osmos_fail(err, "Unsupported content part type: %.*s", (int)type->len, type->s);
       return false;
     }
     else
-      return fail(err, "a content part's type: a string");
+      return osmos_fail(err, "a content part's type: a string");
   }
   return true;
 }
@@ -224,17 +219,17 @@ static bool parts(const Json *content, const char *role, const JsonBuf *head, Js
 static bool calls_blocks(const Json *msg, const Json *calls, JsonBuf *out, char *err)
 {
   if (calls->type != JSON_ARRAY)
-    return fail(err, "tool_calls: an array");
+    return osmos_fail(err, "tool_calls: an array");
   const Json *mname = json_get(msg, "name");
   for (size_t i = 0; i < calls->n; i++)
   {
     const Json *tc = calls->item[i], *fn = is_obj(tc) ? json_get(tc, "function") : NULL;
     const Json *name = is_obj(fn) ? json_get(fn, "name") : NULL;
     if (!is_str(name))
-      return fail(err, "tool call function name must be a string");
+      return osmos_fail(err, "tool call function name must be a string");
     if (truthy(mname) && (!is_str(mname) || mname->len != name->len || memcmp(mname->s, name->s, name->len)))
     {
-      snprintf(err, CHAT_ERR, "assistant name %.*s does not match its tool call %.*s",
+      osmos_fail(err, "assistant name %.*s does not match its tool call %.*s",
                is_str(mname) ? (int)mname->len : 0, is_str(mname) ? mname->s : "", (int)name->len, name->s);
       return false;
     }
@@ -243,16 +238,16 @@ static bool calls_blocks(const Json *msg, const Json *calls, JsonBuf *out, char 
     if (!truthy(args))
       args = &none;
     if (is_str(args))
-      return fail(err, "tool call arguments must be a parsed object, not a JSON string; canonicalize upstream");
+      return osmos_fail(err, "tool call arguments must be a parsed object, not a JSON string; canonicalize upstream");
     if (!is_obj(args))
-      return fail(err, "tool call arguments must be an object");
+      return osmos_fail(err, "tool call arguments must be an object");
     json_puts(out, ICHAT_MODEL), put_str(out, name), json_puts(out, ICHAT_CALL "{\"name\":");
     json_dump_with(out, name, kSorted);
     json_puts(out, ",\"args\":{");
     /* the keys sorted (dictsort, case-sensitive: code point order), each value compact and unsorted */
     size_t stack[64], *order = args->n <= 64 ? stack : malloc(args->n * sizeof *order);
     if (!order)
-      return fail(err, "out of memory");
+      return osmos_fail(err, "out of memory");
     for (size_t a = 0; a < args->n; a++)
     {
       size_t k = a;
@@ -295,11 +290,11 @@ static bool message(const Json *messages, const Json *msg, const char *role, Jso
   const Json *name = json_get(msg, "name"), *id = json_get(msg, "tool_call_id");
   bool ok = true;
   if (!strcmp(role, "tool") && truthy(name))
-    ok = is_str(name) ? (put_str(&head, name), true) : fail(err, "a tool message's name: a string");
+    ok = is_str(name) ? (put_str(&head, name), true) : osmos_fail(err, "a tool message's name: a string");
   else if (!strcmp(role, "tool") && truthy(id))
     ok = result_names(messages, id, &head, err);
   else if (assistant && truthy(name))
-    ok = is_str(name) ? (put_str(&head, name), true) : fail(err, "an assistant's name: a string");
+    ok = is_str(name) ? (put_str(&head, name), true) : osmos_fail(err, "an assistant's name: a string");
   const Json *reasoning = json_get(msg, "reasoning_content"), *content = json_get(msg, "content");
   const Json *calls = json_get(msg, "tool_calls");
   if (ok && assistant && truthy(reasoning))
@@ -307,7 +302,7 @@ static bool message(const Json *messages, const Json *msg, const char *role, Jso
     if (is_str(reasoning))
       block(out, &head, ICHAT_THINKING, reasoning->s, reasoning->len);
     else
-      ok = fail(err, "reasoning_content: a string");
+      ok = osmos_fail(err, "reasoning_content: a string");
   }
   if (ok && is_str(content) && (truthy(content) || !(assistant && (truthy(calls) || truthy(reasoning)))))
     block(out, &head, ICHAT_TEXT, content->s, content->len);
@@ -318,13 +313,13 @@ static bool message(const Json *messages, const Json *msg, const char *role, Jso
   if (ok && assistant)
     json_puts(out, ICHAT_EOS);
   free(head.p);
-  return ok && (!head.oom || fail(err, "out of memory"));
+  return ok && (!head.oom || osmos_fail(err, "out of memory"));
 }
 
-bool ichat_render(const Json *messages, const Json *tools, const Json *effort, JsonBuf *out, char err[CHAT_ERR])
+bool ichat_render(const Json *messages, const Json *tools, const Json *effort, JsonBuf *out, char err[OSMOS_ERR])
 {
   if (!messages || messages->type != JSON_ARRAY || !messages->n)
-    return fail(err, "Cannot apply chat template to an empty conversation. Provide at least one message.");
+    return osmos_fail(err, "Cannot apply chat template to an empty conversation. Provide at least one message.");
   if (tools && truthy(tools) && !tools_block(tools, out, err))
     return false;
   bool effort_done = false;
@@ -332,13 +327,13 @@ bool ichat_render(const Json *messages, const Json *tools, const Json *effort, J
   {
     const Json *msg = messages->item[i], *role = is_obj(msg) ? json_get(msg, "role") : NULL;
     if (!is_obj(msg))
-      return fail(err, "a message: an object");
+      return osmos_fail(err, "a message: an object");
     if (!str_is(role, "user") && !str_is(role, "assistant") && !str_is(role, "system") && !str_is(role, "tool"))
     {
       if (is_str(role))
-        snprintf(err, CHAT_ERR, "Unknown message role: %.*s", (int)role->len, role->s);
+        osmos_fail(err, "Unknown message role: %.*s", (int)role->len, role->s);
       else
-        fail(err, "Unknown message role");
+        osmos_fail(err, "Unknown message role");
       return false;
     }
     if (!effort_done && !str_is(role, "system"))
@@ -352,5 +347,5 @@ bool ichat_render(const Json *messages, const Json *tools, const Json *effort, J
   }
   if (!effort_done && !effort_line(effort, out, err))
     return false;
-  return !out->oom || fail(err, "out of memory");
+  return !out->oom || osmos_fail(err, "out of memory");
 }

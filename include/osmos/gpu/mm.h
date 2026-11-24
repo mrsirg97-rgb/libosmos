@@ -147,11 +147,11 @@ mm_batch
   mm_run's for any part, or count 0 or past MM_BATCH_MAX.
 
 mm_tokens
-  a matrix (w1 NULL), or two of one type (mm_run2's pair), over any n tokens of F32 x (row t at x + t * xs): MM_MAX_TOKENS
-  a time through the one x16 - mm_x16 of the chunk, then mm_run or mm_run2 into its rows (y + t * ys) - each token's
-  sums its own, so the bits of one call whatever the chunks. `ready`: x16 holds this x's f16 already (an op wrote it
-  beside x) - taken as it is when n is within one x16, the conversion skipped. both families' dispatch (fwd_mat,
-  q4x_mat). false as its calls'.
+  a matrix (w1 NULL), or two of one type (mm_run2's pair), over any n tokens of F32 x (row t at x + t * xs):
+  MM_MAX_TOKENS a time through the one x16 - mm_x16 of the chunk, then mm_run or mm_run2 into its rows (y + t * ys) -
+  each token's sums its own, so the bits of one call whatever the chunks. `ready`: x16 holds this x's f16 already (an op
+  wrote it beside x) - taken as it is when n is within one x16, the conversion skipped. both families' dispatch
+  (fwd_mat, q4x_mat). false as its calls'.
 
 mm_tokens_scaled
   mm_tokens with each matrix's sums times its scale (s0, s1) as they are stored - a per-tensor scale (NVFP4's) without
@@ -159,8 +159,8 @@ mm_tokens_scaled
 mm_col_tiles
   the column tiles a block of `type` takes for n tokens (mm_run's, and mm_group's for its max_cnt): a slab decoded
   once for that many tiles' WMMAs - more tiles, more registers and fewer waves to hide the decode. so a group's
-  matrices of very different counts are best launched apart, each run of the same tiles its own mm_group (measured:
-  a one-tile expert under an 8-tile launch 37% slower). 0 for a type without a kernel.
+  matrices of very different counts are best launched apart, each run of the same tiles its own mm_group. 0 for a
+  type without a kernel.
 mm_x16_rows
   slots rows of activations: slot s is row idx[s] of x (row r at x + r * xs; -1: zero) as f16, into x16 (slots rows of
   cols, tiled) - each distinct expert's tokens gathered into slots of its own (whole tiles of MM_TILE). *overflow as
@@ -197,10 +197,9 @@ mm_group
   n_mat matrices of one type and shape at once: matrix m (w[m]) over the tiled x16 from x16 + xoff[m] (halves; rows
   xts long: its first token at a tile, xoff[m] = tile * 16 xts + its first column * 16), its first cnt[m] (at most
   max_cnt <= MM_MAX_TOKENS) tokens' rows into y + yoff[m] + t * ys - a step's distinct experts (each its own gathered
-  tokens),
-  or a layer's wo_a groups (each a slice of the same tokens). each tile the same sums as mm_run's: the same bits -
-  but for Q6_K under 2,048 columns (mm_run's short shape, 64-value slabs; mm_group's its tuned 128: another K split,
-  other bits - 0.11.2, the claim corrected, no shape changed: a pack's bits stay). a token's bits its own either way.
+  tokens), or a layer's wo_a groups (each a slice of the same tokens). each tile the same sums as mm_run's: the same
+  bits - but for Q6_K under 2,048 columns (mm_run's short shape, 64-value slabs; mm_group's its tuned 128: another K
+  split, other bits). a token's bits its own either way.
   false for cols not a multiple of 128 (mm_fits takes some: Q8_0 at 320, Q6_K at 1,344 - mm_run then, not this).
   `w`, `cnt`, `xoff`, `yoff` on the device.
 */

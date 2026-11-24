@@ -8,7 +8,7 @@
 #define CTX_MAX (1 << 30)
 #define PASSES_MAX 64
 #define GATING_SIGMOID 2 /* llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID */
-_Static_assert(INK2_ERR == GGUF_META_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && INK2_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
 /* a value a slot - one integer, or an array of one a slot (upstream's): each slot's its layer's, every layer's the
    same (one count implemented) */
@@ -110,7 +110,7 @@ static bool unsloth_small_keys(GgufMeta *m, Ink2Geometry *g)
   return ok;
 }
 
-/* upstream llama.cpp's keys (#32694; unsloth's Inkling-2-Mini): the relative bias's sizes, the log scale and the
+/* upstream llama.cpp's keys (unsloth's Inkling-2-Mini): the relative bias's sizes, the log scale and the
    clips under attention., q's and k's clip one; the MoE's activation SiTU, its betas the softcaps (beta tanh(g / beta)
    sigmoid(g) * lb tanh(u / lb)); the router's sigmoid and normalized weights, the normalized values the architecture's
    (no keys); no RoPE; one head width for the sliding and the full layers */
@@ -139,7 +139,7 @@ static bool upstream_keys(GgufMeta *m, Ink2Geometry *g)
 
 static bool ours(GgufMeta *m, Ink2Geometry *g);
 
-bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[INK2_ERR])
+bool ink2_geometry(const Gguf *model, Ink2Geometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, NULL, 0};
   memset(g, 0, sizeof *g);

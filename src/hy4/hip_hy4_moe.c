@@ -40,7 +40,7 @@ static bool in_memory(Hy4Forward *f, int l, const MoeRoute *rt, uint32_t picks)
         f->h_ex[j][k] = f->h_tab[((uint64_t)ml * 3 + (uint64_t)k) * E + rt->expert[j]];
     return true;
   }
-  char merr[MEMBRANE_ERR] = "";
+  char merr[OSMOS_ERR] = "";
   Membrane *m = f->ex.mem;
   if (!membrane_visit(m, ml, picks >= E, merr))
     return false;
@@ -104,8 +104,8 @@ static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t 
 }
 
 /* a decode's experts' matvec over the entries (chunk of an expert's tokens an entry at most: the step's tokens, up to
-   MV_MAX_TOKENS - one token's decode the single-token kernel, not the 8-token one's idle lanes: Q4_K_M's experts
-   32 -> 14 ms a token, 2026-11-19; a token's sums its own whatever the chunk) */
+   MV_MAX_TOKENS - one token's decode the single-token kernel, not the 8-token one's idle lanes; a token's sums its own
+   whatever the chunk) */
 static bool mv_experts(const GgufTensor *t, const void *const *w, const Hy4Forward *f, uint32_t entries, uint32_t chunk,
                        uint32_t rows, uint32_t cols, const float *x, float *y)
 {

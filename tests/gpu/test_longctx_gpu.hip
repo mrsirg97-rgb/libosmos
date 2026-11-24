@@ -13,9 +13,10 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 
@@ -38,13 +39,17 @@ struct Run {
 };
 
 static Run run(Weights* w, uint32_t ctx, const std::vector<int32_t>& ids) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   size_t free0 = 0, free1 = 0, total = 0;
   CHECK(hipMemGetInfo(&free0, &total) == hipSuccess);
-  const ForwardOptions o = {(int) w->geo.n_layers, ctx, kBudget, nullptr, kMaxTokens};
+  ForwardOptions o = {(int) w->geo.n_layers, ctx, kBudget, nullptr, kMaxTokens};
+  o.lane = true;
+  osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::printf("  %s\n", err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  osmos_clear(err);
+  CHECK(f);
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, kPrompt));
   CHECK(hipMemGetInfo(&free1, &total) == hipSuccess);

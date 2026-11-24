@@ -214,7 +214,7 @@ void fetchq_destroy(Fetchq *q)
 /* a unit's jobs on the heap at its need, side by side (consecutive ids), and the workers woken. split (a lone unit, a
    decode's miss): its parts a FETCHQ_CHUNK a job, the workers reading one unit at once - at the SSD's speed, not a
    worker's; else each part one job, read whole by one worker - chunks of many units side by side defeat the file's
-   readahead (measured: a load 16 -> 22 s). which it is, the giver knows (reads.h) */
+   readahead. which it is, the giver knows (reads.h) */
 bool fetchq_read(Fetchq *q, uint32_t unit, const PoolRange *parts, int n, void *const dst[POOL_PARTS], bool split,
                  uint64_t need)
 {

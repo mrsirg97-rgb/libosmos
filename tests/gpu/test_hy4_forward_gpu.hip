@@ -9,6 +9,7 @@ extern "C" {
 #include <fcntl.h>
 #include <unistd.h>
 
+#include "osmos/err.h"
 #include "osmos/hy4/forward.h"
 #include "osmos/model/gguf.h"
 }
@@ -103,13 +104,14 @@ struct Stats {
 // the prompt in one step - a decode's math (hy4_step_runs: its prompt's end marked, the last rows kept) or a read's
 // (hy4_step_read) - every layer's streams at the reference's kept rows and the last rows' logits against its
 static Stats measure(Hy4Forward* f, const std::vector<int32_t>& ids, uint32_t last, bool read) {
-  char err[HY4_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const uint32_t T = (uint32_t) ids.size(), V = (uint32_t) fx["logits"].dims[1];
   Taps taps;
   for (float r : A("rows")) taps.rows.push_back((int32_t) r);
   taps.layers = (uint32_t) fx["taps"].dims[0];
   taps.read = read;
   hy4_forward_tap(f, tap, &taps);
+  osmos_clear(err);
   Hy4Seq* s = hy4_seq_create(f, err);
   CHECK(s);
   CHECK(hy4_seq_prompt(s, T - last + 1));
@@ -181,7 +183,7 @@ static Stats measure(Hy4Forward* f, const std::vector<int32_t>& ids, uint32_t la
 
 int main() {
   const char* home = getenv("HOME") ? getenv("HOME") : "";
-  char model_path[512], ref_path[512], err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
+  char model_path[512], ref_path[512], err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_HY4") ? getenv("OSMOS_TEST_HY4") : "");
   if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/hy4-flash/Hy4-flash-Q3_K-00001-of-00002.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_HY4_REF") ? getenv("OSMOS_TEST_HY4_REF") : "");
@@ -193,6 +195,7 @@ int main() {
                 gerr);
     return 77;
   }
+  osmos_clear(err);
   Hy4Weights* w = hy4_weights_create(g, err);
   if (!w) std::printf("  refused: %s\n", err);
   CHECK(w);
@@ -203,7 +206,9 @@ int main() {
   std::vector<int32_t> ids(T);
   for (uint32_t t = 0; t < T; t++) ids[t] = (int32_t) fid[t];
   const bool kv8 = getenv("OSMOS_TEST_HY4_KV8") != nullptr;  // (the engine's Q8_0 cache; default F32: strict)
-  const Hy4Options o = {T, T + HY4_MAX_BACK, last, !kv8};
+  Hy4Options o = {T, T + HY4_MAX_BACK, last, !kv8};
+  o.budget = FIT_BUDGET_NOW;
+  osmos_clear(err);
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::printf("  refused: %s\n", err);
   CHECK(f);
@@ -230,11 +235,14 @@ int main() {
 
   // the bits a token's own: the prompt in uneven steps (each a read: hy4_step's prompt math past HY4_MV_TOKENS) -
   // the last step's rows the one step's, bit for bit (a decode's math its own: the rollback's and the state's below)
+  osmos_clear(err);
   Hy4Seq* s2 = hy4_seq_create(f, err);
   CHECK(s2);
   const uint32_t a = T / 3, b = T / 3, c = T - a - b, tail = c < last ? c : last;  // three reads, the last's rows
   CHECK(a > HY4_MV_TOKENS && b > HY4_MV_TOKENS && c > HY4_MV_TOKENS);
+  osmos_clear(err);
   CHECK(hy4_step(f, s2, ids.data(), a, 1, err) && hy4_step(f, s2, ids.data() + a, b, 1, err));
+  osmos_clear(err);
   CHECK(hy4_step(f, s2, ids.data() + a + b, c, tail, err));
   CHECK(std::memcmp(hy4_logits(f), got.data() + (size_t) (last - tail) * V, (size_t) tail * V * sizeof(float)) == 0);
   std::printf("  in read steps of %u, %u and %u: the last %u rows the one step's, bit for bit\n", a, b, c, tail);
@@ -246,6 +254,7 @@ int main() {
     Hy4Seq* const one[1] = {s2};
     const uint32_t len4[1] = {4};
     CHECK(hy4_seq_prompt(s2, 0));
+    osmos_clear(err);
     CHECK(hy4_step_runs(f, one, len4, 1, four, err));
     std::vector<float> together((size_t) 4 * V);
     for (uint32_t r = 0; r < 4; r++)
@@ -253,6 +262,7 @@ int main() {
             hipSuccess);
     CHECK(hy4_seq_rollback(s2, 4));
     for (uint32_t r = 0; r < 4; r++) {
+      osmos_clear(err);
       CHECK(hy4_step(f, s2, four + r, 1, 1, err));
       CHECK(std::memcmp(hy4_logits(f), together.data() + (size_t) r * V, V * sizeof(float)) == 0);
     }
@@ -262,9 +272,11 @@ int main() {
 
   // a step rolled back and run again: the same bits
   const int32_t more[4] = {ids[1], ids[2], ids[3], ids[4]};
+  osmos_clear(err);
   CHECK(hy4_step(f, s2, more, 4, 4, err));
   const std::vector<float> first(hy4_logits(f), hy4_logits(f) + (size_t) 4 * V);
   CHECK(hy4_seq_reach(s2) >= 4 && hy4_seq_rollback(s2, 4) && hy4_seq_position(s2) == (int32_t) T);
+  osmos_clear(err);
   CHECK(hy4_step(f, s2, more, 4, 4, err));
   CHECK(std::memcmp(hy4_logits(f), first.data(), first.size() * sizeof(float)) == 0);
   std::printf("  a step rolled back and run again: the same bits\n");
@@ -277,7 +289,9 @@ int main() {
     v->insert(v->end(), (const uint8_t*) bytes, (const uint8_t*) bytes + n);
     return true;
   };
+  osmos_clear(err);
   CHECK(hy4_seq_save_to(s2, sink, &saved, err) && saved.size() == hy4_seq_state_bytes(s2));
+  osmos_clear(err);
   Hy4Seq* s3 = hy4_seq_create(f, err);
   CHECK(s3);
   struct Src {
@@ -290,11 +304,14 @@ int main() {
     std::memcpy(bytes, s->v->data() + s->at, n), s->at += n;
     return true;
   };
+  osmos_clear(err);
   CHECK(hy4_seq_load_from(s3, saved.size(), source, &src, err) && hy4_seq_position(s3) == (int32_t) T);
+  osmos_clear(err);
   CHECK(hy4_seq_reach(s3) == 0 && hy4_step(f, s3, more, 4, 4, err));
   CHECK(std::memcmp(hy4_logits(f), first.data(), first.size() * sizeof(float)) == 0);
   saved[saved.size() / 2] ^= 1;  // a damaged string refused (its sum), the sequence then empty
   src.at = 0;
+  osmos_clear(err);
   CHECK(!hy4_seq_load_from(s3, saved.size(), source, &src, err) && hy4_seq_position(s3) == 0);
   std::printf("  saved (%zu MB) and loaded into another sequence: its next step the same bits; damaged, refused\n",
               saved.size() >> 20);

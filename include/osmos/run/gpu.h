@@ -10,13 +10,11 @@ bool gpu_alive(void);
 
 /*
 gpu_sleep_on_waits
-  the process's waits for the GPU sleep (DESIGN.md, "0.3.0: energy a token", target 2): the device scheduled
-  blocking-sync, so hipEventSynchronize, hipStreamSynchronize and hipDeviceSynchronize put the waiting thread to sleep
-  until the GPU passes them, the driver waking it, instead of spinning a core the GPU shares its package's power with
-  (measured: a 300 ms wait 300 ms of a core spinning, 7 ms asleep; an event's own blocking-sync flag is not honoured on
-  ROCm 7.15 - the device's is). a process calls it first, before its first kernel: it takes after an allocation, not
-  after a kernel has run (measured) - the forward's creation runs kernels, so osmos-serve and dbench call it at the
-  top of main. false: the runtime refused.
+  the process's waits for the GPU sleep: the device scheduled blocking-sync, so hipEventSynchronize,
+  hipStreamSynchronize and hipDeviceSynchronize put the waiting thread to sleep until the GPU passes them instead of
+  spinning a core the GPU shares its package's power with (an event's own blocking-sync flag is not honoured - the
+  device's is). call it before the process's first kernel: it takes after an allocation, not after a kernel has run.
+  false: the runtime refused.
 
 gpu_alive
   the GPU still usable after a failed call: every stream's work done, the device reporting no error - false after a

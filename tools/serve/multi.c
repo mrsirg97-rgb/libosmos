@@ -1,4 +1,4 @@
-/* several conversations at once (maya #587's, the operator's): N lanes, each a conversation; the loop libevt's - stdin's
+/* several conversations at once: N lanes, each a conversation; the loop libevt's - stdin's
    lines and the turns are its events, a line outranking a turn. a turn is a round (every answering lane's next token
    in one osmos_batch: a decode step, each token's bits its own) or a piece of one prompt (a step of max_tokens,
    alone: a prompt's step) - never both in one step, so neither changes the other's bits. pieces and rounds take turns;
@@ -11,6 +11,7 @@
 #include "libevt/runtime/context.h"
 #include "multi.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/err.h"
 
 typedef struct LineEv
 {
@@ -71,6 +72,7 @@ static int pick_lane(const Multi *m, const Gen *g)
 static void admit(Multi *m, int i, Gen *g)
 {
   Lane *ln = &m->lane[i];
+  osmos_clear(ln->c.err); /* (osmos/err.h: an earlier request's cause never this one's) */
   ln->g = *g, ln->st = READING, ln->produced = ln->accepted = ln->drafted = 0, ln->t0 = now_ms(), ln->t1 = ln->t0, ln->used = ++m->clock;
   ln->limit = g->max_new > 0 ? g->max_new : (long long)m->sv->max_ctx - g->n;
   if (!conv_continue(&ln->c, m->sv, g->ids, g->n))
@@ -81,7 +83,7 @@ static void admit(Multi *m, int i, Gen *g)
   ln->reused = ln->c.held.n;
   if (!oseq_prompt(ln->c.s, conv_prompt_end(&ln->c, g->n, g->mark)))
   {
-    snprintf(ln->c.err, sizeof ln->c.err, "the prompt's end not past the conversation's");
+    osmos_fail(ln->c.err, "the prompt's end not past the conversation's");
     lane_fail(m, ln);
   }
 }
@@ -135,7 +137,7 @@ static void gen(Multi *m, char *line)
 {
   Gen g;
   char why[256];
-  if (!parse_gen(line, &g, why, sizeof why))
+  if (!gen_parse(line, &g, why, sizeof why))
   {
     out("ERR %s\n", why);
     return;
@@ -176,7 +178,13 @@ static void on_line(void *scope)
   else if (!strcmp(line, "STOP"))
     stop(m, true, 0);
   else if (!strncmp(line, "STOP ", 5))
-    stop(m, false, atoll(line + 5));
+  {
+    long long rid = 0;
+    if (gen_rid(line + 5, &rid)) /* (whole: "STOP 7x" refused, not 7) */
+      stop(m, false, rid);
+    else
+      out("ERR STOP's rid not a whole number (%.24s)\n", line + 5);
+  }
   else if (!strncmp(line, "GEN ", 4))
     gen(m, line);
   else if (*line)

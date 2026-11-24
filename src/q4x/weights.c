@@ -8,6 +8,7 @@
 #include "osmos/model/qtype.h"
 #include "../model/gguf_meta.h"
 #include "q4x_geo.h"
+#include "osmos/err.h"
 
 /* a role's types: a mask of the table's ids (qtype.h), or any type its path reads */
 #define TY(name) (1u << QTYPE_##name)
@@ -108,12 +109,6 @@ static const Role nextn[] = {
 #define N_NEXTN (sizeof nextn / sizeof *nextn)
 #define N_ROLES (sizeof roles / sizeof *roles)
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  snprintf(err, Q4X_ERR, "%s: %s", name, why);
-  return false;
-}
-
 /* the most rows the n-gram heads reach: the table holds at least these (the converter pads it) */
 static uint64_t ple_rows(const Q4xGeometry *g)
 {
@@ -176,7 +171,7 @@ static const GgufTensor *claim(const Claim *c, const Q4xGeometry *g, const Role 
 {
   const GgufTensor *mt = gguf_tensor(c->model, name), *ot = c->overlay ? gguf_tensor(c->overlay, name) : NULL;
   if (!mt)
-    return fail(err, name, ot ? "an overlay tensor the model has none of" : "missing"), NULL;
+    return osmos_fail(err, "%s: %s", name, ot ? "an overlay tensor the model has none of" : "missing"), NULL;
   if (ot)
     c->taken[mt - c->model->tensors] = true; /* shadowed: the overlay's is read */
   const GgufTensor *t = ot ? ot : mt;
@@ -184,21 +179,21 @@ static const GgufTensor *claim(const Claim *c, const Q4xGeometry *g, const Role 
   while (n < GGUF_MAX_DIMS && r->dims[n] != D_NONE)
     n++;
   if (t->n_dims != (uint32_t)n)
-    return fail(err, name, "of another number of dims"), NULL;
+    return osmos_fail(err, "%s: %s", name, "of another number of dims"), NULL;
   uint64_t values = 1;
   for (int i = 0; i < n; i++)
   {
     const uint64_t want = dim(g, r->dims[i]);
     if (r->dims[i] == D_PLE_ROWS ? t->dims[i] < want : t->dims[i] != want)
-      return fail(err, name, r->dims[i] == D_PLE_ROWS ? "fewer rows than the n-gram heads reach" : "of another shape"),
+      return osmos_fail(err, "%s: %s", name, r->dims[i] == D_PLE_ROWS ? "fewer rows than the n-gram heads reach" : "of another shape"),
              NULL;
     values *= t->dims[i];
   }
   const uint32_t paths = qtype_paths(t->type);
   if (r->path == RAW ? !(t->type < 32 && (r->types >> t->type & 1)) : (paths & r->path) != r->path)
-    return fail(err, name, "a type its reader does not take"), NULL;
+    return osmos_fail(err, "%s: %s", name, "a type its reader does not take"), NULL;
   if (t->bytes != gguf_bytes(t->type, values))
-    return fail(err, name, "its bytes not its type's for its shape"), NULL;
+    return osmos_fail(err, "%s: %s", name, "its bytes not its type's for its shape"), NULL;
   if (ot)
     c->taken_ov[ot - c->overlay->tensors] = true;
   else
@@ -208,21 +203,21 @@ static const GgufTensor *claim(const Claim *c, const Q4xGeometry *g, const Role 
 
 void q4x_weights_destroy(Q4xWeights *w) { free(w); }
 
-Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[Q4X_ERR])
+Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[OSMOS_ERR])
 {
   if (!model)
-    return fail(err, "q4x_weights_create", "no model"), NULL;
+    return osmos_fail(err, "%s: %s", "q4x_weights_create", "no model"), NULL;
   Q4xWeights *w = calloc(1, sizeof *w);
   bool *taken = calloc(model->n_tensors ? model->n_tensors : 1, sizeof *taken);
   bool *taken_ov = calloc(overlay && overlay->n_tensors ? overlay->n_tensors : 1, sizeof *taken_ov);
   if (!w || !taken || !taken_ov)
-    return free(w), free(taken), free(taken_ov), fail(err, "q4x_weights_create", "out of memory"), NULL;
+    return free(w), free(taken), free(taken_ov), osmos_fail(err, "%s: %s", "q4x_weights_create", "out of memory"), NULL;
   w->model = model, w->overlay = overlay;
   const Claim c = {model, overlay, taken, taken_ov};
   Q4xGeometry *g = &w->geo;
   const GgufTensor *embed = gguf_tensor(model, "token_embd.weight");
   bool ok = q4x_geometry(model, g, err) &&
-            (embed && embed->n_dims == 2 ? (g->n_vocab = (int)embed->dims[1]) > 0 : fail(err, "token_embd.weight", "missing"));
+            (embed && embed->n_dims == 2 ? (g->n_vocab = (int)embed->dims[1]) > 0 : osmos_fail(err, "%s: %s", "token_embd.weight", "missing"));
   for (size_t i = 0; ok && i < N_TOPS; i++)
     ok = (*(const GgufTensor **)((char *)w + tops[i].field) = claim(&c, g, &tops[i], tops[i].name, err));
   char name[NAME_MAX_LEN];
@@ -235,10 +230,10 @@ Q4xWeights *q4x_weights_create(const Gguf *model, const Gguf *overlay, char err[
       }
   for (size_t i = 0; ok && i < model->n_tensors; i++)
     if (!taken[i])
-      ok = fail(err, model->tensors[i].name, "a tensor no role of this layer's kind takes");
+      ok = osmos_fail(err, "%s: %s", model->tensors[i].name, "a tensor no role of this layer's kind takes");
   for (size_t i = 0; ok && overlay && i < overlay->n_tensors; i++)
     if (!taken_ov[i])
-      ok = fail(err, overlay->tensors[i].name, "an overlay tensor no role reads");
+      ok = osmos_fail(err, "%s: %s", overlay->tensors[i].name, "an overlay tensor no role reads");
   free(taken), free(taken_ov);
   if (!ok)
     return free(w), NULL;
@@ -304,14 +299,14 @@ static bool mtp_meta(const Gguf *mtp, const Q4xGeometry *g, char *err)
                    "not set: a head carrying its own embedding and output (the shared variant borrows the model's)");
 }
 
-Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR])
+Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[OSMOS_ERR])
 {
   if (!mtp || !w)
-    return fail(err, "q4x_mtp_create", "no head or no model"), NULL;
+    return osmos_fail(err, "%s: %s", "q4x_mtp_create", "no head or no model"), NULL;
   Q4xMtp *m = calloc(1, sizeof *m);
   bool *taken = calloc(mtp->n_tensors ? mtp->n_tensors : 1, sizeof *taken);
   if (!m || !taken)
-    return free(m), free(taken), fail(err, "q4x_mtp_create", "out of memory"), NULL;
+    return free(m), free(taken), osmos_fail(err, "%s: %s", "q4x_mtp_create", "out of memory"), NULL;
   m->model = mtp;
   const Claim c = {mtp, NULL, taken, NULL}; /* the head's own file: no overlay */
   const Q4xGeometry *g = &w->geo;
@@ -331,7 +326,7 @@ Q4xMtp *q4x_mtp_create(const Gguf *mtp, const Q4xWeights *w, char err[Q4X_ERR])
   }
   for (size_t i = 0; ok && i < mtp->n_tensors; i++)
     if (!taken[i])
-      ok = fail(err, mtp->tensors[i].name, "a tensor no role of the MTP head takes");
+      ok = osmos_fail(err, "%s: %s", mtp->tensors[i].name, "a tensor no role of the MTP head takes");
   free(taken);
   if (!ok)
     return free(m), NULL;

@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "chat_impl.h"
+#include "osmos/err.h"
 
 /* encoding.py's encode_messages for text: the messages read (chat_read.c), tool results put in their calls' order
    (sort_tool_results_by_call_order), earlier reasoning dropped (_drop_thinking_messages), each rendered
@@ -10,11 +11,11 @@
 
 bool chat_fail(char *err, const char *what, const char *why)
 {
-  snprintf(err, CHAT_ERR, "chat: %s: %s", what, why);
+  osmos_fail(err, "chat: %s: %s", what, why);
   return false;
 }
 
-int chat_effort(const Json *effort, char err[CHAT_ERR])
+int chat_effort(const Json *effort, char err[OSMOS_ERR])
 {
   if (!effort || effort->type == JSON_NULL)
     return 75; /* encoding.py's DEFAULT_REASONING_EFFORT, "high" */
@@ -100,7 +101,7 @@ static long last_user(const Msg *ms, size_t n)
 }
 
 /* a value as Python's `if value:` reads it (encoding.py's tests): null, false, 0, 0.0, "" and an empty list or object
-   false (0.7.1: a falsy response_format - [], false - rendered its section) */
+   false */
 static bool truthy(const Json *v)
 {
   if (!v)
@@ -155,7 +156,7 @@ static void put_blocks(JsonBuf *b, const Msg *m)
       else if (x->v && x->v->type == JSON_STRING)
         json_put(b, x->v->s, x->v->len);
       else if (x->v && (x->v->type == JSON_INT || x->v->type == JSON_FLOAT)) /* str(): Python's repr of a float, its
-                                                                                  digits of an int (0.7.1: empty) */
+                                                                                  digits of an int */
         json_dump(b, x->v);
       else if (x->v && (x->v->type == JSON_TRUE || x->v->type == JSON_FALSE))
         json_puts(b, x->v->type == JSON_TRUE ? "True" : "False");
@@ -210,7 +211,7 @@ static bool render(JsonBuf *b, const Msg *ms, size_t n, size_t i, ChatMode mode,
   return true;
 }
 
-bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[CHAT_ERR])
+bool chat_render(const Json *messages, ChatMode mode, int effort, JsonBuf *out, char err[OSMOS_ERR])
 {
   err[0] = 0;
   if (!messages || messages->type != JSON_ARRAY || !messages->n)

@@ -40,8 +40,8 @@ struct Run {
 };
 
 static Run run(const Q4xWeights* w, bool taps, bool with_probe, const std::vector<int32_t>& p, uint32_t vocab) {
-  const Q4xOptions o = {kCtx, kStep, false, taps ? kLayers : nullptr, taps ? 5u : 0u};
-  char err[Q4X_FWD_ERR] = "";
+  const Q4xOptions o = {kCtx, kStep, false, taps ? kLayers : nullptr, taps ? 5u : 0u, nullptr, FIT_BUDGET_NOW};
+  char err[OSMOS_ERR] = "";
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (!f) std::fprintf(stderr, "  create: %s\n", err);
   CHECK(f);
@@ -69,8 +69,8 @@ static Run run(const Q4xWeights* w, bool taps, bool with_probe, const std::vecto
 }
 
 static bool refused(const Q4xWeights* w, const int32_t* layers, uint32_t n) {
-  const Q4xOptions o = {kCtx, kStep, false, layers, n};
-  char err[Q4X_FWD_ERR] = "";
+  const Q4xOptions o = {kCtx, kStep, false, layers, n, nullptr, FIT_BUDGET_NOW};
+  char err[OSMOS_ERR] = "";
   Q4xForward* f = q4x_forward_create_with(w, nullptr, &o, err);
   if (f) q4x_forward_destroy(f);
   std::printf("  refused: %s\n", err);
@@ -86,7 +86,7 @@ int main() {
     std::printf("[test_q4x_taps_gpu] skipped: no Qwen3.8 UD-IQ3_XXS or no GPU\n");
     return 77;
   }
-  char gerr[GGUF_ERR] = "", werr[Q4X_ERR] = "";
+  char gerr[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(first.c_str(), gerr);
   CHECK(g);
   Q4xWeights* w = q4x_weights_create(g, nullptr, werr);

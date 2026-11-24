@@ -396,7 +396,7 @@ d KLD (NPU - GPU, +- its standard error): UD-IQ1_M wiki -0.0095 +-0.0021, hold0.
 osmos-evo-A wiki +0.0001 +-0.0013, hold0..3 +0.0005 +0.0001 +0.0011 +0.0005 (each +-0.0003..0.0007). within the noise
 of a different rounding (the NPU's bfp16 A, bf16 W) - no cost to the model's distance.
 
-## 0.7.0: Qwen's NPU mode (src/q4x/hip_npu.c), and the down's layout bug
+## 0.7.0: Qwen's NPU mode (src/q4x/hip_q4x_npu.c), and the down's layout bug
 
 the down's input is the swiglu's x16 - mm's tiled f16 (16 x 16 fragments, mm::x16_at), not rows. the first build
 packed it as rows: the NPU's down rows against the GPU's corr 0.01, wiki KL against Qwen's own GPU run 0.32 (ppl 2.34

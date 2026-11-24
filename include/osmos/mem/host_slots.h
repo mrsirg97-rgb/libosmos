@@ -1,13 +1,15 @@
 #ifndef HOST_SLOTS_H
 #define HOST_SLOTS_H
 
+#include "osmos/err.h"
 #include <stdint.h>
 
+#include "osmos/mem/ledger.h"
 #include "osmos/mem/pool.h"
 
 typedef struct HostSlots HostSlots;
 
-HostSlots *host_slots_create(uint64_t bytes, char err[POOL_ERR]);
+HostSlots *host_slots_create(OsmosLedger *l, uint64_t bytes, char err[OSMOS_ERR]);
 void host_slots_destroy(HostSlots *h);
 Slots host_slots(HostSlots *h);
 uint64_t host_slots_bytes(const HostSlots *h);
@@ -17,14 +19,13 @@ void *host_slots_base(const HostSlots *h);
 
 /*
 HostSlots
-  the pool's memory as plain pinned host pages the GPU reads (DESIGN.md, "0.3.0: energy a token", target 1): one
-  anonymous mapping, registered with HIP once, its blocks handed out by an Arena (ARENA_GRAIN: a direct read's
-  alignment). an O_DIRECT read DMAs straight into it - measured 6.14 GB/s a reader at 13% of its core, against 3.63 at
-  76% buffered into hip_slots' memory - and the GPU reads it at its own memory's speed (237.5 against 239.7 GB/s: "in
-  place"). registered memory is outside ttm's pages_limit: the forward counts it against its budget instead.
+  the pool's memory as plain pinned host pages the GPU reads: one anonymous mapping, registered with HIP once, its
+  blocks handed out by an Arena (ARENA_GRAIN: a direct read's alignment), so an O_DIRECT read DMAs straight into it.
+  registered memory is outside ttm's pages_limit: the forward counts it against its budget instead.
 
 host_slots_create
-  `bytes` rounded up to whole pages, mapped, populated and registered; NULL with the reason in `err` when the mapping,
+  `bytes` rounded up to whole pages, reserved in l (borrowed, given back at destroy; NULL counts nothing) before they
+  are mapped, then mapped, populated and registered; NULL with the reason in `err` when the mapping,
   the registration or the arena is refused, or when the GPU's address of the memory is not the host's (the readers
   and the kernels share one pointer: refused rather than guessed).
 

@@ -1,8 +1,8 @@
-// mmsweep [experts|dense|q4|ink2|mini|bf16]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a block, U chunks in
-// flight a lane) timed at one token on Qwen3.8-Flash-Next's shapes - each expert type's gate / up (640 x 2560) and
-// down (2560 x 640), 10 experts a launch (mm_group), and the dense Q6_K / Q8_0 - every call reading cold memory (its
-// matrices rotated through 1 GiB). a shape is a K split, so it is the sums' order: a type's for every token count
-// (the bits then the same however a token is batched); this picks the one-token time.
+// mmsweep [experts|dense|q4|ink2|mini|bf16]: mm's tile shapes (kernels/mm.h's Shape: SL values a slab, W waves a
+// block, U chunks in flight a lane) timed at one token on Qwen3.8-Flash-Next's shapes - each expert type's gate / up
+// (640 x 2560) and down (2560 x 640), 10 experts a launch (mm_group), and the dense Q6_K / Q8_0 - every call reading
+// cold memory (its matrices rotated through 1 GiB). a shape is a K split, so it is the sums' order: a type's for every
+// token count (the bits then the same however a token is batched); this picks the one-token time.
 // build: hipcc -O3 -Iinclude -Ikernels --offload-arch=gfx1151 tools/bench/mmsweep.hip -o bin/mmsweep
 #include <hip/hip_runtime.h>
 
@@ -45,7 +45,7 @@ static uint64_t row_bytes(uint32_t cols) {
   return (uint64_t) cols / quant::Block<T>::values * quant::Block<T>::bytes;
 }
 
-static int g_passes = 2;  // the fastest pass after the first (ink2: 20 - a low-power clock's swings ±15% a pass)
+static int g_passes = 2;  // the fastest pass after the first (ink2: 20 - a low-power clock swings pass to pass)
 template <typename F>
 static double time_us(F launch) {
   hipEvent_t a, b;

@@ -9,9 +9,8 @@
 #include "osmos/cpu/q8.h"
 
 /* the pool: workers asleep between jobs (a condition), within one moving through its phases together (a spinning
-   barrier: a phase is tens of microseconds) - x to int8; gate, up and the activation; the activations to int8;
-   down. each phase's rows split evenly over the workers, the experts' rows one range: any split the same bits (each
-   row's sums its own: test_cpu_lane) */
+   barrier: a phase is short) - x to int8; gate, up and the activation; the activations to int8; down. each phase's
+   rows split evenly over the workers, the experts' rows one range: any split the same bits (each row's sums its own) */
 
 #define QK 256
 

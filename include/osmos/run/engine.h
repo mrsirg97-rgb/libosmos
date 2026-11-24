@@ -4,14 +4,15 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/err.h"
 #include "osmos/model/state_io.h"
 
-#define OSMOS_ERR 256
 #define OSMOS_MAX_BLOCK 8 /* a drafter's most drafts a round, any family's */
 #define OSMOS_MAX_LANES 64 /* a round's most sequences at once (osmos-serve's round.c) */
-/* a draft kept while each confidence is at least this and their product too (oseq_draft's floors): swept for energy at
-   low-power (DESIGN.md, "0.3.x: drafting for joules") - 0.1 the least J a token, 0.5 (maya's) 6% more, 0.0 as much
-   (the early stop gone). the bits are the model's whatever they are */
+#define OSMOS_MAX_RUNS 64  /* a step's most sequences, every family's (osmos_batch refuses more, whole: a step's logits
+                              one step's) */
+/* a draft kept while each confidence is at least this and their product too (oseq_draft's floors), swept for energy.
+   the bits are the model's whatever they are */
 #define OSMOS_DRAFT_CONF_MIN 0.1f
 #define OSMOS_DRAFT_CUM_MIN 0.1f
 
@@ -25,7 +26,7 @@ typedef struct OsmosFiles
   const char *model;
   const char *table;   /* DeepSeek's Engram table: a file of its own beside the shards */
   const char *overlay; /* a patch's tensors in place of the model's (an abliteration) */
-  const char *lsa;     /* latent sparse attention's maps (LFM3's: the release's safetensors), NULL dense */
+  const char *lsa;     /* latent sparse attention's maps (LFM3's), NULL dense */
 } OsmosFiles;
 
 /* what the server sizes itself by, before any build */
@@ -46,19 +47,23 @@ typedef struct OsmosOptions
   uint64_t budget;      /* the GPU memory streamed experts may hold: bytes, given (the server sizes it) */
   const char *picks;    /* a ranking file for the resident set, or NULL */
   bool no_guess;        /* no experts guessed a layer ahead */
-  const char *drafter;  /* the drafter's directory, or NULL: no drafting */
+  const char *drafter;  /* the drafter's path, or NULL: no drafting - a file (Qwen's and osmos1.7b's GGUF: DFlash2,
+                           or Qwen's MTP head; Hy4's DFly2 safetensors) or a directory (DeepSeek's DSpark: dspark.json,
+                           dspark.bin; Inkling's: one holding ink2-mtp.gguf, or the file) - the family refuses another */
   bool fill_set;        /* fill given; else the RAM a sizing keeps free is FIT_RAM_FREE (osmos/run/fit.h) */
   uint64_t fill;        /* the system's RAM a sizing leaves free, bytes (osmos-serve's --fill; 0: all of it the cache's) */
   bool stream_ngram;    /* Qwen's n-gram table read from its file a step at a time, not held in GPU memory (DeepSeek's
                            Engram always is) */
-  const char *npu;      /* 0.7.0: the NPU's kernels' directory (forward_npu), or NULL: the GPU alone */
+  const char *npu;      /* the NPU's kernels' directory (forward_npu), or NULL: the GPU alone */
   float npu_share;      /* its share of a prompt step's layer's pairs: 0 the model's default (OSMOS_NPU_SHARE_*) */
   bool kv_q8;           /* Inkling's full layers' cached values Q8, not Q5 (osmos-serve's --kv-q8; the others refuse it) */
+  bool profile;         /* a measurement's build: a step's sections timed, said at its destroy (osmos-serve's --profile;
+                           Inkling's - the others refuse it) */
+  const char *rope_stages; /* osmos1.7b's YaRN stages, "from:factor,..." (osmos-serve's --rope-stages; the others
+                              refuse it; NULL the model's) */
 } OsmosOptions;
 
-/* the NPU's default shares: each model's best measured, 8K prompts at performance (DESIGN.md, "0.7.0") - DeepSeek's
-   0.10 / 0.15 / 0.20: 641 / 642.5 / 635.5 tok/s (GPU 626); Qwen UD-IQ3_XXS's 0.05 / 0.10 / 0.15: 954.8 / 947.1 / 919
-   (GPU 929.9; means of 5, 5 and 2 rounds) */
+/* the NPU's default shares: each model's best measured */
 #define OSMOS_NPU_SHARE_DS 0.15f
 #define OSMOS_NPU_SHARE_QWEN 0.05f
 
@@ -68,6 +73,7 @@ typedef struct OsmosStats
   uint64_t budget, cpu_picks;
   uint64_t streamed, guessed, guess_read;
   uint64_t waits[2], wait_ns[2]; /* reads waited for: [not guessed, guessed] */
+  uint64_t held;                 /* the bytes the engine's ledger holds (osmos/mem/ledger.h): its tree's memory */
 } OsmosStats;
 
 OsmosModel *osmos_open(const OsmosFiles *files, char err[OSMOS_ERR]);
@@ -87,7 +93,7 @@ const float *osmos_logits(const Osmos *e, uint32_t row);
 bool osmos_greedy(Osmos *e, uint32_t row0, uint32_t rows, int32_t *ids, char err[OSMOS_ERR]);
 bool osmos_greedy_except(Osmos *e, uint32_t row, const int32_t *except, uint32_t n, int32_t *id, char err[OSMOS_ERR]);
 /* a request's sampling: temperature 0 greedy (the family's pick, the bits as ever); top_p 1 every token; top_k 0
-   every token (0.15.2: the k most likely, then top_p within them) */
+   every token (else the k most likely, then top_p within them) */
 typedef struct OsmosSampling
 {
   float temperature, top_p;
@@ -101,6 +107,7 @@ bool osmos_sample_except(Osmos *e, uint32_t row, const OsmosSampling *s, uint64_
 
 OsmosSeq *oseq_create(Osmos *e, char err[OSMOS_ERR]);
 void oseq_destroy(OsmosSeq *s);
+bool oseq_reset(OsmosSeq *s, char err[OSMOS_ERR]);
 bool oseq_prompt(OsmosSeq *s, uint32_t end);
 bool oseq_rollback(OsmosSeq *s, uint32_t n);
 uint32_t oseq_reach(const OsmosSeq *s);
@@ -126,9 +133,9 @@ bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf
 
 /*
 engine
-  the one shape the server, the bench and the tools run a model through, whatever its family (DESIGN.md, "0.4.0: one
-  engine interface"): a family is chosen by the file's general.architecture, and each call is that family's - its
-  bits, its errors. a family's own headers (osmos/run/forward.h, drafter.h) stay for its tests; this header names no
+  the one shape the server, the bench and the tools run a model through, whatever its family: a family is chosen by
+  the file's general.architecture, and each call is that family's - its
+  bits, its errors. a family's own headers (osmos/ds4/forward.h, drafter.h) stay for its tests; this header names no
   family's types.
 
 osmos_open
@@ -180,10 +187,17 @@ osmos_greedy_except
 osmos_sample, osmos_sample_except, osmos_sampled
   row's token drawn as s says (ops_sample: temperature, top-p, the inverse CDF at ops_draw_uniform(seed, position)) -
   position the drawn token's in its sequence, so a token's draw is its row's bits and (seed, position) alone: a drafted
-  round's row and a plain step's at one position the same token (0.14.0). _except: the draw among the tokens not in
+  round's row and a plain step's at one position the same token. _except: the draw among the tokens not in
   except (theirs -inf in a copy of the row). osmos_sampled: s names a temperature above 0 (NULL, or 0: greedy -
   osmos_greedy's / osmos_greedy_except's pick exactly). false with why: a row not kept, a NaN or +inf in it, a GPU
   call failed, s's numbers out of range (temperature not finite, top_p not in (0, 1]).
+
+oseq_reset
+  the sequence a new one: position 0, every state a new sequence's (its next step the bits of a new one's), its memory
+  kept - a conversation's restart allocates nothing. false with why: the sequence then broken until a reset holds or a
+  load. a sequence's broken state, every family's: a step refused by its checks (before any work) leaves its sequences
+  as they were; a step that fails partway leaves them broken - their steps, drafts and saves refused - until
+  oseq_reset or oseq_load holds.
 
 oseq_create .. oseq_load
   a sequence: its position (tokens it holds), oseq_prompt (its prompt ends at end: the family may skip work no later
@@ -195,10 +209,10 @@ oseq_create .. oseq_load
   oseq_save / oseq_load are them over one buffer.
 
 oseq_mark_bytes .. oseq_mark_load
-  a point the sequence goes back to (0.7.5: osmos-serve's prompt ends): the sequence as oseq_load would leave it, for
+  a point the sequence goes back to (osmos-serve's prompt ends): the sequence as oseq_load would leave it, for
   as long as it holds the same tokens below the mark's position - no load, reset or rollback under it since; the
   caller keeps the tokens. a family's mark is its whole state (DeepSeek's), or the part a later token changes (Qwen's:
-  its recurrent layers' states and rings, ~118 MB at any position - q4x_seq_mark_save). load refuses a mark past
+  its recurrent layers' states and rings, one size at any position). load refuses a mark past
   the position or not its size.
 
 osmos_block, oseq_seed, oseq_draft, oseq_draft_all

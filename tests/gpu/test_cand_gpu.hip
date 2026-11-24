@@ -14,9 +14,10 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 #include "test_fit.h"
@@ -83,12 +84,13 @@ int main() {
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, 100ull << 30, nullptr, kMaxTokens};
+  o.lane = true;
   Forward* f = nullptr;
   TestFit fit = {[&](uint64_t b) {
                    o.budget = b;
-                   return (f = forward_create_with(w, &o, err)) && forward_lane(f, 0, NULL, err);
+                   return (f = forward_create_with(w, &o, err)) != nullptr;
                  },
                  [&] { return forward_budget(f); }, [&](uint64_t* r) { return forward_room(f, r); },
                  [&] { forward_destroy(f), f = nullptr; }};
@@ -98,18 +100,22 @@ int main() {
   p.block = (uint32_t) w->geo.cand_block;
   p.words = ((kMaxCtx / 1 + p.block - 1) / p.block + 31) / 32;  // (the forward's: its smallest ratio 1)
   forward_probe(f, probe, &p);
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, kPrompt));
   std::vector<Seq*> ss(kMaxTokens, s);
   for (uint32_t at = 0; at < kPrompt; at += kMaxTokens) {
     p.cand_layer = -1;
     const uint32_t c = kPrompt - at < kMaxTokens ? kPrompt - at : kMaxTokens;
+    osmos_clear(err);
     CHECK(forward_batch(f, ss.data(), ids.data() + at, c, err));
   }
   int32_t t;
+  osmos_clear(err);
   CHECK(forward_greedy(f, (kPrompt - 1) % kMaxTokens, 1, &t, err));
   for (uint32_t i = 0; i < kDecode; i++) {
     p.cand_layer = -1;
+    osmos_clear(err);
     CHECK(forward_step(f, s, t, err) && forward_greedy(f, 0, 1, &t, err));
   }
   std::printf("  %u-token prompt and %u decode steps: the bits built in %llu sub-batches; %llu selections at the index "

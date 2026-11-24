@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""tools/serve/slot_test.py - the kept conversations (OSMOS_SLOT_KEEP; maya #356's slot_keep_test.py, ported):
+"""tools/serve/slot_test.py - the kept conversations (osmos-serve's slots, --no-slots / --slot-*; maya #356's slot_keep_test.py, ported):
 a request that does not continue the conversation in the engine takes back the kept one it continues, so A, B, A's
 next turn reads only A's new tokens - and answers with the bits of A never set aside (the answers' token hashes
 compared; maya's test compared greedy tokens). a turn read from token 0 is another computation: its answer tokens
@@ -50,7 +50,7 @@ def main():
     ap.add_argument("--exe", default="bin/osmos-serve")
     ap.add_argument("--prompts", default=os.path.expanduser("~/bench/osmos-prompts"))
     ap.add_argument("--b-file", help="B's and the turn's text (default: the prompts' p8192.txt)")
-    ap.add_argument("--ram-gb", help="OSMOS_SLOT_RAM_GB: 0 sets every conversation aside streamed to the folder")
+    ap.add_argument("--ram-gb", help="--slot-ram-gb: 0 sets every conversation aside streamed to the folder")
     ap.add_argument("--budget", help="GiB (a streaming family's; default: its own sizing)")
     a = ap.parse_args()
     calib, gpl = read_ids(f"{a.prompts}/calib16k.txt"), read_ids(a.b_file or f"{a.prompts}/p8192.txt")
@@ -67,16 +67,13 @@ def main():
         args += ["--dspark", a.dspark]
     tmp = tempfile.mkdtemp(prefix="osmos-slots-")
 
-    def engine(keep, d, gb=None):
-        env = dict(os.environ, OSMOS_SLOT_DIR=d)
-        env.pop("OSMOS_SLOT_KEEP", None)  # kept: the default's
-        if not keep:
-            env["OSMOS_SLOT_KEEP"] = "0"
+    def engine(keep, d, gb=None):  # (0.16.0: the slots' flags - the env's before)
+        flags = ["--slot-dir", d] + ([] if keep else ["--no-slots"])
         if gb is not None:
-            env["OSMOS_SLOT_GB"] = str(gb)
+            flags += ["--slot-gb", str(gb)]
         if a.ram_gb is not None:
-            env["OSMOS_SLOT_RAM_GB"] = a.ram_gb
-        return Engine(a.exe, args, env)
+            flags += ["--slot-ram-gb", a.ram_gb]
+        return Engine(a.exe, args + flags, dict(os.environ))
 
     try:
         print("reference: A, its next turn continued in place, then B and the turn again (slots off)", flush=True)
@@ -123,7 +120,7 @@ def main():
         size = sum(os.path.getsize(os.path.join(kept, f)) for f in bins)
         check(f"kept: the folder holds A and B ({len(bins)} .bin, {len(metas)} .meta, {size / 2**20:.1f} MiB)",
               len(bins) == 2 and len(metas) == 2)
-        check("kept: the folder under the default OSMOS_SLOT_GB (16)", size <= 16 * 2**30)
+        check("kept: the folder under the default --slot-gb (16)", size <= 16 * 2**30)
 
         print("restart: A's next turn alone, a new process", flush=True)
         kept_d = f"{tmp}/kept-drafted"  # (the drafted restart's own copy: the first takes A back out of the folder)

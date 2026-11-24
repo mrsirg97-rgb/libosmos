@@ -1,16 +1,14 @@
+/* Hy4's forward made (osmos/hy4/forward.h): the build in order (hip_hy4_resident.c's parts), the head's tables,
+   destroyed in reverse; its reads */
 #define _GNU_SOURCE
 #include <unistd.h>
 #include <fcntl.h>
-/* the hy4 forward made (osmos/hy4/forward.h): the model's tensors read into GPU memory but the Engram table (its rows
-   read a step at a time) and the drafter's layers, iHC's mixes as F32, the ropes' tables, a step's buffers - and
-   unmade */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
 #include <hip/hip_runtime_api.h>
-
+#include "osmos/model/tensor.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
@@ -24,236 +22,8 @@
 #include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
-
-#define READ_PIECE (64ull << 20)
-
-bool hy4_fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, HY4_ERR, "%s", why);
-  return false;
-}
-
-bool hy4_alloc(void *p, uint64_t bytes) { return hipMalloc((void **)p, bytes ? bytes : 1) == hipSuccess; }
-
-void hy4_forward_tap(Hy4Forward *f, hy4_tap_fn fn, void *arg) { f->tap = fn, f->tap_arg = arg; }
-
-static bool resident(const Hy4Weights *w, const GgufTensor *t)
-{
-  if (t == w->engram_table)
-    return false;
-  return !(strncmp(t->name, "blk.", 4) == 0 && atoi(t->name + 4) >= w->geo.n_layers); /* the drafter's: not ours */
-}
-
-/* a MoE layer's routed experts: the membrane's (experts()), not the upload's */
-static bool routed_expert(const Hy4Weights *w, const GgufTensor *t)
-{
-  for (int l = w->geo.n_dense; l < w->geo.n_layers; l++)
-    if (t == w->layer[l].exp_gate || t == w->layer[l].exp_up || t == w->layer[l].exp_down)
-      return true;
-  return false;
-}
-
-static bool not_resident(const GgufTensor *t, void *arg)
-{
-  const Hy4Weights *w = ((const Hy4Forward *)arg)->w;
-  return !resident(w, t) || routed_expert(w, t);
-}
-
-/* a promotion's copy, the stream's slot to the pool's (both pinned host memory the GPU reads in place) */
-static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
-{
-  (void)ctx;
-  memcpy(dst, src, bytes);
-  return true;
-}
-
-/* the routed experts behind the membrane: the MoE layers' units (expert_units), the warm set an expert of every layer
-   at a time, sized to the budget (experts_plan: 0 every one), read in (experts_create); every one resident: their
-   addresses' device table for the decode's GPU tables (hy4_route) */
-static bool experts(Hy4Forward *f, uint64_t budget, char *err)
-{
-  const Hy4Weights *w = f->w;
-  const Gguf *m = w->model;
-  const uint32_t E = (uint32_t)w->geo.n_experts, D0 = (uint32_t)w->geo.n_dense, ML = (uint32_t)w->geo.n_layers - D0;
-  if (!ML)
-    return true;
-  ExpertTensors t[HY4_MAX_LAYERS];
-  for (uint32_t l = 0; l < ML; l++)
-  {
-    const Hy4Layer *L = &w->layer[D0 + l];
-    t[l] = (ExpertTensors){L->exp_gate, L->exp_up, L->exp_down, false};
-  }
-  const size_t n = (size_t)ML * E;
-  PoolUnit *units = calloc(n, sizeof *units);
-  uint32_t *order = malloc(n * sizeof *order);
-  bool ok = units && order && (f->xfds = malloc((size_t)m->n_files * sizeof *f->xfds));
-  for (int i = 0; ok && i < m->n_files; i++)
-    f->xfds[i] = -1;
-  for (int i = 0; ok && i < m->n_files; i++)
-    ok = (f->xfds[i] = open(m->paths[i], O_RDONLY | O_DIRECT)) >= 0;
-  ok = (ok && expert_units(t, ML, E, f->xfds, units, n) == n) ||
-       hy4_fail(err, "out of memory, a model file not opened O_DIRECT, or the experts not n_experts equal slices");
-  for (size_t u = 0; ok && u < n; u++) /* expert 0 of every layer, then 1, ... */
-    order[u] = (uint32_t)((u % ML) * E + u / ML);
-  ExpertsPlan plan;
-  char merr[MEMBRANE_ERR] = "";
-  ok = ok && (experts_plan(units, ML, E, order, budget ? 0 : UINT64_MAX, budget, f->fixed_bytes, ARENA_GRAIN, &plan) ||
-              hy4_fail(err, "the experts' plan refused"));
-  ok = ok && (experts_create(units, ML, E, order, &plan, ARENA_GRAIN, HY4_EXPERT_READERS, copy_host, NULL, 0, true,
-                             &f->ex, merr) ||
-              hy4_fail(err, merr[0] ? merr : "the experts' membrane refused"));
-  if (ok)
-    f->pinned_bytes = host_slots_bytes(f->ex.slots) + host_slots_bytes(f->ex.stream);
-  if (ok && (f->whole = membrane_whole(f->ex.mem)))
-  {
-    const void **tab = malloc(n * 3 * sizeof *tab);
-    ok = tab != NULL;
-    for (size_t u = 0; ok && u < n; u++)
-    {
-      const void *dev[POOL_PARTS];
-      ok = membrane_ready(f->ex.mem, (uint32_t)u, dev);
-      for (int k = 0; ok && k < 3; k++)
-        tab[((u / E) * 3 + (size_t)k) * E + u % E] = dev[k];
-    }
-    ok = (ok && hy4_alloc(&f->exp_tab, n * 3 * sizeof *tab) &&
-          hipMemcpy(f->exp_tab, tab, n * 3 * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
-         hy4_fail(err, "the experts' address table not made");
-    f->h_tab = tab;
-  }
-  ok = ok && ((f->h_ex = malloc(E * sizeof *f->h_ex)) || hy4_fail(err, "out of memory"));
-  free(units), free(order);
-  return ok;
-}
-
-static bool upload(Hy4Forward *f, char *err)
-{
-  return gpu_upload_table(f->w->model, READ_PIECE, not_resident, f, &f->dev, err, err ? HY4_ERR : 0);
-}
-
-/* a joint of members (NULL ones skipped; rows each, cols alike): grouped by type in the members' order, each type's
-   two or more concatenated into one buffer (the tensors' device pointers then into it) */
-static bool joint_make(Hy4Forward *f, const GgufTensor *const *m, const uint32_t *rows, int k, Hy4Joint *j)
-{
-  const Gguf *g = f->w->model;
-  memset(j, 0, sizeof *j);
-  bool done[HY4_JOINT_MAX] = {false};
-  for (int a = 0; a < k; a++)
-  {
-    if (!m[a] || done[a])
-      continue;
-    uint32_t type = m[a]->type, sum = 0;
-    uint64_t bytes = 0;
-    int count = 0;
-    for (int b = a; b < k; b++)
-      if (m[b] && !done[b] && m[b]->type == type)
-        j->off[b] = j->total + sum, sum += rows[b], bytes += m[b]->bytes, count++;
-    const void *w = hy4_dev(f, m[a]);
-    if (count > 1)
-    {
-      uint8_t *buf = NULL;
-      if (hipMalloc((void **)&buf, bytes) != hipSuccess)
-        return false;
-      f->joints[f->n_joints++] = buf, w = buf;
-      uint64_t at = 0;
-      for (int b = a; b < k; b++)
-        if (m[b] && !done[b] && m[b]->type == type)
-        {
-          const size_t i = (size_t)(m[b] - g->tensors);
-          if (hipMemcpy(buf + at, f->dev[i], m[b]->bytes, hipMemcpyDeviceToDevice) != hipSuccess)
-            return false;
-          hipFree(f->dev[i]);
-          f->dev[i] = buf + at, f->in_joint[i] = true, at += m[b]->bytes;
-        }
-    }
-    for (int b = a; b < k; b++)
-      if (m[b] && m[b]->type == type)
-        done[b] = true;
-    j->run[j->n_runs++] = (typeof(j->run[0])){type, sum, j->total, w};
-    j->total += sum;
-  }
-  return true;
-}
-
-/* every layer's joints: the attention input's (q_a, kv_a, gate, the indexer's k and weights) and the FFN input's
-   (the router, the routed latent's down and the shared expert's gate and up; the dense layer's gate and up) */
-static bool joints_make(Hy4Forward *f, uint32_t *most)
-{
-  const Hy4Geometry *g = &f->w->geo;
-  const uint32_t ql = (uint32_t)g->q_lora, row = (uint32_t)(g->kv_lora + g->rope_dim), vd = (uint32_t)g->v_dim;
-  const uint32_t ID = (uint32_t)g->ix_dim, IH = (uint32_t)g->ix_heads, E = (uint32_t)g->n_experts;
-  const uint32_t lat = (uint32_t)g->latent, sh = (uint32_t)(g->ff_exp * g->n_shexp), ff = (uint32_t)g->n_ff;
-  if (!(f->joints = calloc(2 * (size_t)g->n_layers * HY4_JOINT_MAX, sizeof *f->joints)))
-    return false;
-  for (int l = 0; l < g->n_layers; l++)
-  {
-    const Hy4Layer *L = &f->w->layer[l];
-    const bool sw = g->sliding[l];
-    const GgufTensor *a[5] = {L->q_a, L->kv_a, L->gate, sw ? NULL : L->ix_k, sw ? NULL : L->ix_proj};
-    const uint32_t ar[5] = {ql, row, (uint32_t)g->n_heads[l] * vd, ID, IH};
-    const GgufTensor *d[4] = {L->router, L->routed_down, L->sh_gate, L->sh_up};
-    const uint32_t dr[4] = {E, lat, sh, sh};
-    const GgufTensor *dd[2] = {L->ffn_gate, L->ffn_up};
-    const uint32_t ddr[2] = {ff, ff};
-    if (!joint_make(f, a, ar, 5, &f->j_attn[l]) ||
-        !(l < g->n_dense ? joint_make(f, dd, ddr, 2, &f->j_ffn[l]) : joint_make(f, d, dr, 4, &f->j_ffn[l])))
-      return false;
-    *most = f->j_attn[l].total > *most ? f->j_attn[l].total : *most;
-    *most = f->j_ffn[l].total > *most ? f->j_ffn[l].total : *most;
-  }
-  return true;
-}
-
-/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's were Q8_0, decoded) */
-static bool as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
-{
-  const uint64_t n = t->dims[0] * t->dims[1];
-  if (!hy4_alloc(out, n * F))
-    return false;
-  if (t->type == QTYPE_F32)
-    return hipMemcpy(*out, hy4_dev(f, t), n * F, hipMemcpyDeviceToDevice) == hipSuccess;
-  return quant_dequant(t->type, hy4_dev(f, t), n, *out, NULL);
-}
-
-/* a rope's frequencies: 1 / base^(2i / dim), as the reference computes them (F32) */
-static bool freqs(float base, uint32_t dim, float **out)
-{
-  float h[256];
-  if (dim / 2 > 256) /* (before the writes: a file's rope_dim past 512 wrote past h - 0.11.2) */
-    return false;
-  for (uint32_t i = 0; i < dim / 2; i++)
-    h[i] = 1.0f / powf(base, (float)(2 * i) / (float)dim);
-  return hy4_alloc(out, dim / 2 * F) && hipMemcpy(*out, h, dim / 2 * F, hipMemcpyHostToDevice) == hipSuccess;
-}
-
-static bool engram_reader(Hy4Forward *f, const int *fds, char *err)
-{
-  const Hy4Weights *w = f->w;
-  const Hy4Geometry *g = &w->geo;
-  EngramShape shape;
-  char eerr[ENGRAM_ERR] = "";
-  if (!hy4_engram_shape(w, &shape, err))
-    return false;
-  if (!(f->eg = engram_create_shape(&shape, eerr)))
-    return hy4_fail(err, eerr);
-  const GgufKv *offs = gguf_kv(w->model, "hy_v4_flash.ple.head_offsets");
-  const int cols = (g->engram_ngram - 1) * g->engram_heads;
-  for (int e = 0; e < g->n_engram; e++)
-  {
-    int64_t v = 0;
-    if (!offs || !gguf_int(offs, (size_t)e * cols, &v) || v < 0)
-      return hy4_fail(err, "hy_v4_flash.ple.head_offsets: an Engram layer's first row");
-    f->eg_first[e] = (uint64_t)v;
-  }
-  const GgufTensor *t = w->engram_table;
-  f->eg_fd = fds[t->file];
-  f->eg_row_bytes = t->bytes / t->dims[1];
-  const uint64_t rows = (uint64_t)f->max_tokens * g->n_engram * cols;
-  return ((f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
-          hipHostMalloc((void **)&f->eg_stage, rows * f->eg_row_bytes, 0) == hipSuccess &&
-          hy4_alloc(&f->eg_raw, rows * f->eg_row_bytes) && hy4_alloc(&f->eg_rows, rows * g->engram_dim * F)) ||
-         hy4_fail(err, "out of memory (the Engram rows' buffers)");
-}
+#include "osmos/err.h"
+#include "osmos/err_hip.h"
 
 void hy4_forward_destroy(Hy4Forward *f)
 {
@@ -267,24 +37,12 @@ void hy4_forward_destroy(Hy4Forward *f)
     if (f->xfds[i] >= 0)
       close(f->xfds[i]);
   free(f->xfds);
-  hipFree((void *)f->exp_tab), free((void *)f->h_tab), free(f->h_ex);
-  hipFree(f->head8);
-  hipFree(f->kb_tab), hipFree(f->vb_tab), hipFree(f->kb_xo), hipFree(f->kb_yo), hipFree(f->vb_xo), hipFree(f->vb_yo);
-  hipFree(f->hcnt);
-  gpu_free_table(f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
-  for (uint32_t i = 0; i < f->n_joints; i++)
-    hipFree(f->joints[i]);
+  free((void *)f->h_tab), free(f->h_ex);
+  gpu_free_table(f->ledger, f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
+  rowread_destroy(f->eg_read); /* (its pending reads into the pinned stage waited for, before the record frees it) */
+  gpu_bufs_free(&f->bufs);     /* every GPU and pinned buffer the forward made: from the record (before the joints'
+                                  table, whose slots it NULLs) */
   free(f->joints), free(f->in_joint);
-  for (int l = 0; l < HY4_MAX_LAYERS; l++)
-    hipFree(f->fn_attn[l]), hipFree(f->fn_ffn[l]);
-  gpu_bufs_free(&f->bufs); /* the step's buffers: the table's */
-  void *b[] = {f->fn_out, f->freqs_swa, f->freqs_sparse, f->eg_raw, f->eg_rows, f->jo_attn, f->jo_ffn, /* (allocated  */
-               f->x16,    f->xe16,      f->overflow,     f->rx,     f->ry,      f->rxd,     f->ryd,    /* outside the */
-               f->rcnt,   f->rw,        f->rgidx,        f->rhidx};                                    /* table)      */
-  for (size_t i = 0; i < sizeof b / sizeof *b; i++)
-    hipFree(b[i]);
-  hipHostFree(f->eg_stage), hipHostFree(f->pin_tok), hipHostFree(f->pin_pos), hipHostFree(f->pin_logits), hipHostFree(f->pin_flags);
-  rowread_destroy(f->eg_read);
   engram_destroy(f->eg);
   free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx);
   free(f->h_w), free(f->h_wsel);
@@ -314,10 +72,10 @@ static bool head_tables(Hy4Forward *f)
       vb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->v_b) + (uint64_t)h * vd * lat / 32 * 34;
   }
   const uint64_t tb = (uint64_t)L * M * sizeof *kb;
-  ok = ok && hipMalloc((void **)&f->kb_tab, tb) == hipSuccess && hipMalloc((void **)&f->vb_tab, tb) == hipSuccess &&
-       hipMalloc((void **)&f->kb_xo, M * 4) == hipSuccess && hipMalloc((void **)&f->kb_yo, M * 4) == hipSuccess &&
-       hipMalloc((void **)&f->vb_xo, M * 4) == hipSuccess && hipMalloc((void **)&f->vb_yo, M * 4) == hipSuccess &&
-       hipMalloc((void **)&f->hcnt, M * 4) == hipSuccess &&
+  ok = ok && hy4_alloc(&f->bufs, &f->kb_tab, tb) && hy4_alloc(&f->bufs, &f->vb_tab, tb) &&
+       hy4_alloc(&f->bufs, &f->kb_xo, M * 4) && hy4_alloc(&f->bufs, &f->kb_yo, M * 4) &&
+       hy4_alloc(&f->bufs, &f->vb_xo, M * 4) && hy4_alloc(&f->bufs, &f->vb_yo, M * 4) &&
+       hy4_alloc(&f->bufs, &f->hcnt, M * 4) &&
        hipMemcpy(f->kb_tab, kb, tb, hipMemcpyHostToDevice) == hipSuccess &&
        hipMemcpy(f->vb_tab, vb, tb, hipMemcpyHostToDevice) == hipSuccess &&
        hipMemcpy(f->kb_xo, xo[0], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
@@ -328,18 +86,16 @@ static bool head_tables(Hy4Forward *f)
   return ok;
 }
 
-Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[HY4_ERR])
+Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Options *o, char err[OSMOS_ERR])
 {
   if (!w || !fds || !o || !o->max_tokens || o->max_tokens > o->max_ctx)
-    return hy4_fail(err, "no weights, files or options, or a step past the context"), NULL;
+    return osmos_fail(err, "no weights, files or options, or a step past the context"), NULL;
   if (w->geo.engram_ngram - 1 > HY4_STATE_HISTORY)
-    return hy4_fail(err, "an n-gram longer than a saved state's history keeps"), NULL;
-  size_t free0 = 0, total0 = 0;
-  if (hipMemGetInfo(&free0, &total0) != hipSuccess)
-    return hy4_fail(err, "the GPU's free memory not read"), NULL;
+    return osmos_fail(err, "an n-gram longer than a saved state's history keeps"), NULL;
   Hy4Forward *f = calloc(1, sizeof *f);
   if (!f)
-    return hy4_fail(err, "out of memory"), NULL;
+    return osmos_fail(err, "out of memory"), NULL;
+  f->ledger = o->ledger, f->bufs.ledger = o->ledger;
   const Hy4Geometry *g = &w->geo;
   f->w = w, f->max_tokens = o->max_tokens, f->max_ctx = o->max_ctx, f->kv8 = !o->kv_f32;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;
@@ -390,32 +146,35 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->rw, 3 * ecap * sizeof(void *)}, {&f->rgidx, scap * 4}, {&f->rhidx, scap * 4},
 
   };
-  bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || hy4_fail(err, "more heads than this build's tables");
-  ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || hy4_fail(err, "the step's stream not made"));
-  ok = ok && upload(f, err);
+  bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || osmos_fail(err, "more heads than this build's tables");
+  ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || osmos_fail(err, "the step's stream not made"));
+  ok = ok && hy4_upload(f, err);
   if (ok)
-    ok = head_tables(f) || hy4_fail(err, "a GPU allocation refused (the heads' tables)");
+    ok = head_tables(f) || osmos_fail(err, "a GPU allocation refused (the heads' tables)");
   if (ok && o->head_q8 && f->w->output->type == QTYPE_BF16)
   { /* the head's Q8_0 copy (Hy4Options' head_q8): its BF16 freed */
     const GgufTensor *out = f->w->output;
-    float *x = hy4_host_f32(f->w->model, out);
-    ok = (x && hy4_q8_up(x, out->dims[1], (uint32_t)out->dims[0], &f->head8)) ||
-         hy4_fail(err, "the head's Q8_0 copy not made");
+    float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
+    ok = (x && hy4_q8_up(&f->bufs, x, out->dims[1], (uint32_t)out->dims[0], &f->head8)) ||
+         osmos_fail(err, "the head's Q8_0 copy not made");
     free(x);
     if (ok)
     {
       const size_t i = (size_t)(out - f->w->model->tensors);
-      hipFree(f->dev[i]), f->dev[i] = NULL;
+      ledger_free(f->ledger, f->dev[i]), f->dev[i] = NULL;
     }
   }
   uint32_t joint_most = 0;
-  ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && joints_make(f, &joint_most) &&
-               hy4_alloc(&f->jo_attn, (uint64_t)joint_most * F) && hy4_alloc(&f->jo_ffn, (uint64_t)joint_most * F)) ||
-              hy4_fail(err, "the joint matrices not made (GPU memory)"));
+  ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && hy4_joints_make(f, &joint_most) &&
+               hy4_alloc(&f->bufs, &f->jo_attn, (uint64_t)joint_most * F) && hy4_alloc(&f->bufs, &f->jo_ffn, (uint64_t)joint_most * F)) ||
+              osmos_fail(err, "the joint matrices not made (GPU memory)"));
+  ok = ok && ledger_check(f->ledger, hy4_alloc(&f->bufs, &f->ix_spread, hy4_ix_spread_bytes()) ? hipSuccess
+                                                                                             : hipErrorOutOfMemory,
+                          err, HY4_IX_SPREAD); /* (whole: SCOPE.md) */
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
-    ok = hy4_alloc(read_want[i].p, read_want[i].bytes) || hy4_fail(err, "GPU memory refused (the read's buffers)");
-  ok = ok && hipMemset(f->overflow, 0, 8) == hipSuccess && (f->fault = f->overflow + 1) &&
-       hipHostMalloc((void **)&f->pin_flags, 8, 0) == hipSuccess && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
+    ok = hy4_alloc(&f->bufs, read_want[i].p, read_want[i].bytes) || osmos_fail(err, "GPU memory refused (the read's buffers)");
+  ok = ok && (f->ovf = (OverflowFlag){f->overflow, 8, false}, overflow_reset(&f->ovf, err)) && (f->fault = f->overflow + 1) &&
+       hy4_pinned(&f->bufs, &f->pin_flags, 8) && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
        (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
@@ -423,28 +182,29 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_estart = malloc(((size_t)g->n_experts + 1) * 4)) && (f->h_run = malloc((size_t)g->n_experts * 16)) &&
        (f->h_ent = malloc(ecap * sizeof *f->h_ent));
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = (as_f32(f, w->layer[l].hc_attn_fn, &f->fn_attn[l]) && as_f32(f, w->layer[l].hc_ffn_fn, &f->fn_ffn[l])) ||
-         hy4_fail(err, "iHC's mixes not made F32");
-  ok = ok && (as_f32(f, w->out_hc_fn, &f->fn_out) || hy4_fail(err, "the head's iHC not made F32")) &&
-       ((freqs(g->rope_base_swa, (uint32_t)g->rope_dim, &f->freqs_swa) &&
-         freqs(g->rope_base, (uint32_t)g->rope_dim, &f->freqs_sparse)) ||
-        hy4_fail(err, "the ropes' tables not made")) &&
-       engram_reader(f, fds, err);
-  ok = ok && (gpu_bufs_alloc(&f->bufs, want, sizeof want / sizeof *want) ||
-              hy4_fail(err, "GPU memory refused (a step's buffers)"));
-  ok = ok && hipHostMalloc((void **)&f->pin_tok, n * 4, 0) == hipSuccess &&
-       hipHostMalloc((void **)&f->pin_pos, n * 4, 0) == hipSuccess &&
-       hipHostMalloc((void **)&f->pin_logits, lr * g->n_vocab * F, 0) == hipSuccess && (f->slot = malloc(n * 4)) &&
+    ok = (hy4_as_f32(f, w->layer[l].hc_attn_fn, &f->fn_attn[l]) && hy4_as_f32(f, w->layer[l].hc_ffn_fn, &f->fn_ffn[l])) ||
+         osmos_fail(err, "iHC's mixes not made F32");
+  ok = ok && (hy4_as_f32(f, w->out_hc_fn, &f->fn_out) || osmos_fail(err, "the head's iHC not made F32")) &&
+       ((hy4_freqs(f, g->rope_base_swa, (uint32_t)g->rope_dim, &f->freqs_swa) &&
+         hy4_freqs(f, g->rope_base, (uint32_t)g->rope_dim, &f->freqs_sparse)) ||
+        osmos_fail(err, "the ropes' tables not made")) &&
+       hy4_engram_reader(f, fds, err);
+  ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||
+              osmos_fail(err, "GPU memory refused (a step's buffers)"));
+  ok = ok && hy4_pinned(&f->bufs, &f->pin_tok, n * 4) && hy4_pinned(&f->bufs, &f->pin_pos, n * 4) &&
+       hy4_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && (f->slot = malloc(n * 4)) &&
        (f->h_idx = malloc(n * K * 4)) && (f->h_gidx = malloc(n * K * 4)) && (f->h_sidx = malloc(n * K * 4)) &&
        (f->h_by = malloc(n * K * 4)) &&
        (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
-  size_t free1 = 0, total1 = 0;
-  if (ok && hipMemGetInfo(&free1, &total1) == hipSuccess) /* the fixed part: what the build took before its experts */
-    f->fixed_bytes = free0 > free1 ? (uint64_t)(free0 - free1) : 0;
-  ok = ok && experts(f, o->budget ? o->budget : experts_fit_now(f->fixed_bytes), err); /* (0: this machine's room) */
+  ok = ok && (!o->dfly || hy4_dfly_load(f, o->dfly, o->dfly_q8, err)); /* (whole: its drafter part of the build) */
+  /* the fixed part, counted (experts_plan's): the table read, the records' buffers, DFly2's - not the GPU's free
+     memory before and after, which anything else moves (DFly2 loaded after the experts: outside the budget) */
+  if (ok)
+    f->fixed_bytes = gpu_table_bytes(w->model, f->dev, f->in_joint) + f->bufs.bytes + hy4_dfly_bytes(f);
+  ok = ok && hy4_experts(f, o->budget == FIT_BUDGET_NOW ? experts_fit_now(f->ledger, f->fixed_bytes) : o->budget, err);
   if (!ok)
-    return hy4_forward_destroy(f), (err && !*err ? hy4_fail(err, "the forward not made") : false), NULL;
+    return hy4_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;
 }
 

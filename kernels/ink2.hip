@@ -362,10 +362,9 @@ constexpr int kFaRow = kFaHead + 8;  // f16s a row in LDS, then a pad
 constexpr int kFaKey = kFaTile + 8;
 constexpr int kFaRowTiles = 4;
 // a split decode's waves past which a call's blocks keep one wave (more waves then slower: the GPU full, and only a
-// one-wave block reads Q8 keys straight into registers): measured on gfx1151 at Mini's shape (ink2_fabench DECODE=1,
-// HEADS=24, W 1 / 2 / 4 / 8 over 512 .. 131,072 keys, low-power, 2026-11-22) - each length's fastest W within 7%
+// one-wave block reads Q8 keys straight into registers), tuned on gfx1151 at Mini's shape
 constexpr uint32_t kFaDecodeWaves = 256;
-constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a block's row tiles (INK2_FA_RT 1 / 2 / 4 for a sweep; 16K full: 756 / 716 / 638 ms)
+constexpr uint32_t kFaUnit = INK2_FA_UNIT;  // a unit's keys (absolute positions): each its own softmax, folded in order
 typedef _Float16 fa_h16 __attribute__((ext_vector_type(16)));
 typedef float fa_f8 __attribute__((ext_vector_type(8)));
 
@@ -582,7 +581,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(Ink2Attn a, const float* q, 
       for (int it = 0; it < kVItems; it++) {
         const uint32_t i = threadIdx.x + it * kNth, r = i % kFaTile, d = i / kFaTile * kVec;  // (a wave's threads its keys: V^T's stores apart)
         if (i >= (uint32_t) kVecs) continue;
-        fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0 as before)
+        fa_h8 kv, vv;  // a Q8 / Q5 tile's values now (a missing key's raw zeros: 0 x 0, f16's +0)
         if constexpr (kQ8) {
           if constexpr (!kKD) kv = kv8_vals(k8[it]);
           if constexpr (kV5)
@@ -733,7 +732,7 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
     const dim3 grid(1, a->kv_heads, units);
     const uint32_t rows = a->x16 ? (n_tok + mm::kTile - 1) / mm::kTile * mm::kTile : n_tok;  // x16's: a whole tile
     // the waves the (token, head) rows fill (n_tok G of them, 16 a wave), then more while the call's blocks leave
-    // the GPU idle: a decode's blocks are latency-bound (80-89% of their cycles waiting on memory at one wave), and a
+    // the GPU idle: a decode's blocks are latency-bound (waiting on memory at one wave), and a
     // block's waves past its rows only load its tiles - each row's sums its own, so the same bits at any W
     const uint32_t need = (n_tok * G + kFaTile - 1) / kFaTile, blocks = a->kv_heads * units;
     uint32_t W = need <= 1 ? 1 : need <= 2 ? 2 : need <= 4 ? 4 : 8;
@@ -752,11 +751,9 @@ static bool fa_launch(const Ink2Attn* a, const float* q, const float* rel, const
 #undef FSW
     return false;
   }
-  static const int rt = std::getenv("INK2_FA_RT") ? std::atoi(std::getenv("INK2_FA_RT")) : 0;  // (0: the group's)
   // a block's waves G R: Mini's 3 heads a KV head 8 row tiles (24 waves, Small's 6 x 4) - every key tile decoded once
-  // for twice the rows (HEADS=24 PREFILL=1 ink2_fabench, low-power, 2026-11-20: 512K keys 920 -> 684 us a token, 128K
-  // 221 -> 166); the tiles a query's keys are cut into are the same in any block, so R changes no bit (DUMP: 1, 2, 4, 8)
-  const uint32_t R = rt == 1 || rt == 2 || rt == 4 || rt == 8 ? (uint32_t) rt : G == 3 ? 8u : kFaRowTiles;
+  // for twice the rows; the tiles a query's keys are cut into are the same in any block, so R changes no bit
+  const uint32_t R = G == 3 ? 8u : kFaRowTiles;
   const dim3 grid_fa((n_tok + kFaTile * R - 1) / (kFaTile * R), a->kv_heads);
 #define FA(g, r)                                                                                                    \
   if (G == g && R == r) {                                                                                           \

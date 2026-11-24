@@ -13,9 +13,10 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 
@@ -45,9 +46,12 @@ static uint64_t storage_read() {
 
 static Forward* create(Weights* w, char* err) {
   ForwardOptions o = {(int) w->geo.n_layers, kMaxCtx, kBudget, nullptr, kMaxTokens};
+  o.lane = true;
+  osmos_clear(err);
   Forward* f = forward_create_with(w, &o, err);
   if (!f) std::fprintf(stderr, "  forward_create_with: %s\n", err);
-  CHECK(f && forward_lane(f, 0, NULL, err));
+  osmos_clear(err);
+  CHECK(f);
   return f;
 }
 
@@ -64,10 +68,11 @@ int main() {
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
   const double GB = 1e9;
 
   uint64_t at = storage_read();
+  osmos_clear(err);
   forward_destroy(create(w, err)); /* a sizing's build, let go */
   const uint64_t sizing = storage_read() - at;
   at = storage_read();
@@ -76,14 +81,18 @@ int main() {
   std::printf("  creates read %.1f and %.1f GB (the budget %.1f)\n", sizing / GB, kept / GB, kBudget / GB);
   CHECK(sizing < kBudget / 4 && kept < kBudget / 4);
 
+  osmos_clear(err);
   Seq* s = seq_create(f, err);
   CHECK(s && seq_prompt(s, 1));
   int32_t t = 1017;
   at = storage_read();
+  osmos_clear(err);
   CHECK(forward_step(f, s, t, err));
+  osmos_clear(err);
   CHECK(forward_greedy(f, 0, 1, &t, err) && hipDeviceSynchronize() == hipSuccess);
   const uint64_t first = storage_read() - at;
   at = storage_read();
+  osmos_clear(err);
   CHECK(forward_step(f, s, t, err) && hipDeviceSynchronize() == hipSuccess);
   const uint64_t second = storage_read() - at;
   std::printf("  the first step read %.1f GB, the second %.1f\n", first / GB, second / GB);

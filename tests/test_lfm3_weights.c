@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/err.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/gguf.h"
 
@@ -38,7 +39,8 @@ static GgufKv *kv(const char *key)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[LFM3_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Lfm3Weights *w = lfm3_weights_create(model, err);
   if (w || !strstr(err, needle))
   {
@@ -53,7 +55,7 @@ static Gguf *open_file(const char *env, const char *fallback)
   char home[512];
   snprintf(home, sizeof home, "%s/%s", getenv("HOME") ? getenv("HOME") : "", fallback);
   const char *path = getenv(env) ? getenv(env) : home;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf *g = gguf_create(path, err);
   if (!g)
     printf("  %s: not on this machine, skipped (%s)\n", path, err);
@@ -148,7 +150,8 @@ static void test_refusals(void)
     items[2] = old;
   }
 
-  char err[LFM3_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Lfm3Weights *w = lfm3_weights_create(model, err);
   if (!w)
   {
@@ -164,7 +167,8 @@ int main(void)
   model = open_file("OSMOS_TEST_LFM3", Q4_0_FILE);
   if (!model)
     return printf("[test_lfm3_weights] ok\n"), 0; /* a host test's skip: its runner takes 0 alone (test_ink2_weights') */
-  char err[LFM3_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Lfm3Weights *w = lfm3_weights_create(model, err);
   if (!w)
   {
@@ -180,6 +184,7 @@ int main(void)
   model = open_file("OSMOS_TEST_LFM3_BF16", BF16_FILE);
   if (model)
   {
+    osmos_clear(err);
     w = lfm3_weights_create(model, err);
     if (!w)
     {

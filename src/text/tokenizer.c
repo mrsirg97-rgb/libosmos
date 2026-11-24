@@ -6,6 +6,7 @@
 #include "bpe.h"
 #include "osmos/text/tokenizer.h"
 #include "pretok.h"
+#include "osmos/err.h"
 
 /* llama.cpp's token types (tokenizer.ggml.token_type) */
 enum { TYPE_NORMAL = 1, TYPE_UNKNOWN = 2, TYPE_CONTROL = 3, TYPE_USER = 4 };
@@ -32,7 +33,7 @@ static int longest_first(const void *a, const void *b, void *arg)
 
 static bool fail(char *err, const char *why)
 {
-  snprintf(err, TOKENIZER_ERR, "tokenizer: %s", why);
+  osmos_fail(err, "tokenizer: %s", why);
   return false;
 }
 
@@ -42,7 +43,7 @@ static const GgufKv *list(const Gguf *g, const char *key, GgufValueType item)
   return kv && kv->type == GGUF_ARRAY && kv->item == item && kv->n ? kv : NULL;
 }
 
-Tokenizer *tokenizer_create(const Gguf *g, char err[TOKENIZER_ERR])
+Tokenizer *tokenizer_create(const Gguf *g, char err[OSMOS_ERR])
 {
   const GgufKv *model = g ? gguf_kv(g, "tokenizer.ggml.model") : NULL;
   const GgufKv *pre = g ? gguf_kv(g, "tokenizer.ggml.pre") : NULL;

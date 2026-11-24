@@ -27,7 +27,7 @@ static std::vector<int32_t> dump_ids() {
 
 static int32_t prompt(Osmos* e, OsmosSeq* s, const std::vector<int32_t>& ids, bool seed, uint32_t from = 0,
                       uint32_t n = kPrompt) {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   std::vector<OsmosSeq*> ss(n, s);
   CHECK(osmos_batch(e, ss.data(), ids.data() + from, n, err));
   CHECK(!seed || oseq_seed(s, 0, (int32_t) n, err));
@@ -39,7 +39,7 @@ static int32_t prompt(Osmos* e, OsmosSeq* s, const std::vector<int32_t>& ids, bo
 // a sequence 3 positions short of the context (the dump's ids over and over, a step of kStep at a time, each seeded):
 // its drafts cut at the context's end while the others' go on
 static int32_t near_the_end(Osmos* e, OsmosSeq* s, const std::vector<int32_t>& ids) {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   std::vector<int32_t> toks(kCtx - 3);
   for (size_t i = 0; i < toks.size(); i++) toks[i] = ids[i % kPrompt];
   int32_t y = -1;
@@ -55,7 +55,7 @@ static int32_t near_the_end(Osmos* e, OsmosSeq* s, const std::vector<int32_t>& i
 // three sequences drafting at once against each alone: the first 3 short of the context (or a prompt of 200), then
 // prompts of 150 and 120 from their own offsets
 static void drafted_together(Osmos* e, const std::vector<int32_t>& ids, float conf_min, float cum_min, bool end) {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   OsmosSeq* s[3];
   int32_t y[3];
   const uint32_t from[3] = {0, 30, 56}, len[3] = {200, 150, 120};
@@ -86,7 +86,7 @@ static void drafted_together(Osmos* e, const std::vector<int32_t>& ids, float co
 // load), and after a mark gone back to past later tokens - each the bits of the conversation never set aside (its
 // head's cache, indexer and pending h the state's: before, the head attended the other conversation's rows)
 static void restored(Osmos* e, const std::vector<int32_t>& ids) {
-  char err[OSMOS_ERR];
+  char err[OSMOS_ERR] = "";
   int32_t ref[OSMOS_MAX_BLOCK], got[OSMOS_MAX_BLOCK];
   float rc[OSMOS_MAX_BLOCK], gc[OSMOS_MAX_BLOCK];
   OsmosSeq* a = oseq_create(e, err);

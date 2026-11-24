@@ -19,7 +19,7 @@ static uint64_t draw(uint64_t m)
   return (g_rng >> 17) % m;
 }
 
-/* DeepSeek's stream_budget (run/hip_forward.c, 0.12.3), a warm flag a unit for its rix */
+/* DeepSeek's stream_budget (ds4/hip_ds4_make.c, 0.12.3), a warm flag a unit for its rix */
 static uint64_t ref_stream(const PoolUnit *u, uint32_t L, uint32_t E, const bool *warm)
 {
   uint64_t most = 0, whole = 0;
@@ -36,7 +36,7 @@ static uint64_t ref_stream(const PoolUnit *u, uint32_t L, uint32_t E, const bool
   return 2 * most > whole ? 2 * most : whole;
 }
 
-/* Inkling's experts() sizing (ink2/hip_forward.c, 0.12.3), with the plan's one change (every unit warm: 3 units) */
+/* Inkling's experts() sizing (ink2/hip_ink2_make.c, 0.12.3), with the plan's one change (every unit warm: 3 units) */
 static ExpertsPlan ref_plan(const PoolUnit *u, uint32_t L, uint32_t E, const uint32_t *warm, uint64_t room0,
                             uint64_t budget, uint64_t fixed)
 {
@@ -54,7 +54,7 @@ static ExpertsPlan ref_plan(const PoolUnit *u, uint32_t L, uint32_t E, const uin
     room = room0;
     if (budget)
     {
-      const uint64_t rest = fixed + stream_room + 4 * largest;
+      const uint64_t rest = fixed + stream_room + 4 * largest + 2 * GRAIN;
       room = budget > rest ? budget - rest : 0;
     }
     if (room > all)
@@ -134,8 +134,11 @@ int main(void)
         const ExpertsPlan want = ref_plan(u, L, E, order, rooms[r], budgets[b], fixed);
         assert(got.room == want.room && got.stream_room == want.stream_room && got.n_warm == want.n_warm &&
                got.largest == want.largest && got.all == want.all);
-        assert(!budgets[b] || budgets[b] < fixed + got.room || got.room + got.stream_room + fixed <= budgets[b] ||
-               got.room == (uint64_t)E * got.largest);  /* in the budget, or at the floor */
+        /* the budget a ceiling (0.16.0): the build as made - the fixed part, both slot sets with their 2 units' slack
+           and their round-up to a grain - within it, or at the floor */
+        assert(!budgets[b] || budgets[b] < fixed + got.room ||
+               fixed + got.room + got.stream_room + 4 * got.largest + 2 * GRAIN <= budgets[b] ||
+               got.room == (uint64_t)E * got.largest);
         memset(warm, 0, n);
         for (size_t i = 0; i < got.n_warm; i++)
           warm[order[i]] = true;

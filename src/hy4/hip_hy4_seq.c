@@ -9,28 +9,29 @@
 #include "osmos/gpu/state_parts.h"
 #include "osmos/gpu/hy4_ops.h"
 #include "hy4_impl.h"
+#include "osmos/err.h"
 
-Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[HY4_ERR])
+Hy4Seq *hy4_seq_create(Hy4Forward *f, char err[OSMOS_ERR])
 {
   if (!f)
-    return hy4_fail(err, "no forward"), NULL;
+    return osmos_fail(err, "no forward"), NULL;
   Hy4Seq *s = calloc(1, sizeof *s);
   if (!s)
-    return hy4_fail(err, "out of memory"), NULL;
-  s->f = f;
+    return osmos_fail(err, "out of memory"), NULL;
+  s->f = f, s->bufs.ledger = f->ledger;
   const Hy4Geometry *g = &f->w->geo;
   const uint64_t row = hy4_mla_row_bytes((uint32_t)g->kv_lora, (uint32_t)g->rope_dim, f->kv8), ctx = f->max_ctx;
   bool ok = (s->tokens = malloc(ctx * 4)) != NULL;
   for (int l = 0; ok && l < g->n_layers; l++)
-    ok = g->sliding[l] ? hy4_alloc(&s->cache[l], f->ring * row)
-                       : hy4_alloc(&s->cache[l], ctx * row) && hy4_alloc(&s->keys[l], (uint64_t)f->kring * g->ix_dim * F) &&
-                             hy4_alloc(&s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
+    ok = g->sliding[l] ? hy4_alloc(&s->bufs, &s->cache[l], f->ring * row)
+                       : hy4_alloc(&s->bufs, &s->cache[l], ctx * row) && hy4_alloc(&s->bufs, &s->keys[l], (uint64_t)f->kring * g->ix_dim * F) &&
+                             hy4_alloc(&s->bufs, &s->groups[l], (ctx / g->ix_pool + 1) * g->ix_dim * F);
   const uint64_t top = (uint64_t)(g->ix_topk / g->ix_pool); /* DFly2's snapshot (small: always made) */
-  ok = ok && hy4_alloc(&s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
-       hy4_alloc(&s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
-       hy4_alloc(&s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
+  ok = ok && hy4_alloc(&s->bufs, &s->dsel, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * top * 4) &&
+       hy4_alloc(&s->bufs, &s->dn, (uint64_t)HY4_DFLY_LAYERS * HY4_DFLY_KEEP * 4) &&
+       hy4_alloc(&s->bufs, &s->dhid, (uint64_t)HY4_DFLY_KEEP * g->n_embd * F);
   if (!ok)
-    return hy4_seq_destroy(s), hy4_fail(err, "GPU memory refused (a sequence's state)"), NULL;
+    return hy4_seq_destroy(s), osmos_fail(err, "GPU memory refused (a sequence's state)"), NULL;
   return s;
 }
 
@@ -38,9 +39,7 @@ void hy4_seq_destroy(Hy4Seq *s)
 {
   if (!s)
     return;
-  for (int l = 0; l < HY4_MAX_LAYERS; l++)
-    hipFree(s->cache[l]), hipFree(s->keys[l]), hipFree(s->groups[l]);
-  hipFree(s->dsel), hipFree(s->dn), hipFree(s->dhid);
+  gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s->tokens);
   free(s);
 }
@@ -49,7 +48,7 @@ int32_t hy4_seq_position(const Hy4Seq *s) { return s ? s->pos : -1; }
 
 bool hy4_seq_prompt(Hy4Seq *s, uint32_t end)
 {
-  if (!s || s->broken || end > s->f->max_ctx) /* (0.11.2: an end past the context taken - the other families' refused) */
+  if (!s || s->broken || end > s->f->max_ctx) /* (an end past the context refused, as the other families') */
     return false;
   s->prompt_end = end;
   return true;
@@ -76,7 +75,7 @@ void hy4_seq_fail(Hy4Seq *s)
 /* a saved state: the header (its position and the two tokens before it - the next step's n-grams' history; the
    rest of it never read after a load, whose reach is 0), then the parts, then the sum (state_parts.h) */
 #define STATE_MAGIC 0x53345948u /* "HY4S" */
-#define STATE_VERSION 2u /* (2: 0.11.0's cache rows, hy4_mla_row_bytes - Q8_0 latents by default) */
+#define STATE_VERSION 2u /* (2: the cache rows hy4_mla_row_bytes' - Q8_0 latents by default) */
 #define HISTORY HY4_STATE_HISTORY
 
 typedef struct Header
@@ -115,12 +114,12 @@ uint64_t hy4_seq_state_bytes(const Hy4Seq *s)
   return state_parts_bytes(sizeof(Header), p, parts(s, s->pos, p));
 }
 
-bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ERR])
+bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !sink)
-    return hy4_fail(err, "no sequence or sink");
+    return osmos_fail(err, "no sequence or sink");
   if (s->broken)
-    return hy4_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
+    return osmos_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
   Header h;
   memset(&h, 0, sizeof h);
   h.magic = STATE_MAGIC, h.version = STATE_VERSION, h.identity = hy4_identity(s->f), h.pos = s->pos;
@@ -128,30 +127,37 @@ bool hy4_seq_save_to(const Hy4Seq *s, StateSink sink, void *ctx, char err[HY4_ER
     h.last[j] = s->pos > j ? s->tokens[s->pos - 1 - j] : -1;
   StatePart p[MAX_PARTS];
   const char *why = state_parts_save(&h, sizeof h, p, parts(s, s->pos, p), sink, ctx);
-  return !why || hy4_fail(err, why);
+  return !why || osmos_fail(err, "%s", why);
+}
+
+bool hy4_seq_reset(Hy4Seq *s, char err[OSMOS_ERR])
+{
+  if (!s)
+    return osmos_fail(err, "no sequence");
+  s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
+  s->dkeep = 0;                                                   /* (DFly2's snapshot: none until a step runs) */
+  return true;
 }
 
 static bool refuse(Hy4Seq *s, char *err, const char *why)
 {
-  s->pos = 0, s->back = 0, s->prompt_end = 0, s->broken = false; /* empty: its rows never read again */
-  return hy4_fail(err, why);
+  hy4_seq_reset(s, NULL);
+  return osmos_fail(err, "%s", why);
 }
 
-bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[HY4_ERR])
+bool hy4_seq_load_from(Hy4Seq *s, uint64_t bytes, StateSource src, void *ctx, char err[OSMOS_ERR])
 {
   if (!s || !src)
-    return hy4_fail(err, "no sequence or source");
+    return osmos_fail(err, "no sequence or source");
   s->dkeep = 0; /* (DFly2's snapshot: none until a step runs) */
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
-  if (h.magic != STATE_MAGIC || h.version != STATE_VERSION || h.identity != hy4_identity(s->f))
-    return refuse(s, err, "a state of another format or model (its identity)");
-  if (h.pos < 0 || (uint32_t)h.pos > s->f->max_ctx)
-    return refuse(s, err, "a state past this context");
-  for (int j = 0; j < HISTORY; j++)
-    if (h.pos > j && (h.last[j] < 0 || h.last[j] >= s->f->w->geo.n_vocab))
-      return refuse(s, err, "a state whose last tokens are outside the vocabulary");
+  const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, hy4_identity(s->f));
+  bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx);
+  bad = bad ? bad : state_tokens_check(h.last, h.pos < HISTORY ? h.pos : HISTORY, (uint32_t)s->f->w->geo.n_vocab);
+  if (bad)
+    return refuse(s, err, bad);
   StatePart p[MAX_PARTS];
   const int n = parts(s, h.pos, p);
   if (bytes != state_parts_bytes(sizeof h, p, n))

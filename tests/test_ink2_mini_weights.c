@@ -38,7 +38,7 @@ static GgufKv *kv(const char *key)
 
 static bool accepted(void)
 {
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Weights *w = ink2_weights_create(model, err);
   if (!w)
     printf("    refused: %s\n", err);
@@ -48,7 +48,7 @@ static bool accepted(void)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Weights *w = ink2_weights_create(model, err);
   if (w || !strstr(err, needle))
   {
@@ -60,7 +60,7 @@ static void refused(const char *what, const char *needle)
 
 static Gguf *open_model(const char *env, const char *fallback)
 {
-  char path[512], gerr[GGUF_ERR] = "";
+  char path[512], gerr[OSMOS_ERR] = "";
   if (getenv(env))
     snprintf(path, sizeof path, "%s", getenv(env));
   else
@@ -187,7 +187,7 @@ static void test_tensors_refused(void)
 /* unsloth's: a value a slot, each slot's its layer's */
 static void test_unsloth(void)
 {
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Ink2Geometry g;
   assert(ink2_geometry(model, &g, err) && g.keys == INK2_KEYS_UPSTREAM);
   test_geometry(&g);
@@ -249,7 +249,7 @@ static void test_fused_units(void)
 int main(void)
 {
   printf("[test_ink2_mini_weights] start\n");
-  char err[INK2_ERR] = "";
+  char err[OSMOS_ERR] = "";
   test_fused_units();
   if ((model = open_model("OSMOS_TEST_INK2_MINI", REF)))
   {

@@ -4,8 +4,8 @@
 
   --fill 4     ready; its sizing NOTE and its slots NOTE each keep 4.00 GiB free, and the budget 3 GiB or more past
                the default's (8 GiB kept free: one more start, the default's NOTE 8.00)
-  --fill 1000  more than any machine can keep free: still ready - the smallest build (the dense weights, every expert
-               streamed), its NOTE saying so
+  --fill 1000  more than any machine can keep free: refused, loud - not started, why and the levers said (0.16.0:
+               the ledger never takes the RAM --fill keeps; before, it started on the smallest build anyway)
 
     python tools/serve/fill_test.py --model <first shard> [--picks <file>] [--exe bin/osmos-serve]
 
@@ -14,6 +14,7 @@ exit 0: every check passed; 1: a check failed; 2: the engine did not start.
 import argparse
 import os
 import re
+import subprocess
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -60,12 +61,14 @@ def main():
     # 4 GiB more room: the budget up by it, but for the sizing's steps (~0.93 GiB on this box: fit.h)
     check("--fill 4's budget 3 GiB or more past the default's", b4 is not None and b8 is not None and b4 >= b8 + 3)
 
-    b1k, n1k = start(a, 1000)
-    print(f"  --fill 1000: budget {b1k} GiB", flush=True)
-    check("--fill 1000: ready, the smallest build said so",
-          any("more RAM than can be kept free" in n for n in n1k))
-    check("--fill 1000's budget the floor's (the dense weights: under half the default's)",
-          b1k is not None and b8 is not None and b1k < b8 / 2)
+    args = ["--model", a.model, "--max-context", "65536", "--no-guess", "--fill", "1000", "--serve"] + \
+        (["--picks", a.picks] if a.picks else [])
+    r = subprocess.run([a.exe, *args], input="QUIT\n", capture_output=True, text=True, timeout=1800)
+    said = r.stdout + r.stderr
+    print(f"  --fill 1000: exit {r.returncode}", flush=True)
+    check("--fill 1000: not started", r.returncode != 0 and "READY" not in r.stdout)
+    check("--fill 1000: the build ledger's refusal, the RAM kept named", "refused by the ledger" in said and "1000.0 GiB kept" in said)
+    check("--fill 1000: the levers said", "a smaller --fill" in said and "--max-context)" in said)
 
     print(f"[fill_test] {'ok' if not failed else 'FAILED: ' + '; '.join(failed)}", flush=True)
     return 1 if failed else 0

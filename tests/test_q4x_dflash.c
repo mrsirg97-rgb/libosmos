@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/weights.h"
@@ -35,7 +36,8 @@ static GgufTensor *tensor(const char *name)
 
 static void refused(const char *what, const char *needle)
 {
-  char err[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xDflash *d = q4x_dflash_create(draft, target, err);
   if (d || !strstr(err, needle))
   {
@@ -47,7 +49,8 @@ static void refused(const char *what, const char *needle)
 
 static void accepted(void)
 {
-  char err[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Q4xDflash *d = q4x_dflash_create(draft, target, err);
   if (!d)
     printf("  refused: %s\n", err), exit(1);
@@ -68,8 +71,9 @@ static void key(const char *name, uint64_t v, const char *needle)
 int main(void)
 {
   printf("[test_q4x_dflash] start\n");
-  char err[Q4X_ERR] = "", path[512], gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", path[512], gerr[OSMOS_ERR] = "";
   const char *home = getenv("HOME") ? getenv("HOME") : "";
+  osmos_clear(err);
   assert(!q4x_dflash_create(NULL, NULL, err) && err[0]);
   q4x_dflash_destroy(NULL);
   snprintf(path, sizeof path, QWEN, home);
@@ -83,9 +87,11 @@ int main(void)
     printf("[test_q4x_dflash] ok\n");
     return 0;
   }
+  osmos_clear(err);
   target = q4x_weights_create(model, NULL, err);
   assert(target);
 
+  osmos_clear(err);
   Q4xDflash *d = q4x_dflash_create(draft, target, err);
   if (!d)
     printf("  refused: %s\n", err), exit(1);

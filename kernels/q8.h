@@ -16,9 +16,8 @@ template <quant::Type T> constexpr int kBlocksPer = quant::Block<T>::values / LA
 template <quant::Type T> constexpr uint64_t row_bytes(uint32_t cols) {
   return (uint64_t) (cols / quant::Block<T>::values) * quant::Block<T>::bytes;
 }
-// a SIMD's waves the kernels ask for: 16 (gfx1151's 1536 VGPRs a SIMD at <= 96 a lane). 5 tokens and up took 98-107
-// registers and ran at 12 - their memory's latency less hidden: gate+up 19 experts at 5 tokens 1,143 us against 704 at
-// 4 (q8bench, low-power; DESIGN.md "0.3.2"). the arithmetic and its order are the source's: no bit moves
+// a SIMD's waves the kernels ask for: 16 (gfx1151's 1536 VGPRs a SIMD at <= 96 a lane): past 96 registers fewer
+// waves, the memory's latency less hidden. the arithmetic and its order are the source's: no bit moves
 constexpr int kFullWaves = 16;
 
 __device__ inline int dot4(int a, int b, int c) { return osmos_sudot4(a, b, c); }

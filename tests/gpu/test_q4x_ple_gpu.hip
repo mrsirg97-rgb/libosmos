@@ -28,7 +28,7 @@ int main() {
   std::printf("[test_q4x_ple_gpu] start\n");
   int ndev = 0;
   Ref probe;
-  char err[GGUF_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(home_path(kQwenFirst).c_str(), err);
   const std::vector<int32_t> ids = dump_ids();
   if (!g || !ref_read("ple_embd", &probe) || ids.size() != kTok || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {

@@ -47,7 +47,7 @@ static double compare(const std::vector<float>& cent, const std::vector<int32_t>
         hipMalloc((void**) &d.n, 4) == hipSuccess);
   CHECK(hipMemcpy(d.cent, cent.data(), cent.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
   CHECK(hipMemcpy(d.mem, mem.data(), mem.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
-  LsaScratch* s = lsa_scratch_create(blocks * LSA_BUCKETS);
+  LsaScratch* s = lsa_scratch_create(nullptr, blocks * LSA_BUCKETS);
   CHECK(s);
   std::vector<uint32_t> host(LSA_READ_MAX), gpu(LSA_READ_MAX);
   double ms = 0;

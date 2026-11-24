@@ -27,7 +27,7 @@ extern "C" {
   } while (0)
 
 int main(int argc, char** argv) {
-  char err[LFM3_ERR] = "", gerr[GGUF_ERR] = "", terr[TOKENIZER_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "", terr[OSMOS_ERR] = "";
   if (argc < 4) return std::fprintf(stderr, "usage: lfm3_rope_nll <GGUF> <text> P...\n"), 2;
   Gguf* g = gguf_create(argv[1], gerr);
   if (!g) return std::fprintf(stderr, "%s\n", gerr), 1;

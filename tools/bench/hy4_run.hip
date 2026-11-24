@@ -8,7 +8,8 @@
 //   DFLY=path  DFly2 (the release's model-00148-of-00148.safetensors): the decode in drafted rounds - the drafts and
 //              the sampled token one decode step, the target's greedy picks keeping the leading drafts - its rate,
 //              its drafts accepted a round; the tokens the plain decode's (the same hash). CUM=x: a round's drafts
-//              kept while their probabilities' product is at least x (the engine's cum_min)
+//              kept while their probabilities' product is at least x (the engine's cum_min); DFLY_BF16=1: its
+//              matrices read BF16, not Q8_0 (Hy4Options' dfly_q8 off)
 //   HEAD_Q8=1  the head read as its Q8_0 copy (Hy4Options' head_q8)
 //   BUDGET=GiB the build's budget (Hy4Options' budget: the routed experts streamed past it); else every one resident
 //   STATS=1    with DFLY: each draft reached (all before it accepted) - its acceptance by place and by probability
@@ -45,7 +46,7 @@ int main(int argc, char** argv) {
   if (argc < 2) return std::fprintf(stderr, "usage: hy4_run <GGUF> [prompt=2048] [step=2048] [decode=32]\n"), 2;
   const uint32_t P = argc > 2 ? (uint32_t) atoi(argv[2]) : 2048, S = argc > 3 ? (uint32_t) atoi(argv[3]) : 2048;
   const uint32_t D = argc > 4 ? (uint32_t) atoi(argv[4]) : 32;
-  char err[HY4_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(argv[1], gerr);
   CHECK(g);
   Hy4Weights* w = hy4_weights_create(g, err);
@@ -65,14 +66,14 @@ int main(int argc, char** argv) {
   const bool nll_mode = getenv("NLL") != nullptr;
   const Hy4Options o = {S, P + D + 2 * HY4_DFLY_DRAFTS + HY4_MAX_BACK,
                         nll_mode ? S : dfly ? (uint32_t) HY4_DFLY_DRAFTS + 1 : 1u,
-                       getenv("KV_F32") != nullptr, getenv("HEAD_Q8") != nullptr,
-                       getenv("BUDGET") ? (uint64_t) (atof(getenv("BUDGET")) * (1ull << 30)) : 0};  // (KV_F32: the reference's F32 cache; else the engine's Q8_0)
+                       getenv("KV_F32") != nullptr, getenv("HEAD_Q8") != nullptr,  // (KV_F32: F32 cache; else Q8_0)
+                       getenv("BUDGET") ? (uint64_t) (atof(getenv("BUDGET")) * (1ull << 30)) : FIT_BUDGET_NOW,
+                       nullptr, dfly, !getenv("DFLY_BF16")};  // (DFly2 made with the forward)
   Hy4Forward* f = hy4_forward_create(w, fds.data(), &o, err);
   if (!f) std::fprintf(stderr, "%s\n", err);
   CHECK(f);
   Hy4Seq* s = hy4_seq_create(f, err);
   CHECK(s);
-  if (dfly && !hy4_dfly_load(f, dfly, !getenv("DFLY_BF16"), err)) std::fprintf(stderr, "%s\n", err), std::exit(1);
   std::printf("hy4_run: loaded in %.1f s; prompt %u in steps of %u, decode %u\n", now() - t0, P, S, D);
   const double t1 = now();
   uint32_t n = 0;

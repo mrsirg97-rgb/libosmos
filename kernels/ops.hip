@@ -28,7 +28,7 @@ constexpr float kEngramDotFloor = 1e-6f; // the gate's |dot| floor before the sq
 
 constexpr int kWide = 1024;  // the hc pre-norm's block: a token's whole stream (4 x 5,120) in one block's reach
 constexpr int kHcParts = OPS_HC_PARTS;  // the hc mixes' dots, each split in OPS_HC_PARTS fixed parts
-constexpr int kHcAhead = 16;            // hc_dot_few's loads in flight a thread (DESIGN.md: 24 -> 10.5 us)
+constexpr int kHcAhead = 16;            // hc_dot_few's loads in flight a thread
 
 
 template <quant::Type T>
@@ -51,7 +51,7 @@ constexpr uint32_t kRmsRun = 8;  // a 6144-wide row's 24 values a thread in 3 ru
 // x16 (with it): row t's values at columns c0 .. c0 + n of an xts-wide tile (ops_rms_x16's: c0 0, xts n)
 // row `row` of a norm (rms_kernel's block, rms_many_kernel's): its sums and each value's ops in one order
 // ctl (when not NULL, x its out, xs n): row's values first the loop control's (ops_rms_x16_ctrl), each written to out
-// by the thread that sums it and reads it back - the norm's sums and ops on the values as ever
+// by the thread that sums it and reads it back - the norm's sums and ops on the values unchanged
 __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, float* y, uint32_t ys,
                                uint32_t rows, _Float16* x16, int32_t* overflow, uint32_t xts, uint32_t c0,
                                uint32_t row, float* lds, const OpsCtrl* ctl = nullptr) {
@@ -62,7 +62,7 @@ __device__ inline void rms_row(const float* x, uint32_t n, uint32_t xs, const fl
   const float* xr = x + (uint64_t) row * xs;
   float* yr = y + (uint64_t) row * ys;
   // a thread's values kRmsRun at a time, their loads in flight together (a block a row: its latency), each sum's
-  // adds and each value's ops in rms_kernel's order as ever - y may be x, so a run's loads before its stores
+  // adds and each value's ops in rms_kernel's order - y may be x, so a run's loads before its stores
   float ss = 0;
   if (ctl) {
     const uint64_t o = (uint64_t) row * n;
@@ -484,8 +484,7 @@ __global__ void engram_gate_kernel(float* h, const float* kv, const float* gw, u
 }
 
 // a block a token: its scores (sqrt(softplus)), the block's threads; then the k greatest of score + bias by its first
-// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks, which a block-wide
-// argmax a pick, 8 barriers each, gave before: test_router_gpu holds this to that kernel's bits), their weights
+// wave alone (block.h's wave_pick: the larger, ties to the lower expert - the serial scan's picks), their weights
 constexpr uint32_t kRouterLane = OPS_MAX_EXPERTS / 32;  // a lane's experts at most
 template <int Score>
 __global__ void router_kernel(const float* logits, const float* bias, uint32_t n_exp, uint32_t k, float scale,
@@ -594,8 +593,8 @@ __global__ void copy_rows_kernel(float* dst, const float* src, const int32_t* id
 }
 
 // a row's greatest value's index, the lowest among equals (an order-free choice: any reduction the same), -1 for a
-// row with a NaN - the row split in kArgSplit slices, a block each (a vocabulary in one block: ~160 us of one
-// block's loads; split, ~10): a thread's values strided, the first of its own kept among equals; a thread that met
+// row with a NaN - the row split in kArgSplit slices, a block each (a vocabulary in one block waits on one block's
+// loads): a thread's values strided, the first of its own kept among equals; a thread that met
 // a NaN offers (+inf, -1), which block_argmax's rule - the greater, the lower index among equals - carries to the top
 constexpr int kArgSplit = 64, kArgThreads = 256;
 constexpr int kArgNone = INT32_MAX;  // a thread, or a slice, with no value: after every index among equals
@@ -632,7 +631,7 @@ __global__ void add_kernel(float* y, const float* a, uint64_t n) {
   if (i < n) y[i] += a[i];
 }
 
-// a token drawn from one row (ops_sample, 0.14.0): one block, each thread a contiguous slice in id order, every sum
+// a token drawn from one row (ops_sample): one block, each thread a contiguous slice in id order, every sum
 // in one fixed order (a thread's slice in order, then a fixed tree, or the threads' sums in order for the draw's
 // prefix) - so a row's bits give one token at every launch. p_i = exp((x_i - max) / T); top-p's threshold tau the
 // greatest float whose kept mass (p_i >= tau) reaches top_p of the whole, by bisection over the floats' bits
@@ -678,7 +677,7 @@ __global__ __launch_bounds__(kSampThreads) void sample_kernel(const float* x, ui
     if (!t) *out = -1;
     return;
   }
-  // top-k first (0.15.2; Hugging Face's and vLLM's order: temperature, top-k, top-p): kb the k-th greatest p's bits -
+  // top-k first (Hugging Face's and vLLM's order: temperature, top-k, top-p): kb the k-th greatest p's bits -
   // the greatest tau with at least k tokens at or past it (its ties kept), by the same bisection over a float's bits
   uint32_t kb = 0;  // 0: every token (top_k 0, or k past the row)
   if (top_k && top_k < n) {
@@ -769,7 +768,7 @@ extern "C" bool ops_embed(uint32_t type, const void* table, uint32_t dim, const 
 
 // ops_rms_add_rms: a row a block - rms_kernel's sums on y, its normed value added to h as add_kernel adds it, then
 // rms_kernel's sums on the new h into xn. a thread's values (i = its index + kThreads j) held in registers between the
-// halves: each read once, each written once (13 us a 2,048-wide row with the halves' re-reads, low-power)
+// halves: each read once, each written once
 constexpr uint32_t kRmsAddRegs = 24;  // a row's values a thread at most: 6,144 wide
 __global__ void rms_add_rms_kernel(float* h, float* y, const float* w_post, const float* w_next, float eps, uint32_t n,
                                    float* xn) {

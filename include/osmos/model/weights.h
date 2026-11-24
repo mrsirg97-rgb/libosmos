@@ -1,6 +1,7 @@
 #ifndef WEIGHTS_H
 #define WEIGHTS_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -8,7 +9,6 @@
 #include "osmos/mem/pool.h"
 #include "osmos/model/gguf.h"
 
-#define WEIGHTS_ERR 256
 #define WEIGHTS_MAX_LAYERS 64
 #define WEIGHTS_SLICE_NAME 64
 #define WEIGHTS_MAX_FILES 16 /* the model's files and an overlay's together */
@@ -98,8 +98,8 @@ typedef struct Weights
   char eg_slice_name[WEIGHTS_MAX_LAYERS][WEIGHTS_SLICE_NAME];
 } Weights;
 
-Weights *weights_create(const Gguf *model, const Gguf *engram, char err[WEIGHTS_ERR]);
-Weights *weights_create_with(const WeightsOptions *o, char err[WEIGHTS_ERR]);
+Weights *weights_create(const Gguf *model, const Gguf *engram, char err[OSMOS_ERR]);
+Weights *weights_create_with(const WeightsOptions *o, char err[OSMOS_ERR]);
 void weights_destroy(Weights *w);
 
 size_t weights_experts(const Weights *w, const int *model_fds, PoolUnit *units, size_t cap);
@@ -112,12 +112,12 @@ size_t weights_tensor_index(const Weights *w, const GgufTensor *t);
 Weights
   DeepSeek-V4.1-Flash's tensors, by role, from its GGUF (`model`, the split model) and its Engram tables (`engram`, the
   model's `deepseek41.engram.file`): each a GgufTensor of theirs - borrowed, not owned; both Ggufs must outlive the
-  Weights (libtrdr's scope rule). `geo` is the model's metadata, read once and checked; `kv_from[l]` the KV source a
+  Weights. `geo` is the model's metadata, read once and checked; `kv_from[l]` the KV source a
   compressed layer reads (the last at or before it, of its ratio; -1 uncompressed), `engram_cols` the hash columns an
   Engram position reads ((max_ngram - 1) * heads), `engram_pad` the token a hash reads before a sequence's start and
-  `engram_vocab` the compressed tokens the hash's map gives (0 where the GGUF does not name it - ISTA's: the map's
-  greatest entry + 1, engram_create's). a field a layer does not have
-  is NULL (`comp_gate` off the ratio-2 sources, `ix_k` off the KV sources, `eg_*` off the Engram layers, ...).
+  `engram_vocab` the compressed tokens the hash's map gives (0 where the GGUF does not name it: then the map's
+  greatest entry + 1, engram_create's). a field a layer does not have is NULL (`comp_gate` off the ratio-2 sources,
+  `ix_k` off the KV sources, `eg_*` off the Engram layers, ...).
   the Engram in two forms (geo.engram_own): ds1017's, a second file - each layer's table its own tensor, the gate as
   q and k (BF16), the hash's tables tensors; llama.cpp's (unsloth's UD), the model's own - the layers' tables rows of
   one tensor (per_layer_token_embd; each layer's `eg_embd` a slice of it in `eg_slice`, owned by the Weights), the
@@ -130,9 +130,9 @@ weights_create
   router's bias for images, checked and never read) present or not; none it must not have; no tensor of a
   name it does not know; the geometry's metadata present and consistent (its layer lists within the layers, a KV source
   compressed, an index source among the KV sources or reading one). anything else refuses the whole model - NULL, the
-  tensor or key and why in `err`. DSpark's blocks are not in the GGUF (maya's dspark.bin) and not read here; its
-  target layers are read where the GGUF names them (llama.cpp's dspark.target_layers - not ISTA's files: then
-  none, and the drafter's dspark.json names them).
+  tensor or key and why in `err`. DSpark's blocks are not in the GGUF (dspark.bin) and not read here; its target
+  layers are read where the GGUF names them (llama.cpp's dspark.target_layers; else the drafter's dspark.json names
+  them).
 
 weights_create_with
   weights_create with an overlay: each of its tensors names one of the model's and stands in for it in every role -

@@ -76,7 +76,7 @@ struct Run {
 };
 
 static Run run(const Gguf* g, const Gguf* ov, uint32_t vocab) {
-  char err[Q4X_FWD_ERR] = "", werr[Q4X_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "";
   Q4xWeights* w = q4x_weights_create(g, ov, werr);
   if (!w) std::fprintf(stderr, "  weights: %s\n", werr);
   CHECK(w);
@@ -114,7 +114,7 @@ int main() {
   const std::string model = home + "/Models/qwen38/UD-IQ3_XXS/Qwen3.8-Flash-Next-UD-IQ3_XXS-00001-of-00004.gguf";
   const std::string abl = home + "/Models/qwen38/huihui-patch/qwen38-ud-iq3_xxs-abliterated-overlay.gguf";
   int ndev = 0;
-  char gerr[GGUF_ERR] = "";
+  char gerr[OSMOS_ERR] = "";
   Gguf* g = access(model.c_str(), R_OK) == 0 ? gguf_create(model.c_str(), gerr) : nullptr;
   if (!g || access(abl.c_str(), R_OK) != 0 || hipGetDeviceCount(&ndev) != hipSuccess || !ndev) {
     std::printf("[test_overlay_q4x_gpu] skipped: no model, overlay or GPU\n");

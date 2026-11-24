@@ -9,7 +9,8 @@
 //                  trace's assistant tokens alone; every row without it
 // prints the mean KL, its median and 99th percentile, the top-1 agreement and the perplexity over the scored rows;
 // the per-row dumps are tools/bench/kld_compare.py's (paired differences, splits by row).
-// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's).
+// environment: MODEL (a first shard), PICKS (forward_create_ranked's profile), OVERLAY (weights_create_with's); BIG,
+// FILL, NPU / NPU_SHARE where they are read.
 // build: hipcc -O2 -Iinclude --offload-arch=gfx1151 tools/bench/kld.hip -Llib -losmos_hip -losmos
 //        -lhsa-runtime64 -o bin/kld   (after `make lib/libosmos.a lib/libosmos_hip.a`)
 #include <hip/hip_runtime.h>
@@ -27,7 +28,7 @@
 extern "C" {
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 #include "osmos/run/fit.h"
 #include "osmos/run/engine.h"
 }
@@ -61,7 +62,7 @@ static std::vector<int32_t> read_list(const char* path) {
 
 int main(int argc, char** argv) {
   if (argc != 5) return std::fprintf(stderr, "usage: kld budget_gib step n ids.txt (MODEL, PICKS, OVERLAY, REF_OUT | REF, DUMP, MASK)\n"), 2;
-  // budget "auto" (0.7.3): sized as osmos-serve sizes it (fit_sized: the GPU's headroom and FIT_RAM_FREE kept)
+  // budget "auto": sized as osmos-serve sizes it (fit_sized: the GPU's headroom and FIT_RAM_FREE kept)
   const bool auto_budget = !std::strcmp(argv[1], "auto");
   const uint64_t budget = auto_budget ? 0 : (uint64_t) (std::atof(argv[1]) * (double) (1ull << 30));
   const uint32_t step = (uint32_t) std::atoi(argv[2]), n = (uint32_t) std::atoi(argv[3]);
@@ -77,7 +78,7 @@ int main(int argc, char** argv) {
 
   const char* mp = std::getenv("MODEL");
   CHECK(mp);
-  char err[GGUF_ERR] = "", werr[WEIGHTS_ERR] = "", ferr[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "", werr[OSMOS_ERR] = "", ferr[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   if (!g) std::fprintf(stderr, "gguf_create: %s\n", err), std::_Exit(1);
   const char* op = std::getenv("OVERLAY");
@@ -111,6 +112,10 @@ int main(int argc, char** argv) {
   const uint32_t big = std::getenv("BIG") ? (uint32_t) std::atoi(std::getenv("BIG")) : 0;
   CHECK(!big || (big >= step && big <= FORWARD_MAX_TOKENS));
   o.n_layers = (int) w->geo.n_layers, o.max_ctx = n, o.budget = budget, o.max_tokens = big ? big : step;
+  /* the forward whole: its lane (as the engine's and ppl.hip's: a step under n_experts / n_used rows the engine's),
+     the NPU beside the GPU (NPU=<its kernels' dir>, NPU_SHARE of a layer's pairs) */
+  o.lane = true, o.npu = std::getenv("NPU");
+  o.npu_share = std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS;
   if (const char* fl = std::getenv("FILL"))  // GiB of RAM a build keeps free (osmos-serve --fill): this tool's own
     o.fill_set = true, o.fill = (uint64_t) (std::atof(fl) * 1073741824.0);  // buffers beside it counted in
   std::vector<uint64_t> picks;
@@ -128,11 +133,11 @@ int main(int argc, char** argv) {
     const FitBuild build = [](void* c, uint64_t b, uint64_t* built, uint64_t* room, char* err) -> bool {
       Ctx* z = (Ctx*) c;
       z->o.budget = b;
-      char e[FORWARD_ERR] = "";
+      char e[OSMOS_ERR] = "";
       z->f = forward_create_with(z->w, &z->o, e);
-      if (!z->f || !forward_lane(z->f, 0, NULL, e) || !forward_room(z->f, room)) {
+      if (!z->f || !forward_room(z->f, room)) {
         if (z->f) forward_destroy(z->f), z->f = nullptr;
-        return std::snprintf(err, FIT_ERR, "%s", e[0] ? e : "the room could not be read"), false;
+        return std::snprintf(err, OSMOS_ERR, "%s", e[0] ? e : "the room could not be read"), false;
       }
       *built = forward_budget(z->f);
       std::fprintf(stderr, "sizing: a build at %.2f GiB took %.2f, left %.2f GiB\n", b / 1073741824.0,
@@ -144,18 +149,14 @@ int main(int argc, char** argv) {
       if (z->f) forward_destroy(z->f), z->f = nullptr;
     };
     uint64_t sized = 0;
-    char ferr2[FIT_ERR] = "";
+    char ferr2[OSMOS_ERR] = "";
     if (!fit_sized(build, unbuild, &z, FIT_HEADROOM, &sized, ferr2)) std::fprintf(stderr, "fit_sized: %s\n", ferr2), std::_Exit(1);
     f = z.f;
     std::fprintf(stderr, "the budget sized to this GPU: %.2f GiB\n", sized / 1073741824.0);
   } else {
     f = forward_create_with(w, &o, ferr);
     if (!f) std::fprintf(stderr, "forward_create_with: %s\n", ferr), std::_Exit(1);
-    CHECK(forward_lane(f, 0, NULL, ferr));  // as the engine and ppl.hip: a step under n_experts / n_used rows the engine's
   }
-  if (const char* nd = std::getenv("NPU"))  // 0.7.0: the NPU beside the GPU (forward_npu), NPU_SHARE of a layer's pairs
-    if (!forward_npu(f, nd, std::getenv("NPU_SHARE") ? std::strtof(std::getenv("NPU_SHARE"), nullptr) : OSMOS_NPU_SHARE_DS, ferr))
-      std::fprintf(stderr, "forward_npu: %s\n", ferr), std::_Exit(1);
   Seq* s = seq_create(f, ferr);
   CHECK(s);
   std::vector<Seq*> ss(big ? big : step, s);

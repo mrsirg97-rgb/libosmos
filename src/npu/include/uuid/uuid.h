@@ -1,5 +1,5 @@
-/* osmos's stand-in (src/npu: XRT's headers) for uuid-dev's header (libuuid.so.1 is installed, its header is not): the six calls XRT's
-   headers make, libuuid's own declarations */
+/* osmos's stand-in (src/npu: XRT's headers) for uuid-dev's header (libuuid.so.1 is installed, its header is not): the
+   six calls XRT's headers make, libuuid's own declarations */
 #ifndef OSMOS_UUID_H
 #define OSMOS_UUID_H
 #ifdef __cplusplus

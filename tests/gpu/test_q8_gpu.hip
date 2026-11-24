@@ -280,7 +280,7 @@ int main() {
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (const char* name : names) experts(g, name);

@@ -593,7 +593,7 @@ int main() {
   attn_x16();
   bf16_case();
   batch_case();
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (size_t i = 0; i < n_shapes; i++) shape(g, shapes[i]);

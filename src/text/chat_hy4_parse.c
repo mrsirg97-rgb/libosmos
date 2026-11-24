@@ -6,6 +6,7 @@
 
 #include "chat_args.h"
 #include "osmos/text/chat_hy4.h"
+#include "osmos/err.h"
 
 /* a completion read back as the message the template renders it from (osmos/text/chat_hy4.h): the reasoning before
    the think block's end, the content before the calls, each call's arguments typed by its tool's schema. the
@@ -18,13 +19,6 @@ typedef struct Span
   const char *p;
   size_t n;
 } Span;
-
-static bool fail(char *err, const char *why)
-{
-  if (err)
-    snprintf(err, CHAT_ERR, "%s", why);
-  return false;
-}
 
 static bool take(Span *s, const char *lit)
 {
@@ -62,15 +56,15 @@ static bool call(Span *rest, const Json *tools, const HchatTokens *t, const char
 {
   Span fn, keys[MAX_ARGS];
   if (!take(rest, t->call))
-    return fail(err, "a tool call not opened");
+    return osmos_fail(err, "a tool call not opened");
   const char *k = memmem(rest->p, rest->n, t->key, strlen(t->key));
   const char *c = memmem(rest->p, rest->n, t->call_end, strlen(t->call_end));
   if (!c)
-    return fail(err, "a tool call not closed");
+    return osmos_fail(err, "a tool call not closed");
   fn = (Span){rest->p, (size_t)((k && k < c ? k : c) - rest->p)};
   rest->p += fn.n, rest->n -= fn.n;
   if (!fn.n || memchr(fn.p, '<', fn.n) || !clean(fn, refused))
-    return fail(err, "a tool call's name empty, or holding '<' or a special token");
+    return osmos_fail(err, "a tool call's name empty, or holding '<' or a special token");
   JsonBuf args = {0};
   size_t n = 0;
   json_puts(&args, "{");
@@ -82,49 +76,49 @@ static bool call(Span *rest, const Json *tools, const HchatTokens *t, const char
     for (size_t i = 0; ok && i < n; i++)
       ok = !(keys[i].n == key.n && !memcmp(keys[i].p, key.p, key.n));
     if (!ok)
-      return free(args.p), fail(err, "a tool call's argument malformed, repeated or past the most read");
+      return free(args.p), osmos_fail(err, "a tool call's argument malformed, repeated or past the most read");
     json_puts(&args, n ? ", " : ""), json_dump_string(&args, key.p + off, key.n), json_puts(&args, ": ");
     chat_arg_value(&args, raw.p + (raw.n ? off : 0), raw.n, chat_arg_schema(tools, fn.p + off, fn.n, key.p + off, key.n));
     keys[n++] = key;
   }
   json_puts(&args, "}");
   if (!take(rest, t->call_end))
-    return free(args.p), fail(err, "a tool call not closed after its arguments");
+    return free(args.p), osmos_fail(err, "a tool call not closed after its arguments");
   json_puts(calls, "{\"type\": \"function\", \"function\": {\"name\": "), json_dump_string(calls, fn.p + off, fn.n);
   json_puts(calls, ", \"arguments\": "), json_dump_string(calls, args.p ? args.p : "", args.n), json_puts(calls, "}}");
   const bool oom = args.oom;
   free(args.p);
-  return !oom || fail(err, "out of memory");
+  return !oom || osmos_fail(err, "out of memory");
 }
 
 bool hchat_parse(const char *text, size_t len, bool thinking, const Json *tools, const HchatTokens *t, JsonBuf *out,
-                 char err[CHAT_ERR])
+                 char err[OSMOS_ERR])
 {
   return hchat_parse_shaped(text, text, len, thinking, tools, t, out, err);
 }
 
 bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool thinking, const Json *tools,
-                        const HchatTokens *t, JsonBuf *out, char err[CHAT_ERR])
+                        const HchatTokens *t, JsonBuf *out, char err[OSMOS_ERR])
 {
   const ptrdiff_t off = text - shape; /* the parse reads the shape; what it gives is the text's */
   text = shape;
   if (!text || !t || !out)
-    return fail(err, "no completion, tokens or output");
+    return osmos_fail(err, "no completion, tokens or output");
   const size_t en = strlen(t->end);
   if (len < en || memcmp(text + len - en, t->end, en))
-    return fail(err, "no end of turn");
+    return osmos_fail(err, "no end of turn");
   const char *refused[HCHAT_REFUSED + 1];
   hchat_refused(t, refused);
   if (tools && tools->type != JSON_ARRAY)
     tools = NULL;
   Span body = {text, len - en}, reasoning = {"", 0}, content;
   if (thinking && !upto(&body, t->think_end, &reasoning))
-    return fail(err, "no end of the think block in a thinking completion");
+    return osmos_fail(err, "no end of the think block in a thinking completion");
   const char *at = memmem(body.p, body.n, t->calls, strlen(t->calls));
   content = (Span){body.p, at ? (size_t)(at - body.p) : body.n};
   Span rest = {body.p + content.n, body.n - content.n};
   if (!clean(reasoning, refused) || !clean(content, refused))
-    return fail(err, "a special token's text in the reasoning or the content");
+    return osmos_fail(err, "a special token's text in the reasoning or the content");
   JsonBuf calls = {0};
   json_puts(&calls, "[");
   if (take(&rest, t->calls))
@@ -136,7 +130,7 @@ bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool th
         return free(calls.p), false;
     }
     if (rest.n)
-      return free(calls.p), fail(err, "text after the tool calls");
+      return free(calls.p), osmos_fail(err, "text after the tool calls");
   }
   json_puts(&calls, "]");
   json_puts(out, "{\"role\": \"assistant\", \"content\": "), json_dump_string(out, content.p + (content.n ? off : 0), content.n);
@@ -144,5 +138,5 @@ bool hchat_parse_shaped(const char *text, const char *shape, size_t len, bool th
   json_puts(out, ", \"tool_calls\": "), json_put(out, calls.p, calls.n), json_puts(out, "}");
   const bool oom = calls.oom || out->oom;
   free(calls.p);
-  return !oom || fail(err, "out of memory");
+  return !oom || osmos_fail(err, "out of memory");
 }

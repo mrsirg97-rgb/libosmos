@@ -23,7 +23,7 @@
 enum { STATE = 4096, N = 2000 };
 
 static char dir[] = "/tmp/test_slots_XXXXXX";
-static char err[SLOTS_ERR];
+static char err[OSMOS_ERR] = "";
 
 /* conversation k's tokens: its own from token 2 on (any two diverge there), n of them */
 static int32_t *conv(int k, uint32_t n)

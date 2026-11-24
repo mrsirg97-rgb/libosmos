@@ -1,11 +1,11 @@
 #ifndef OSMOS_TEXT_JSON_H
 #define OSMOS_TEXT_JSON_H
 
+#include "osmos/err.h"
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
-#define JSON_ERR 128
 #define JSON_MAX_DEPTH 256 /* nesting refused past this (Python's own json gives up near its recursion limit, 1000) */
 
 typedef enum JsonType
@@ -39,7 +39,10 @@ typedef struct JsonBuf /* text written: grown as needed; oom set (and nothing mo
   bool oom;
 } JsonBuf;
 
-Json *json_parse(const char *text, size_t len, char err[JSON_ERR]);
+Json *json_parse(const char *text, size_t len, char err[OSMOS_ERR]);
+/* json_parse within a tree of budget bytes at most (every node, string and slot it allocates counted; *used, if
+   asked, what it took): past it NULL, "past its memory budget" - for an untrusted body */
+Json *json_parse_within(const char *text, size_t len, size_t budget, size_t *used, char err[OSMOS_ERR]);
 void json_free(Json *j);
 const Json *json_get(const Json *obj, const char *key);
 const char *json_str(const Json *obj, const char *key);
@@ -63,9 +66,9 @@ void json_puts(JsonBuf *b, const char *s);
 json_parse
   RFC 8259 JSON (UTF-8 in, every escape, \u pairs joined), read as Python's json.loads reads it: an int its digits
   (any length), a number with a fraction or an exponent a double, an object's later duplicate key's value in the
-  first's place. NULL with why for anything else - NaN and Infinity too (Python reads them; JSON has none), a number past a double's range (Python's inf: its
-  dump Infinity), a lone
-  surrogate, invalid UTF-8, nesting past JSON_MAX_DEPTH.
+  first's place. NULL with why for anything else - NaN and Infinity too (Python reads them; JSON has none), a number
+  past a double's range (Python's inf: its dump Infinity), a lone surrogate, invalid UTF-8, nesting past
+  JSON_MAX_DEPTH.
 
 json_free
   j and everything under it. NULL is nothing to do.

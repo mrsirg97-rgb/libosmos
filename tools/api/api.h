@@ -13,9 +13,17 @@
 #include "osmos/text/tokenizer.h"
 
 #define API_LINGER_MS 2000 /* a refused request's bytes drained this long at most (http_linger) */
-#define API_ERR 256
-#define API_BODY_MAX (32u << 20) /* a request's body: a 64K-token context's text is ~0.3 MB; tools and history more */
+#define API_BODY_MAX (8u << 20) /* a request's body: twice the largest real one - 1M tokens (API_CTX_MAX) x ~3 bytes a
+                                   token x 1.2 for escaping (DESIGN.md, "phase 5, the design") */
+#define API_TREE_MAX (4 * API_BODY_MAX) /* a body's tree, or a call's arguments' parsed (one at a time, each freed):
+                                           past any real shape's; a body of tiny values past it refused */
 #define API_HEAD_MAX (64u << 10) /* its request line and headers */
+/* a request whole within a deadline from its first byte (a slow sender never holds a connection): API_REQUEST_S (s)
+   for its headers, API_BODY_S_MB (s) a MB of its body past them - a slow tunnel's 1 MB/s; past it 408, the connection
+   closed */
+#define API_REQUEST_S 10
+#define API_ORIGINS_MAX 16 /* --allow-origin's at most */
+#define API_BODY_S_MB 1
 
 /* a GEN's run: the tokens as they come, then its DONE (or ERR); its owner waits on cv */
 typedef struct Run
@@ -27,7 +35,7 @@ typedef struct Run
   size_t n, cap;
   bool done;
   char finish[16];     /* stop / length / cancel; "error" with err */
-  char err[API_ERR];
+  char err[OSMOS_ERR];
   unsigned prompt_n, reused;
   double prompt_ms, decode_ms;
   struct Run *next;
@@ -48,7 +56,7 @@ typedef struct Engine
   pthread_t reader;
 } Engine;
 
-bool engine_start(Engine *e, char *const argv[], bool spec, char err[API_ERR]);
+bool engine_start(Engine *e, char *const argv[], bool spec, char err[OSMOS_ERR]);
 /* a run's sampling (GEN temp= top_p= top_k= seed=): temperature 0 greedy, the keys not written; top_k 0 every token */
 typedef struct Sampling
 {
@@ -57,7 +65,7 @@ typedef struct Sampling
   unsigned top_k;
 } Sampling;
 Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, const Sampling *s,
-                char err[API_ERR]);
+                char err[OSMOS_ERR]);
 void engine_stop(Engine *e, Run *r);
 void engine_release(Engine *e, Run *r);
 bool engine_ready(Engine *e);
@@ -71,22 +79,26 @@ typedef struct Http
   char path[256];
   char *body;
   size_t body_n;
-  bool origin;    /* an Origin header came: a browser's request */
-  char host[256]; /* the Host header's value ("" none) */
+  char origin[256]; /* the Origin header's value ("" none: a local client's; one past it refused - a browser's) */
+  char host[256];   /* the Host header's value ("" none) */
+  char cors[400];   /* an allowed origin's (--allow-origin) CORS header lines, every response's: "" none */
 } Http;
 
-int http_read(Http *h, char err[API_ERR]);
-bool http_send(int fd, int status, const char *type, const char *body, size_t n);
-bool http_send_h(int fd, int status, const char *type, const char *body, size_t n, const char *head);
-bool http_stream_open(int fd);
-bool http_stream_open_h(int fd, const char *head);
+int http_read(Http *h, char err[OSMOS_ERR]);
+bool http_send(const Http *h, int status, const char *type, const char *body, size_t n);
+bool http_send_h(const Http *h, int status, const char *type, const char *body, size_t n, const char *head);
+/* a CORS preflight's answer (OPTIONS from an allowed origin): 204, the methods and headers a page may send */
+bool http_preflight(const Http *h);
+bool http_stream_open(const Http *h);
+bool http_stream_open_h(const Http *h, const char *head);
 bool http_stream_event(int fd, const char *data, size_t n);
-/* an SSE comment (": keep-alive"), every client's to pass over: a long prompt's read not silent (0.11.2) */
+/* an SSE comment (": keep-alive"), every client's to pass over: a long prompt's read not silent */
 bool http_stream_comment(int fd);
-bool http_error(int fd, int status, const char *message);
-bool http_error_code(int fd, int status, const char *message, const char *param, const char *code);
-/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After (0.11.2) */
-bool http_error_head(int fd, int status, const char *message, const char *param, const char *code, const char *head);
+bool http_error(const Http *h, int status, const char *message);
+bool http_error_code(const Http *h, int status, const char *message, const char *param, const char *code);
+/* the same with header lines of its own ("Name: value\r\n" each, or NULL): a 503's Retry-After */
+bool http_error_head(const Http *h, int status, const char *message, const char *param, const char *code,
+                     const char *head);
 void http_linger(int fd, bool wait);
 
 /* the server: what a request needs */
@@ -99,8 +111,11 @@ typedef struct Api
   int32_t eos;
   bool fill_orphans; /* the pack's fill_orphans: a request's osmos.fill_orphans unset, this */
   bool preserve_thinking; /* the pack's preserve_thinking: a request's unset, this (LFM3's reader) */
-  double temperature, top_p; /* the pack's sampling: a request's unset, these (0.14.0; temperature 0 greedy) */
-  unsigned top_k;            /* likewise (0.15.2; 0 every token) */
+  double temperature, top_p; /* the pack's sampling: a request's unset, these (temperature 0 greedy) */
+  unsigned top_k;            /* likewise (0 every token) */
+  const char *allow[API_ORIGINS_MAX]; /* --allow-origin's: browsers' origins taken (CORS), any other refused */
+  uint32_t keepalive_ms; /* a stream's keep-alive comment past this quiet (--keepalive-ms) */
+  int n_allow;
 } Api;
 
 void api_chat(Api *a, Http *h);

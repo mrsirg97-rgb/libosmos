@@ -1,6 +1,6 @@
-// LFM3's forward timed (osmos/lfm3/forward.h): lfm3_run <GGUF> [prompt=512] [step=512] [decode=64] - the wiki text's
-// ids aren't needed: the prompt is a fixed pattern of ids (a speed run, not a quality one), then greedy decode of one
-// token a step (the host's argmax over lfm3_logits); each phase's wall time and rate, the decoded ids' hash
+// LFM3's forward timed (osmos/lfm3/forward.h): lfm3_run <GGUF> [prompt=512] [step=512] [decode=64] [file] - the wiki
+// text's ids aren't needed: the prompt is a fixed pattern of ids (a speed run, not a quality one), then greedy decode
+// of one token a step (the host's argmax over lfm3_logits); each phase's wall time and rate, the decoded ids' hash
 //   IDS=path    the prompt's ids: a file of int32 (the first P), else the pattern
 //   DFLASH=path the decode in drafted rounds with this DFlash2 (lfm3_dflash_*): y and its drafts one decode step
 //               (lfm3_step_runs: the decode's math), the greedy picks keeping the leading drafts, the rest rolled back
@@ -35,7 +35,7 @@ static double now() {
 }
 
 int main(int argc, char** argv) {
-  char err[LFM3_ERR] = "", gerr[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "", gerr[OSMOS_ERR] = "";
   if (argc < 2) return std::fprintf(stderr, "usage: lfm3_run <GGUF> [prompt=512] [step=512] [decode=64] [file: the BF16 head]\n"), 2;
   const uint32_t P = argc > 2 ? (uint32_t) atoi(argv[2]) : 512, S = argc > 3 ? (uint32_t) atoi(argv[3]) : 512;
   const uint32_t Dn = argc > 4 ? (uint32_t) atoi(argv[4]) : 64;

@@ -15,6 +15,8 @@ typedef enum Phase
 typedef struct Answer
 {
   int fd;
+  const struct Http *http; /* its connection (the fd's): a response's headers its (an allowed origin's CORS) */
+  uint32_t keepalive_ms;   /* a stream's keep-alive comment past this quiet (Api's) */
   bool stream;
   const char *model;
   const Dialect *d; /* the markers it is cut at */
@@ -30,8 +32,8 @@ typedef struct Answer
   bool boundary; /* a block-shaped dialect's: the next bytes a block's header (its field theirs to say) */
   bool gone; /* the client stopped reading */
   uint32_t idle; /* a stream's waits with nothing new since its last bytes (a keep-alive comment past KEEPALIVE_MS) */
-  const Loop *loop; /* the request's loop signals: beside the answer's usage, its header (0.7.3) */
-  bool sampled;     /* 0.14.0: the answer drawn - its seed in x-osmos-seed (sent again, the same answer) */
+  const Loop *loop; /* the request's loop signals: beside the answer's usage, its header */
+  bool sampled;     /* the answer drawn - its seed in x-osmos-seed (sent again, the same answer) */
   unsigned long long seed;
 } Answer;
 

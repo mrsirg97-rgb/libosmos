@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
   }
   if (argc < 2) return std::fprintf(stderr, "usage: q8bench <first shard> [layer]\n"), 2;
   const int layer = argc > 2 ? std::atoi(argv[2]) : 20;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(argv[1], err);
   CHECK(g);
   char ng[64], nu[64], nd[64];

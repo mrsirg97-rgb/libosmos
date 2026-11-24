@@ -243,7 +243,7 @@ int main(int argc, char **argv)
   build = !strcmp(argv[1], "build");
   if (!build && strcmp(argv[1], "measure"))
     return fprintf(stderr, "measure or build\n"), 2;
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   if (!(ref = gguf_create(argv[2], err)))
     return fprintf(stderr, "reference: %s\n", err), 1;
   if (!(imat = gguf_create(argv[3], err)))

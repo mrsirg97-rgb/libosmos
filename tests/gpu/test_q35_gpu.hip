@@ -70,7 +70,7 @@ int main() {
   const std::string ref = rp;
   std::vector<char> ids = slurp(ref + "/ids.i32"), hb = slurp(ref + "/h.f32"), lb = slurp(ref + "/logits.f32");
   CHECK(!ids.empty() && !lb.empty());
-  char err[Q35_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(mp, err);
   CHECK(g || (std::fprintf(stderr, "%s\n", err), false));
   Q35Weights* w = q35_weights_create(g, err);

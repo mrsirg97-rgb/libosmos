@@ -10,14 +10,15 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lfm3/forward.h"
 #include "osmos/model/qtype.h"
+#include "osmos/err.h"
 
 #define ARCH "lfm3"
 #define DIM_MAX (1 << 24)
 #define CTX_MAX (1 << 30)
 #define UNROTATED 1e30f /* rope_freqs' factor on a pair the full layers leave unrotated (the zero tail) */
-_Static_assert(LFM3_ERR == GGUF_META_ERR && LFM3_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
+_Static_assert(OSMOS_ERR == OSMOS_ERR && LFM3_MAX_LAYERS <= GGUF_META_LIST_MAX, "the readers' buffers");
 
-bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[LFM3_ERR])
+bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[OSMOS_ERR])
 {
   GgufMeta m = {model, err, NULL, 0};
   memset(g, 0, sizeof *g);
@@ -67,13 +68,6 @@ bool lfm3_geometry(const Gguf *model, Lfm3Geometry *g, char err[LFM3_ERR])
   return ok;
 }
 
-static bool fail(char *err, const char *name, const char *why)
-{
-  if (err)
-    snprintf(err, LFM3_ERR, "%s: %s", name, why);
-  return false;
-}
-
 typedef struct Find
 {
   const Gguf *g;
@@ -87,24 +81,24 @@ typedef struct Find
 static bool find(Find *f, const char *name, uint64_t d0, uint64_t d1, bool matrix, const GgufTensor **t)
 {
   if (!(*t = gguf_tensor(f->g, name)))
-    return fail(f->err, name, "not in the model");
+    return osmos_fail(f->err, "%s: %s", name, "not in the model");
   const GgufTensor *x = *t;
   if (x->dims[0] != d0 || (d1 ? x->n_dims != 2 || x->dims[1] != d1 : x->n_dims != 1))
   {
     char why[96];
     snprintf(why, sizeof why, "shape %llu x %llu, the geometry's %llu x %llu", (unsigned long long)x->dims[0],
              (unsigned long long)(x->n_dims > 1 ? x->dims[1] : 0), (unsigned long long)d0, (unsigned long long)d1);
-    return fail(f->err, name, why);
+    return osmos_fail(f->err, "%s: %s", name, why);
   }
   f->found++;
   if (!matrix)
-    return x->type == QTYPE_F32 || fail(f->err, name, "not F32 (a norm, a convolution's taps, the rope's factors)");
+    return x->type == QTYPE_F32 || osmos_fail(f->err, "%s: %s", name, "not F32 (a norm, a convolution's taps, the rope's factors)");
   const QTypeInfo *q = qtype_info(x->type);
   if (!q || !(q->paths & QTYPE_MV))
-    return fail(f->err, name, "a type the matvec does not take");
+    return osmos_fail(f->err, "%s: %s", name, "a type the matvec does not take");
   if (!f->matrix_type)
     f->matrix_type = x->type;
-  return x->type == f->matrix_type || fail(f->err, name, "of another type than the file's other matrices");
+  return x->type == f->matrix_type || osmos_fail(f->err, "%s: %s", name, "of another type than the file's other matrices");
 }
 
 /* rope_freqs: the rotated pairs (a factor 1) first, then the unrotated (at least UNROTATED) */
@@ -116,22 +110,22 @@ static bool rope_pairs(Find *f, const GgufTensor *t, int *pairs)
   if (fd >= 0)
     close(fd);
   if (!got)
-    return fail(f->err, t->name, "not read");
+    return osmos_fail(f->err, "%s: %s", t->name, "not read");
   int p = 0;
   while (p < LFM3_HEAD_DIM / 2 && v[p] == 1.0f)
     p++;
   for (int i = p; i < LFM3_HEAD_DIM / 2; i++)
     if (!(v[i] >= UNROTATED))
-      return fail(f->err, t->name, "a factor neither 1 (rotated) nor the zero tail's (unrotated)");
+      return osmos_fail(f->err, "%s: %s", t->name, "a factor neither 1 (rotated) nor the zero tail's (unrotated)");
   *pairs = p;
-  return p > 0 || fail(f->err, t->name, "no pair rotated");
+  return p > 0 || osmos_fail(f->err, "%s: %s", t->name, "no pair rotated");
 }
 
-Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[LFM3_ERR])
+Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[OSMOS_ERR])
 {
   Lfm3Weights *w = calloc(1, sizeof *w);
   if (!w)
-    return fail(err, ARCH, "out of memory"), NULL;
+    return osmos_fail(err, "%s: %s", ARCH, "out of memory"), NULL;
   w->model = model;
   Lfm3Geometry *g = &w->geo;
   Find f = {model, err, 0, 0};
@@ -139,8 +133,8 @@ Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[LFM3_ERR])
   const uint64_t D = (uint64_t)g->n_embd, ff = (uint64_t)g->n_ff, hd = (uint64_t)g->head_dim;
   const uint64_t H = (uint64_t)g->n_heads, q = H * hd, kv = (uint64_t)g->n_kv_heads * hd;
   const GgufTensor *e = ok ? gguf_tensor(model, "token_embd.weight") : NULL;
-  ok = ok && (e || fail(err, "token_embd.weight", "not in the model")) && e->n_dims == 2 && e->dims[0] == D &&
-       (g->n_vocab = (int)e->dims[1]) > 0 && (e->type == QTYPE_BF16 || fail(err, e->name, "the tied head not BF16"));
+  ok = ok && (e || osmos_fail(err, "%s: %s", "token_embd.weight", "not in the model")) && e->n_dims == 2 && e->dims[0] == D &&
+       (g->n_vocab = (int)e->dims[1]) > 0 && (e->type == QTYPE_BF16 || osmos_fail(err, "%s: %s", e->name, "the tied head not BF16"));
   if (ok)
     w->embd = e, f.found++;
   ok = ok && find(&f, "output_norm.weight", D, 0, false, &w->out_norm) &&
@@ -175,7 +169,7 @@ Lfm3Weights *lfm3_weights_create(const Gguf *model, char err[LFM3_ERR])
         for (size_t k = 0; !taken && k < sizeof(Lfm3Layer) / sizeof(*r); k++)
           taken = r[k] == t;
       }
-      ok = taken || fail(err, t->name, "a tensor no role takes");
+      ok = taken || osmos_fail(err, "%s: %s", t->name, "a tensor no role takes");
     }
   if (!ok)
     return free(w), NULL;

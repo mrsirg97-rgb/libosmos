@@ -260,7 +260,7 @@ int main() {
   CHECK(!mmq_group(QTYPE_Q4_K, pw, pc, 1, 1, 16, 288, p8, pf, pf, pu, pf, pu, 16, nullptr));  // cols not 256s
   CHECK(!mmq_group(QTYPE_Q4_K, pw, pc, 1, 1, 32, 256, p8, pf, pf, pu, pf, pu, 16, nullptr));  // outputs overlapping
   std::printf("  refusals: Q5_1, cols not 32s / 256s, rows not 16s, overlapping rows\n");
-  char err[GGUF_ERR] = "";
+  char err[OSMOS_ERR] = "";
   Gguf* g = gguf_create(path, err);
   CHECK(g);
   for (const auto& p : kPairs) pair(g, p);

@@ -77,6 +77,27 @@ const char *state_parts_load(const void *head, uint64_t head_bytes, const StateP
   return got == sum ? NULL : "a damaged state (its checksum)";
 }
 
+const char *state_head_check(uint64_t magic, uint64_t want_magic, uint32_t version, uint32_t want_version,
+                             uint64_t identity, uint64_t want_identity)
+{
+  if (magic != want_magic || version != want_version)
+    return "a state of another format, or another version's";
+  return identity == want_identity ? NULL : "a state of another model or build (its identity)";
+}
+
+const char *state_pos_check(int64_t pos, uint32_t max_ctx)
+{
+  return pos >= 0 && pos <= (int64_t)max_ctx ? NULL : "a state past this context";
+}
+
+const char *state_tokens_check(const int32_t *t, int64_t n, uint32_t vocab)
+{
+  for (int64_t i = 0; i < n; i++)
+    if (t[i] < 0 || (uint32_t)t[i] >= vocab)
+      return "a state whose last tokens are outside the vocabulary";
+  return NULL;
+}
+
 const char *state_parts_to_host(const StatePart *p, int n, uint8_t *out)
 {
   for (int i = 0; i < n; out += p[i].bytes, i++)

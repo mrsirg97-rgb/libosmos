@@ -75,16 +75,15 @@ __device__ inline uint32_t visible(const int32_t* pos, uint32_t t, uint32_t rati
 // rows, a thread kIxR of the slots by kIxC rows, d staged kIxStep at a time, the next stage's loads issued before this
 // one's sums. each (token, head, row)'s dot s += q d * k d over d ascending (a multiply, then an add), relu * w, then
 // the heads summed in the order a 32-lane xor tree sums them (lane i + lane i ^ off, off 16 .. 1: lane 0's) - the
-// bits of a wave a row, a lane a head. the best of 1-4 tokens, 64-128 rows, 4-16 x 4-8 measured on gfx1151 (2,048
-// tokens x 4,096 rows, 32 heads x 128: 47 ms a wave a row, 10.1 here; scratch ixb.hip)
+// bits of a wave a row, a lane a head
 constexpr int kIxHeads = 32, kIxTok = 2, kIxRows = 64, kIxR = 8, kIxC = 4, kIxStep = 16;
-constexpr int kIxRcFp4 = 84;  // its thread's block (slots x rows): 8 x 4 (8 x 8 and 16 x 4: 15x slower, spilled)
-constexpr int kIxTokFp4 = 4;  // ops_index_score_fp4's tile's tokens: 4 the fastest of 1, 2, 4 (ixbench)
+constexpr int kIxRcFp4 = 84;  // its thread's block (slots x rows): 8 x 4 (8 x 8 and 16 x 4 spill their accumulators)
+constexpr int kIxTokFp4 = 4;  // ops_index_score_fp4's tile's tokens
 typedef float f4 __attribute__((ext_vector_type(4)));
-// GATHER (0.7.3, the candidate layers past 16K: ops_index_score_rows): a tile's rows a token's kept blocks' (list:
+// GATHER (the candidate layers past 16K: ops_index_score_rows): a tile's rows a token's kept blocks' (list:
 // block ids, n_list of them), not its first max_n - a token a tile (TOK 1), each (token, head, row) the same order of
 // sums as the plain tile's, so a kept row's score the same bits; the rest unwritten (ops_topk masks them unread)
-// FMA (0.7.3, ops_index_score_fp4): the sums' a + q x k one fused step - q and the keys FP4 values (E2M1 times a
+// FMA (ops_index_score_fp4): the sums' a + q x k one fused step - q and the keys FP4 values (E2M1 times a
 // power of two: 2 bits of mantissa each), so q x k is exact and fma(q, k, a) rounds as round(q x k) + a does: the
 // same bits in half the instructions. exact but where a product leaves the normal range: each (slot, row)'s
 // smallest nonzero |q| x |k| under 2^-126 (a product under- or subnormal-rounded) or its largest at 2^127 (an fma's
@@ -244,7 +243,7 @@ __global__ __launch_bounds__((kIxHeads * TOK / RR) * (kIxRows / CC)) void index_
   }
 }
 
-// 0.7.3: the indexer's scores on the packed int8 dots (ops_index_score_dot4), ops_index_score's bits. q and the keys
+// the indexer's scores on the packed int8 dots (ops_index_score_dot4), ops_index_score's bits. q and the keys
 // FP4 (a key E2M1 codes under a UE8M0 power of two a 32; q ops_fp4_round's F32 on that grid): a block's 32 values
 // each I 2^E, I an integer of -12 .. 12 (a key's E its scale's - 1; q's the block's largest |value|'s exponent - 3,
 // every value checked to be I 2^E), so a head's block dot an integer (|sum| <= 32 x 144: 8 v_dot4_i32_iu8 of 4 int8
@@ -259,8 +258,8 @@ __global__ __launch_bounds__((kIxHeads * TOK / RR) * (kIxRows / CC)) void index_
 // (j a lane's low 3 bits)
 constexpr int kDHd = 128, kDB = kDHd / 32, kDW = kDHd / 4, kDTok = 4, kDRows = 64;
 constexpr int kDThreads = 256, kDSpread = 9, kDEmin = -55, kDEmax = 55;
-constexpr int kDTiles = 8;  // a block's row tiles: 8 (512 rows) 66 ms at 1M, 4 71, 2 82, 1 94, 16 66 (scratch d4b)
-constexpr int kDTilesOne = 2;  // (0.7.4) the one-token tile's: 2 (512 rows a block) - ixbench IX_T=1
+constexpr int kDTiles = 8;  // a block's row tiles: 8 (512 rows)
+constexpr int kDTilesOne = 2;  // the one-token tile's: 2 (512 rows a block)
 static bool g_dot4_four = false;  // (tests, ixbench) a one-token step on the 4-token tile
 typedef int i4 __attribute__((ext_vector_type(4)));
 // 4 E2M1 codes (a byte each, low nibbles) as int8 2 x their values (0 1 2 3 4 6 8 12, signed): two byte permutes, a
@@ -290,11 +289,9 @@ __device__ inline int dot4_span(uint32_t g) {  // a slot's (row's) coded blocks'
   }
   return lo > hi ? 0 : hi - lo;
 }
-// TOK (0.7.4) a block's tokens: 4, or 1 (decode's step: its tiles 256 rows - a thread's two groups rows g * 128 +
+// TOK a block's tokens: 4, or 1 (decode's step: its tiles 256 rows - a thread's two groups rows g * 128 +
 // tp * 64 + tx * 4 .. where the 4-token tile has them its 2 tokens: at one token that tile 3/4 idle). every element
-// summed the same way, so the same bits. (an 8-token tile of 512 threads for a verify's 5 to 8, the keys read once,
-// measured 1.0x the 4-token tile's two blocks: the kernel its ALU's, not its reads - a verify's gain the waves past its
-// tokens skipping their sums, 1.22x at 6 tokens over 1M rows)
+// summed the same way, so the same bits
 template <int NT, int TOK>
 __global__ __launch_bounds__(kDThreads) void index_score_dot4_kernel(
     const float* __restrict__ q, const uint8_t* __restrict__ keys, const float* __restrict__ w,
@@ -404,7 +401,7 @@ __global__ __launch_bounds__(kDThreads) void index_score_dot4_kernel(
     }
     __syncthreads();
     if (n + 1 < NT) fetch(r0 + ROWS);  // the next tile's keys in flight
-    if (!live) continue;  // (0.7.4) its tokens past the step's: nothing of theirs written, so none computed
+    if (!live) continue;  // its tokens past the step's: nothing of theirs written, so none computed
     float acc[2][4][4] = {};  // [token (ONE: group)][head j + 8a][row]
 #pragma unroll
     for (int b = 0; b < kDB; b++) {
@@ -489,9 +486,9 @@ struct Pick {
   uint32_t n;             // the rows visible
   const uint32_t* keep;   // the kept blocks' bits (rows; NULL: none masked)
   uint32_t block;
-  const uint32_t* list;   // (0.7.3, ops_topk_rows) the kept blocks listed, ascending: the items their visible rows
+  const uint32_t* list;   // (ops_topk_rows) the kept blocks listed, ascending: the items their visible rows
   uint32_t n_list;
-  const float* bmax;      // (0.7.3, ops_cand_blocks) each block's highest score, ops_block_max's (NULL: folded here)
+  const float* bmax;      // (ops_cand_blocks) each block's highest score, ops_block_max's (NULL: folded here)
   // the list's items: its blocks' rows below n - ascending rows, so only its last block can be partial
   __device__ uint32_t listed() const {
     if (!n_list) return 0;
@@ -506,7 +503,7 @@ struct Pick {
     if (!BLOCKS && list) return order(score[row(i)]);  // a listed row: kept
     if constexpr (BLOCKS) {
       if (i + 1 == count<true>()) return order(INFINITY);
-      if (bmax) return order(bmax[i]);  // (0.7.3) ops_block_max's: the same fold, once
+      if (bmax) return order(bmax[i]);  // ops_block_max's: the same fold, once
       float m = -INFINITY;
       for (uint32_t c = i * block, e = c + block < n ? c + block : n; c < e; c++) m = fmaxf(m, score[c]);
       return order(m);
@@ -627,8 +624,8 @@ extern "C" bool ops_index_score_fp4(const float* q, const void* keys, const floa
                                     float* score, uint32_t stride, uint32_t* fallbacks, void* stream) {
   if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || !head_dim || !n_tok) return false;
   if (head_dim % kIxStep || head_dim % kv_block(KV_FP4_POW2)) return false;
-  constexpr int tok = kIxTokFp4;  // the tile's tokens: 4 the fastest of 1, 2, 4 (ixbench)
-  // the thread's block: 8 slots x 4 rows (8 x 8 and 16 x 4 measured 15x slower - their accumulators spilled; ixbench)
+  constexpr int tok = kIxTokFp4;  // the tile's tokens
+  // the thread's block: 8 slots x 4 rows (8 x 8 and 16 x 4 spill their accumulators)
   constexpr int rc = kIxRcFp4;
   const auto launch = [&](auto T, auto R, auto C) {
     constexpr int TK = decltype(T)::value, RK = decltype(R)::value, CK = decltype(C)::value;
@@ -653,7 +650,7 @@ extern "C" bool ops_index_score_dot4(const float* q, const void* keys, const flo
   if (!ratio || !max_n || max_n > stride || !heads || heads > (uint32_t) kWave || head_dim != (uint32_t) kDHd ||
       !n_tok)
     return false;
-  if (n_tok == 1 && !g_dot4_four) {  // (0.7.4) decode's step: the one-token tile
+  if (n_tok == 1 && !g_dot4_four) {  // decode's step: the one-token tile
     constexpr int span = kDTilesOne * 4 * kDRows;
     index_score_dot4_kernel<kDTilesOne, 1><<<dim3((max_n + span - 1) / span, 1), kDThreads, 0, st(stream)>>>(
         q, (const uint8_t*) keys, w, pos, ratio, heads, n_tok, score, stride, fallbacks);
@@ -723,7 +720,7 @@ extern "C" bool ops_topk(const float* score, uint32_t stride, const int32_t* pos
                          uint32_t sel_stride, int32_t* n_sel, void* stream) {
   if (!ratio || !k || k > OPS_MAX_SELECT || k > sel_stride || !n_tok ||
       (keep && (!block || keep_words < ((stride + block - 1) / block + 31) / 32)))  // (its blocks rounded up: the
-                                                                                  // last part one - 0.11.2)
+                                                                                  // last part one)
     return false;
   if (chunked(n_tok, stride, k)) {
     chunk_kernel<false><<<dim3(kChunks, n_tok), kSelectThreads, 0, st(stream)>>>(score, stride, pos, ratio, k, keep,
@@ -754,7 +751,7 @@ extern "C" bool ops_cand_blocks(const float* score, uint32_t stride, const int32
                              stream);
 }
 
-// (0.7.3) a token's blocks' highest scores: each block's visible rows folded as Pick's key folds them (from -inf,
+// a token's blocks' highest scores: each block's visible rows folded as Pick's key folds them (from -inf,
 // fmaxf in row order: a +0 and a -0 met in the same order), a thread a block
 __global__ void block_max_kernel(const float* score, uint32_t stride, const int32_t* pos, uint32_t ratio,
                                  uint32_t block, float* bmax, uint32_t bstride) {

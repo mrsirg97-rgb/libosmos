@@ -7,6 +7,7 @@
 
 #include "osmos/run/gpu.h"
 #include "serve.h"
+#include "osmos/err.h"
 
 double now_ms(void)
 {
@@ -58,11 +59,9 @@ bool server_greedy(Server *sv, const OsmosSampling *samp, uint32_t row0, uint32_
   return osmos_sampled(samp) || osmos_greedy(sv->e, row0, rows, picks, err);
 }
 
-/* row's pick, the row's tokens the held then extra[0 .. n): sampled, drawn at the token's position (held->n + n: the
-   same key a plain step's row and a drafted round's give one position - 0.14.0); then an end while the turn's answer
-   has not begun (the reasoning closed, whitespace alone since: --answer-after's rule) is not taken - the row's best
-   other token is (or drawn among the others, at the same key). the same rule for a plain step's row and a drafted
-   round's, so drafting keeps the bits */
+/* a draw is keyed by the token's position (held->n + n), never by the step: a plain step and a drafted round draw the
+   same token there, so drafting keeps the bits. an end token before the answer has begun (--answer-after) is refused
+   for the row's best other token, at the same key */
 bool server_answer(Server *sv, const OsmosSampling *samp, const Ids *held, const int32_t *extra, uint32_t n,
                    uint32_t row, int32_t *pick, char err[OSMOS_ERR])
 {
@@ -72,55 +71,6 @@ bool server_answer(Server *sv, const OsmosSampling *samp, const Ids *held, const
   if (!sv->answer.blank || !server_eos(sv, *pick) || !answer_unbegun(&sv->answer, held->v, held->n, extra, n))
     return true;
   return osmos_sample_except(sv->e, row, samp, at, sv->eos, (uint32_t)sv->n_eos, pick, err);
-}
-
-bool parse_gen(char *line, Gen *g, char *why, size_t wn)
-{
-  memset(g, 0, sizeof *g);
-  g->spec = -1;
-  g->samp.top_p = 1;
-  char *save = NULL, *tok = strtok_r(line + 4, " ", &save);
-  if (!tok)
-    return snprintf(why, wn, "expected: GEN <max_new> [keys] <id,id,...>"), false;
-  g->max_new = atoll(tok);
-  for (tok = strtok_r(NULL, " ", &save); tok; tok = strtok_r(NULL, " ", &save))
-  {
-    char *eq = strchr(tok, '=');
-    if (!eq)
-      break; /* the ids */
-    *eq = 0;
-    if (!strcmp(tok, "spec"))
-      g->spec = atoi(eq + 1);
-    else if (!strcmp(tok, "rid"))
-      g->rid = atoll(eq + 1), g->has_rid = true;
-    else if (!strcmp(tok, "mark"))
-      g->mark = (uint32_t)strtoul(eq + 1, NULL, 10);
-    else if (!strcmp(tok, "temp"))
-      g->samp.temperature = strtof(eq + 1, NULL);
-    else if (!strcmp(tok, "top_p"))
-      g->samp.top_p = strtof(eq + 1, NULL);
-    else if (!strcmp(tok, "seed"))
-      g->samp.seed = strtoull(eq + 1, NULL, 10);
-    else if (!strcmp(tok, "top_k")) /* 0.15.2: 0 every token */
-      g->samp.top_k = (uint32_t)strtoul(eq + 1, NULL, 10);
-    else
-      return snprintf(why, wn, "the key '%s' is not this engine's (rid, spec, mark, temp, top_p, top_k, seed)", tok),
-             false;
-  }
-  if (!(g->samp.temperature >= 0 && g->samp.temperature < 1e30f) || !(g->samp.top_p > 0 && g->samp.top_p <= 1))
-    return snprintf(why, wn, "temp= finite and at least 0, top_p= in (0, 1]"), false;
-  if (!tok)
-    return snprintf(why, wn, "a GEN with no ids"), false;
-  uint32_t cap = 1;
-  for (const char *c = tok; *c; c++)
-    cap += *c == ',';
-  if (!(g->ids = malloc((size_t)cap * sizeof *g->ids)))
-    return snprintf(why, wn, "out of memory"), false;
-  for (char *s2 = NULL, *x = strtok_r(tok, ",", &s2); x; x = strtok_r(NULL, ",", &s2))
-    g->ids[g->n++] = (int32_t)atol(x);
-  if (!g->n)
-    return free(g->ids), snprintf(why, wn, "a GEN with no ids"), false;
-  return true;
 }
 
 bool conv_create(Conv *c, const Server *sv)
@@ -138,9 +88,10 @@ void conv_destroy(Conv *c)
 
 bool conv_restart(Conv *c, const Server *sv)
 {
-  oseq_destroy(c->s);
+  (void)sv;
   c->held.n = 0, c->prompt.n = 0, c->user.n = 0; /* (the points' memory kept for the next) */
-  return (c->s = oseq_create(sv->e, c->err)) != NULL;
+  return oseq_reset(c->s, c->err); /* a new sequence in its own memory: a restart allocates nothing (destroyed and
+                                      made again, it could be refused the memory it had just given back) */
 }
 
 /* the sequence's mark kept as pt at its held tokens (serve.h's Point). none (no memory for it, or the mark refused):
@@ -191,8 +142,8 @@ static bool go_back(Conv *c, const Server *sv, Point *pt)
 
 /* a conversation past its prompt's end on decoded tokens (a family that reads apart): back to its prompt's point - a
    turn's earlier answer (decoded, not a prompt's bits) read again from there, never continued on, so a turn's
-   answer is the bits of its prompt read whole (0.7.1). with no point (its memory refused) the decoded state kept, as
-   0.7.0 kept it: that turn's answer a continued one's bits, never the whole conversation read again for it */
+   answer is the bits of its prompt read whole. with no point (its memory refused) the decoded state kept: that
+   turn's answer a continued one's bits, never the whole conversation read again for it */
 static bool back_to_prompt(Conv *c, const Server *sv)
 {
   if (!osmos_reads_apart(sv->e) || !c->prompt.n || c->held.n <= c->prompt.n)
@@ -202,8 +153,7 @@ static bool back_to_prompt(Conv *c, const Server *sv)
 
 /* a prompt's read cancelled part-way (STOP, its client gone): the state there not kept - its prompt's end lies past it
    (DeepSeek's decoder skip ran its last layers for that end) - so back to the furthest point it still holds: this
-   request's user turn's, else the last prompt's. none: read again from the start. 0.9.2: a restart every time, so a
-   client's retry after a timeout read the whole conversation again (and, the read longer than its timeout, again) */
+   request's user turn's, else the last prompt's. none: read again from the start */
 bool conv_cancel_read(Conv *c, const Server *sv)
 {
   const uint32_t a = c->prompt.n && c->prompt.n <= c->held.n ? c->prompt.n : 0,
@@ -239,16 +189,16 @@ static bool conv_load(void *ctx, uint64_t bytes, StateSource src, void *src_ctx)
 }
 
 /* set aside: into RAM where its room holds the state (slots_room), else straight to the folder in pieces - never
-   whole in RAM past the room the operator's 8 GiB leaves. kept as its prompt's point left it (every family, 0.7.5):
+   whole in RAM past the room --fill leaves. kept as its prompt's point left it (every family):
    a decoded answer is what a client writes back otherwise (its reasoning dropped, its calls' arguments written
    again), so a kept answer would be no prefix of the turn that takes it back */
 void conv_set_aside(Conv *c, const Server *sv)
 {
   if (!sv->slots || !c->held.n || (c->prompt.n && c->held.n > c->prompt.n && !go_back(c, sv, &c->prompt)) ||
       !c->held.n || !slots_keeps(sv->slots, c->held.n))
-    return; /* not kept: nothing saved, no room made (0.7.1: kept ones moved for it, then it was refused) */
+    return; /* not kept: nothing saved, no room made */
   const uint64_t bytes = oseq_state_bytes(c->s);
-  char serr[SLOTS_ERR] = "";
+  char serr[OSMOS_ERR] = "";
   bool kept = false, ok;
   void *st = slots_room(sv->slots, bytes, serr) ? malloc(bytes) : NULL;
   c->err[0] = '\0';
@@ -291,7 +241,7 @@ uint32_t conv_reach(const Conv *c, const Server *sv, const int32_t *p, uint32_t 
 
 bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
 {
-  if (!back_to_prompt(c, sv)) /* a decoded answer read again, never continued on (0.7.1) */
+  if (!back_to_prompt(c, sv)) /* a decoded answer read again, never continued on */
     return false;
   const uint32_t k = common(&c->held, p, n - 1);
   c->via = "held";
@@ -304,7 +254,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
     drop_past(c, k);
     return true;
   }
-  /* a point p continues (0.7.5): the prompt's, past a decoded answer the client wrote back otherwise; the last user
+  /* a point p continues: the prompt's, past a decoded answer the client wrote back otherwise; the last user
      turn's, before reasoning the template now drops */
   Point *pt = c->prompt.n && c->prompt.n <= k ? &c->prompt : c->user.n && c->user.n <= k ? &c->user : NULL;
   if (pt)
@@ -318,7 +268,7 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   if (id < 0)
     return true;
   c->via = "slot";
-  char serr[SLOTS_ERR] = "";
+  char serr[OSMOS_ERR] = "";
   c->err[0] = '\0';
   if (!slots_take_stream(sv->slots, id, conv_load, c, serr)) /* (a failed load leaves the sequence empty) */
   {
@@ -327,26 +277,23 @@ bool conv_continue(Conv *c, const Server *sv, const int32_t *p, uint32_t n)
   }
   for (uint32_t i = 0; i < len; i++)
     if (!ids_push(&c->held, p[i]))
-      return snprintf(c->err, sizeof c->err, "out of memory (a kept conversation's tokens)"), false;
-  /* kept as its prompt's point left it (conv_set_aside): that point again, taken back. 0.9.2: none was, and the turn
-     taken back at exactly that point (the same turn again, or a tool result whose mark it is) read on without one -
-     its stops not past held.n - so its next turn found nothing to go back to and read the whole conversation again
-     (DeepSeek: or continued on its decoded answer) */
+      return osmos_fail(c->err, "out of memory (a kept conversation's tokens)"), false;
+  /* kept as its prompt's point left it (conv_set_aside): that point again, taken back - a turn taken back at exactly
+     that point reads on with no stop past held.n, so without it its next turn would find nothing to go back to */
   take(c, &c->prompt, "prompt's");
   return true;
 }
 
 /* k tokens of p (from held.n) through one osmos_read; the drafter's rings seeded with the piece's part of the last
    window before n - the prompt's end it is read with (conv_prompt_end: a mark's ahead of it, so the mark's point holds
-   its own window; 0.9.2: the whole prompt's, so a turn gone back to the mark with a short tail drafted from rings
-   that held no rows for it) (serve.h) */
+   its own window, not the whole prompt's) (serve.h) */
 static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t n, bool seed)
 {
   if (!k)
     return true;
   OsmosSeq **seqs = calloc(k, sizeof *seqs);
   if (!seqs)
-    return snprintf(c->err, sizeof c->err, "out of memory"), false;
+    return osmos_fail(c->err, "out of memory"), false;
   for (uint32_t i = 0; i < k; i++)
     seqs[i] = c->s;
   const uint32_t at = c->held.n;
@@ -354,12 +301,12 @@ static bool read_piece(Conv *c, const Server *sv, const int32_t *p, uint32_t k, 
   free(seqs);
   for (uint32_t i = 0; ok && i < k; i++)
     if (!ids_push(&c->held, p[at + i]))
-      return snprintf(c->err, sizeof c->err, "out of memory"), false;
+      return osmos_fail(c->err, "out of memory"), false;
   const uint32_t lo = n > sv->window && n - sv->window > at ? n - sv->window : at;
   return ok && (!seed || lo >= at + k || oseq_seed(c->s, (int32_t)lo, (int32_t)(at + k), c->err));
 }
 
-/* the points a prompt keeps (0.7.5): the last user turn's (mark, osmos-api's) and the prompt's one token short of
+/* the points a prompt keeps: the last user turn's (mark, osmos-api's) and the prompt's one token short of
    its end - the generation prompt's last token (DeepSeek's <think>, Qwen's newline after it) is one a later turn
    renders otherwise. a piece stops at each, the point kept, then goes on: a prompt in pieces is the bits of one read
    whole (engine.h) */
@@ -390,7 +337,7 @@ bool conv_read(Conv *c, const Server *sv, const int32_t *p, uint32_t k, uint32_t
         return false;
       take(c, i ? &c->prompt : &c->user, i ? "prompt's" : "last user turn's");
       if (!i && !oseq_prompt(c->s, n)) /* past the mark: the prompt's own end */
-        return snprintf(c->err, sizeof c->err, "the prompt's end not past its mark"), false;
+        return osmos_fail(c->err, "the prompt's end not past its mark"), false;
       at_end = n;
     }
   if (c->held.n < end)

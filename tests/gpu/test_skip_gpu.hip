@@ -16,10 +16,11 @@
 #include <vector>
 
 extern "C" {
+#include "osmos/err.h"
 #include "osmos/model/gguf.h"
 #include "osmos/model/weights.h"
 #include "osmos/gpu/mm.h"
-#include "osmos/run/forward.h"
+#include "osmos/ds4/forward.h"
 }
 #include "test_model.h"
 
@@ -47,8 +48,10 @@ static std::vector<float> row(Forward* f, size_t V, uint32_t i) {
 }
 
 static Out play(Forward* f, size_t V, const int* ids, bool skip) {
-  char err[FORWARD_ERR] = "";
+  char err[OSMOS_ERR] = "";
+  osmos_clear(err);
   Seq* a = seq_create(f, err);  // the prompt
+  osmos_clear(err);
   Seq* b = seq_create(f, err);  // a conversation decoding beside it
   CHECK(a && b);
   if (skip) {
@@ -65,6 +68,7 @@ static Out play(Forward* f, size_t V, const int* ids, bool skip) {
     std::vector<int32_t> t(k + 1);
     ss[0] = b, t[0] = ids[(nb * 5) % 32];  // b's token first: a's kept ones then rows 1 .. of the step
     for (uint32_t i = 0; i < k; i++) t[i + 1] = ids[(p + i) % 32];
+    osmos_clear(err);
     CHECK(forward_batch(f, ss.data(), t.data(), k + 1, err));
     o.logits.push_back(row(f, V, 0)), nb++;
     if (p + k == kTotal) o.logits.push_back(row(f, V, k));
@@ -74,6 +78,7 @@ static Out play(Forward* f, size_t V, const int* ids, bool skip) {
   for (uint32_t d = 0; d < kDecode; d++) {
     Seq* both[2] = {a, b};
     const int32_t t[2] = {ids[(kTotal + d * 7) % 32], ids[(nb + d) % 32]};
+    osmos_clear(err);
     CHECK(forward_batch(f, both, t, 2, err));
     o.logits.push_back(row(f, V, 0)), o.logits.push_back(row(f, V, 1));
   }
@@ -98,10 +103,11 @@ int main() {
   CHECK(idf);
   for (int& i : ids) CHECK(std::fscanf(idf, "%d,", &i) == 1);
   std::fclose(idf);
-  char ferr[FORWARD_ERR] = "";
+  char ferr[OSMOS_ERR] = "";
   Gguf *g = nullptr, *eg = nullptr;
   Weights* w = test_weights(path, which, &g, &eg);
   CHECK(w);
+  osmos_clear(ferr);
   Forward* f = forward_create(w, w->geo.n_layers, kCtx, kBudget, ferr);
   CHECK(f);
   CHECK(!seq_prompt(nullptr, 1));

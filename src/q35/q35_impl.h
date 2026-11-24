@@ -1,7 +1,8 @@
-/* the q35 forward's and sequence's insides (src/q35/hip_q35.c: the forward and its step; hip_q35_seq.c: a sequence -
+/* the q35 forward's and sequence's insides (src/q35/hip_q35_step.c: the forward and its step; hip_q35_seq.c: a sequence -
    its rings, rollback, prompt, state and marks) */
 #pragma once
 
+#include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -10,11 +11,13 @@
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
 #include "osmos/q35/forward.h"
+#include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
 
 struct Q35Forward
 {
+  OsmosLedger *ledger; /* borrowed (Q35Options'): every allocation of the forward and its sequences */
   const Q35Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows;
   Q4xRope rope;
@@ -31,6 +34,7 @@ struct Q35Forward
   uint32_t rows;            /* the last step's rows */
   int32_t *ids, *argmax;    /* q35_greedy's ids (device, logit_rows) and its scratch */
   int32_t *tok, *pin_tok, *overflow;
+  OverflowFlag ovf; /* the flag's reset (osmos/gpu/overflow.h): owed when one failed */
   void *x16;
   const float *x16_x; /* the activations x16 holds as f16 (the last matrix's, on the matmul), or NULL */
   q35_tap_fn tap;
@@ -44,11 +48,13 @@ struct Q35Forward
   uint32_t *list, *list_n; /* a read and its count (device) */
   float *h_ik, *h_cent;
   int32_t *h_mem;
-  GpuBufs bufs; /* the step's buffers (want[]'s): freed from it */
+  GpuBufs bufs; /* every GPU and pinned buffer of the forward, recorded as made (q35_alloc, the step's want[]) -
+                   freed from the record at its destroy */
 };
 
 struct Q35Seq
 {
+  GpuBufs bufs; /* its GPU buffers, recorded as made (its forward's ledger's) */
   Q35Forward *f;
   int32_t pos;
   uint32_t cur, back;      /* the rings' current slot, and the tokens kept behind it (q35_seq_rollback's reach) */
@@ -69,8 +75,10 @@ typedef struct Q35SeqBytes
 } Q35SeqBytes;
 Q35SeqBytes q35_seq_bytes(const Q35Geometry *g);
 
-bool q35_fail(char *err, const char *why);
-bool q35_alloc(void *p, uint64_t bytes);
+/* a GPU buffer, or a pinned one, recorded in b (its owner's: the forward's or a sequence's - b's ledger the forward's),
+   freed from the record at the owner's destroy */
+bool q35_alloc(GpuBufs *b, void *p, uint64_t bytes);
+bool q35_pinned(GpuBufs *b, void *p, uint64_t bytes);
 
 /* a tensor's bytes on the GPU (by its index in the model's table) */
 static inline const void *dev(const Q35Forward *f, const GgufTensor *t) { return f->dev[t - f->w->model->tensors]; }

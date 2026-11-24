@@ -37,8 +37,7 @@ __global__ void conv_kernel(const float* x, uint32_t n_tok, uint32_t ch, uint32_
 
 // conv_kernel's for TAPS taps, dilation 1 (DeltaNet's): a thread a channel over kConvRun consecutive tokens, x' read
 // once into a window of registers (not taps loads a token) and the channel's weights once - each token's sum the
-// same products in the same order, so conv_kernel's bits (a 2048-token step's 10,240 channels: ~100 GB/s, its loads
-// a token's taps apart)
+// same products in the same order, so conv_kernel's bits
 constexpr uint32_t kConvRun = 8;
 template <int TAPS>
 __global__ void conv_run_kernel(const float* x, uint32_t n_tok, uint32_t ch, const float* w, const float* hist,
@@ -109,10 +108,10 @@ __global__ __launch_bounds__(kHead) void qk_norm_kernel(const float* qkv, uint32
 // into its slot
 constexpr int kHalfRows = kHead / 2;
 // the q / k rows in LDS: the high half a float on (a lane reads its half's row, its pair the other's - 64 floats apart
-// they were one bank, a 2-way conflict each read; one apart each half a broadcast)
+// they would be one bank, a 2-way conflict each read; one apart each half a broadcast)
 constexpr int kQkLds = kHead + 1;
-// a head's columns over kDeltaSplit blocks: 48 heads a block each left 8 of the 40 CUs two, the launch theirs (a
-// 2048-token step 4.2-4.3 -> 3.8-3.9 ms, low-power; 2 blocks 4.1, 8 4.6: a token's loads shared by fewer columns)
+// a head's columns over kDeltaSplit blocks: 48 heads a block each leave 8 of the 40 CUs two, the launch theirs (more
+// blocks: a token's loads shared by fewer columns)
 constexpr int kDeltaSplit = 4;
 __device__ inline uint32_t qk_at(uint32_t i) { return i + (i >= (uint32_t) kHalfRows); }
 // SPLIT blocks a head (blockIdx.y its share of the columns): a column's sums its own, whatever the block - the same
@@ -192,7 +191,7 @@ __global__ __launch_bounds__(kHead) void gated_norm_kernel(const float* x, const
 
 // the step's tokens whose states a ring keeps: its last `slots` (one, in place, when slots is 1) - a step longer than
 // the ring fills it whole, so its newest and the slots - 1 before it are all there (slots - 1 kept: the oldest of the
-// reach was never written, and a rollback of all of it read a stale slot)
+// reach is never written, and a rollback of all of it would read a stale slot)
 inline uint32_t kept(uint32_t n_tok, uint32_t slots) { return n_tok < slots ? n_tok : slots; }
 
 extern "C" bool q4x_conv(const float* x, uint32_t n_tok, uint32_t ch, uint32_t taps, uint32_t dilation,
