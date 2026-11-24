@@ -7222,3 +7222,26 @@ A/B after it measured against a base that already held it (01b1dc0's 42.0-42.3),
 too (its step 41.8 ms the stream's). A blocking stream beside the legacy default one: each switch between them an
 implicit wait, a drafted round several. With graphs dropped it had no use: undone (Ink2Forward's st left NULL, the
 default stream; the launches' stream argument kept). Lesson: an A/B's base is the last release, not the last commit.
+
+### 0.17.0: every pack's ceilings, measured against (2026-11-24, performance)
+
+**The goal** (the operator's): 90% of each pack's practical ceiling, decode and prefill. Practical: each piece at its
+kernel's best measured standalone rate - dense reads ~200 GB/s, routed experts ~170, the head ~190 (mmsweep), prompt
+matmuls ~29 TFLOP/s (the dense mm, 0.5.4); hardware: a token's bytes at the ~240 GB/s streaming read. A token's
+bytes and FLOPs from the GGUFs (~/bench/roof170/roofline.py): dense whole, a routed expert tensor its used / count
+share, the embedding and per-layer tables (per_layer_token_embd, Engram) a row, the head whole, the drafter apart; a
+looped model's layers their passes (Mini: 48 blocks of 24 layers, each twice).
+
+| pack | decode B / token | hw | practical | 90% | plain now | of practical | prefill FLOP / token | practical | 90% | now | of practical |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| inkling-2-mini | 5.60 GB | 42.8 | 33.4 | 30.0 | 28.8 | 86% | 9.8 G | 2,970 | 2,670 | 1,153 | 39% |
+| osmos1.7b | 0.83 GB | 290 | 242 | 218 | 126.3 | 52% | 2.9 G | 9,890 | 8,900 | 5,199 | 53% |
+| qwen38-ud-iq3_xxs | 4.98 GB | 48.2 | 38.6 | 34.7 | 28.9 | 75% | 13.3 G | 2,170 | 1,960 | 955 | 44% |
+| hy4-flash | 10.3 GB | 23.2 | 18.5 | 16.6 | 17.4 | 94% | 22.8 G | 1,270 | 1,150 | 409 | 32% |
+| osmos-evo-inkling (streams) | 7.45 GB | 32.2 | 24.8 | 22.4 | 12.9 | 52% | 35.9 G | 810 | 730 | 359 | 44% |
+| osmos-evo (streams) | 8.05 GB | 29.8 | 23.6 | 21.3 | 19.1 | 81% | 31.6 G | 920 | 830 | 391 | 43% |
+
+(plain decode the README's 0.15.0; prefill a ~3K prompt, 0.16.0's pass; a streaming pack's decode ceiling as if every
+expert resident.) **Prefill is every pack's gap** - 32-53% of practical, alike: shared causes, the shared core's.
+Decode: Hy4 past the goal, Mini and DeepSeek near it, Qwen's 75% a gap; Small's mostly its SSD; osmos1.7b's bytes
+(~4 ms a token) under its fixed per-step costs - its target the launches' floor, to be measured.
