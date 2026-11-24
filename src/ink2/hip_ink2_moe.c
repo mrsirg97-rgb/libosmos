@@ -47,8 +47,8 @@ bool ink2_mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x
 {
   const uint32_t rows = (uint32_t)t->dims[1], cols = (uint32_t)t->dims[0], type = ink2_type(t);
   if (!ink2_mm_takes(f, type, rows, cols))
-    return mv_strided(type, w, rows, cols, x, cols, n, y, rows, NULL);
-  return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, NULL);
+    return mv_strided(type, w, rows, cols, x, cols, n, y, rows, f->st);
+  return mm_tokens(type, w, rows, y, rows, NULL, 0, NULL, 0, cols, x, cols, n, f->x16, f->overflow, false, f->st);
 }
 
 /* two matrices on one x (mm_run2: each the bits mm_run gives it alone), or one with w1 NULL; `ready`: f->x16 holds
@@ -62,7 +62,7 @@ bool ink2_mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0, 
                                            !ink2_mm_takes(f, type, r1, cols))))
     return ink2_mat(f, t0, w0, x, n, y0) && (!t1 || ink2_mat(f, t1, w1, x, n, y1));
   return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, ready,
-                   NULL);
+                   f->st);
 }
 
 /* y = x's rows RMS-normed (times w), and for t on mm in one launch (n <= MM_MAX_TOKENS) f->x16 their f16 too -
@@ -73,8 +73,8 @@ bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const flo
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
   *ready = n <= MM_MAX_TOKENS && ink2_mm_takes(f, ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
-  return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, NULL)
-                : ops_rms(x, C, C, w, eps, n, y, C, NULL);
+  return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, f->st)
+                : ops_rms(x, C, C, w, eps, n, y, C, f->st);
 }
 
 /* one role's experts (their entries in ascending count): a launch a run of the same column tiles (mm_col_tiles), so
@@ -82,7 +82,7 @@ bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const flo
    launches' order changes no bit */
 static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, const int32_t *dcnt, uint32_t ne,
                   uint32_t rows, uint32_t cols, const void *x16, const uint32_t *dxo, float *y, const uint32_t *dyo,
-                  uint32_t ys)
+                  uint32_t ys, void *st)
 {
   bool ok = true;
   for (uint32_t a = 0, z = 0; ok && a < ne; a = z)
@@ -91,7 +91,7 @@ static bool group(uint32_t type, const void *const *dtab, const int32_t *cnt, co
     for (z = a + 1; z < ne && mm_col_tiles(type, (uint32_t)cnt[z]) == ct;)
       z++;
     ok = mm_group(type, dtab + a, dcnt + a, z - a, (uint32_t)cnt[z - 1], rows, cols, x16, dxo + a, cols, y, dyo + a,
-                  ys, NULL);
+                  ys, st);
   }
   return ok;
 }
@@ -124,16 +124,16 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
   float *pw = (float *)(f->pick + P);
   bool ok = ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) &&
             ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw,
-                              NULL) &&
-            q4x_expert_tiles(f->pick, P, K, E, C, F, &et, NULL) &&
+                              f->st) &&
+            q4x_expert_tiles(f->pick, P, K, E, C, F, &et, f->st) &&
             ink2_moe_scales(f->pick, pw, f->t_where, f->scale_tab + (uint64_t)l * 3 * E, E, P, f->t_sg, f->t_su,
-                            f->t_a, f->picks_d + (uint64_t)l * E, NULL) &&
-            mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, NULL);
+                            f->t_a, f->picks_d + (uint64_t)l * E, f->st) &&
+            mm_x16_rows(f->xn, C, f->t_gidx, bd.slots, C, f->xe16, f->overflow, f->st);
   for (int k = 0; ok && k < 3; k++)
   {
     if (k == 2)
       ok = ink2_swiglu_x16(f->eg, f->eu, f->t_sg, f->t_su, F, g->gate_softcap, g->up_softcap, f->t_hidx, bd.slots,
-                           f->xe16, f->overflow, NULL);
+                           f->xe16, f->overflow, f->st);
     /* run r's experts more than MM_TILE << (r - 1) tokens each (its bound the pairs'): none in a step of fewer
        tokens (a token picks an expert once): not launched empty */
     for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
@@ -141,7 +141,7 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
       {
         const uint32_t at = bd.first[r];
         ok = mm_group(t[k]->type, et.ptr[k] + at, f->t_cnt + at, bd.count[r], MM_TILE << r, rows[k], cols[k],
-                      f->xe16, xo[k] + at, cols[k], y[k], yo[k] + at, rows[k], NULL);
+                      f->xe16, xo[k] + at, cols[k], y[k], yo[k] + at, rows[k], f->st);
       }
   }
   f->m_a = f->t_a, f->m_row = f->t_where;
@@ -168,13 +168,13 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
   /* the picks' weights after them (pick + P): the two in one copy to the host */
   float *pw = (float *)(f->pick + P), *hw = (float *)(f->hpick + P);
   if (!ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) ||
-      !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, NULL) ||
+      !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, f->st) ||
       (next && (!ink2_mat(f, L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
-                                   f->gpick, f->gw, NULL) ||
-                hipMemcpyAsync(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess)) ||
-      hipMemcpyAsync(f->hpick, f->pick, 2 * P * 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      hipStreamSynchronize(NULL) != hipSuccess)
+                                   f->gpick, f->gw, f->st) ||
+                hipMemcpyAsync(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost, f->st) != hipSuccess)) ||
+      hipMemcpyAsync(f->hpick, f->pick, 2 * P * 4, hipMemcpyDeviceToHost, f->st) != hipSuccess ||
+      hipStreamSynchronize(f->st) != hipSuccess)
     return osmos_fail(err, "a GPU call failed (the router)");
   if (f->pf.on)
     f->pf.step[PF_ROUTE] += ink2_pf_now() - r0;
@@ -247,13 +247,13 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
   const double x0 = f->pf.on ? ink2_pf_now() : 0;
   memcpy(f->m_host, h, bytes);
   const bool ok =
-      hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, NULL) == hipSuccess &&
-      mm_x16_rows(f->xn, C, dgidx, slots, C, f->xe16, f->overflow, NULL) &&
-      group(L->exp_gate->type, dg, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eg, dyg, F) &&
-      group(L->exp_up->type, du, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eu, dyg, F) &&
+      hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+      mm_x16_rows(f->xn, C, dgidx, slots, C, f->xe16, f->overflow, f->st) &&
+      group(L->exp_gate->type, dg, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eg, dyg, F, f->st) &&
+      group(L->exp_up->type, du, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eu, dyg, F, f->st) &&
       ink2_swiglu_x16(f->eg, f->eu, dsg, dsu, F, g->gate_softcap, g->up_softcap, dhidx, slots, f->xe16,
-                      f->overflow, NULL) &&
-      group(L->exp_down->type, dd, cnt, dcnt, ne, C, F, f->xe16, dxd, f->ed, dyd, C);
+                      f->overflow, f->st) &&
+      group(L->exp_down->type, dd, cnt, dcnt, ne, C, F, f->xe16, dxd, f->ed, dyd, C, f->st);
   f->m_a = da, f->m_row = drow;
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the experts)");

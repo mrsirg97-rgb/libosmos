@@ -172,6 +172,7 @@ struct Ink2Forward
   int32_t *slot;       /* a step's row's logits slot, or -1 (none kept) */
   uint32_t logit_rows, n_slots; /* the logits' slots, and the step's taken */
   uint32_t n; /* the last step's rows */
+  void *st;   /* the step's stream (a blocking one: the null stream's work, a sequence's tails, ordered against it) */
 };
 
 /* hip_ink2_make.c's: device memory counted in the forward's bytes; a tensor's bytes from g's file, its F32 values on the
@@ -226,7 +227,7 @@ bool ink2_mat(Ink2Forward *f, const GgufTensor *t, const void *w, const float *x
 bool ink2_mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0, const GgufTensor *t1, const void *w1, float *y1, const float *x, uint32_t n, bool ready);
 bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const float *w, uint32_t n, float *y, bool *ready);
 bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err);
-bool ink2_conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_t taps, const float *w, uint32_t heads, const float *dyn, float res, float scale, const float *add, float *y);
+bool ink2_conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_t taps, const float *w, uint32_t heads, const float *dyn, float res, float scale, const float *add, float *y, void *st);
 bool ink2_proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool full, bool apart, const float *aq, const float *ak, const float *av, const float *q_norm, const float *k_norm, const float *v_norm, uint32_t n, float *dyn_k, float *dyn_v, bool *ok);
 bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, const float *x, const float *m, uint32_t n, float *out);
 bool ink2_controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, const float *const *x, const float *m, uint32_t n, float *out, bool *ok);

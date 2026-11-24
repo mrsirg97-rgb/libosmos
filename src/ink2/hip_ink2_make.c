@@ -138,6 +138,8 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   f->ledger = o->ledger;
+  if (hipStreamCreate((hipStream_t *)&f->st) != hipSuccess)
+    return osmos_fail(err, "the step's stream not made"), ink2_forward_destroy(f), NULL;
   f->pf.on = o->profile;
   f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
   f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
@@ -205,6 +207,8 @@ void ink2_forward_destroy(Ink2Forward *f)
   for (int l = 0; l < INK2_MAX_LAYERS; l++)
     for (int k = 0; k < 3; k++)
       free(f->L[l].scale[k]);
+  if (f->st)
+    hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer, the forward's and its drafter's: from the record */
   free(f->picks), free(f->picks_all), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex);

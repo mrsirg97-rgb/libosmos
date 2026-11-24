@@ -24,12 +24,12 @@
 #include "osmos/err.h"
 
 bool ink2_conv_put(Ink2Tail *t, const float *x, uint32_t n, uint32_t ch, uint32_t taps, const float *w,
-                     uint32_t heads, const float *dyn, float res, float scale, const float *add, float *y)
+                     uint32_t heads, const float *dyn, float res, float scale, const float *add, float *y, void *st)
 {
   const float *hist = ink2_tail_last(t, taps - 1);
   float *keep = ink2_tail_claim(t, n);
-  const bool ok = dyn ? !add && ink2_conv_dyn_keep(x, n, ch, taps, heads, w, dyn, hist, res, scale, y, keep, NULL)
-                      : ink2_conv_keep(x, n, ch, taps, w, hist, res, scale, add, y, keep, NULL);
+  const bool ok = dyn ? !add && ink2_conv_dyn_keep(x, n, ch, taps, heads, w, dyn, hist, res, scale, y, keep, st)
+                      : ink2_conv_keep(x, n, ch, taps, w, hist, res, scale, add, y, keep, st);
   return ok && (keep || ink2_tail_put(t, x, n));
 }
 
@@ -73,7 +73,7 @@ bool ink2_proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool 
   const OpsRmsPart norms[3] = {{aq, q_norm, f->xn, f->x16, C, C, C, 0},
                                {ak, k_norm, f->kn, x16k, C, C, C, 0},
                                {av, v_norm, f->vn, x16v, C, C, C, 0}};
-  *ok = ops_rms_x16_many(norms, apart ? 3 : 1, C, f->w->geo.rms_eps, n, f->overflow, NULL);
+  *ok = ops_rms_x16_many(norms, apart ? 3 : 1, C, f->w->geo.rms_eps, n, f->overflow, f->st);
   const void *w[7] = {d->q, d->gate, d->rel, d->k, d->v, d->k_conv_proj, d->v_conv_proj};
   const void *x[7] = {f->x16, f->x16, f->x16, x16k, x16v, x16k, x16v};
   float *y[7] = {f->q, f->gate, f->rel, f->k, f->v, dyn_k, dyn_v};
@@ -85,7 +85,7 @@ bool ink2_proj_batch(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, bool 
       const uint32_t rows = (uint32_t)t[i]->dims[1];
       p[count++] = (MmPart){w[i], rows, x[i], y[i], rows};
     }
-  *ok = *ok && mm_batch(ink2_type(L->q), C, p, count, n, NULL);
+  *ok = *ok && mm_batch(ink2_type(L->q), C, p, count, n, f->st);
   return true;
 }
 
@@ -102,9 +102,9 @@ bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, c
                                                   (uint32_t)L->ctrl_down[c]->dims[0]);
   const OpsRmsPart norms[2] = {{x, NULL, f->ccat, f->x16, C, 2 * C, 2 * C, 0},
                                {m, NULL, f->ccat + C, f->x16, C, 2 * C, 2 * C, C}};
-  const bool normed = r16 ? ops_rms_x16_many(norms, 2, C, eps, n, f->overflow, NULL)
-                          : ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, NULL) &&
-                                ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, NULL);
+  const bool normed = r16 ? ops_rms_x16_many(norms, 2, C, eps, n, f->overflow, f->st)
+                          : ops_rms(x, C, C, NULL, eps, n, f->ccat, 2 * C, f->st) &&
+                                ops_rms(m, C, C, NULL, eps, n, f->ccat + C, 2 * C, f->st);
   if (!normed)
     return false;
   /* the down's gate and its f16 in one launch (mm_run_x16: mm_run then mm_x16's bytes), the gain and forget on that
@@ -113,14 +113,14 @@ bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, c
   const GgufTensor *gf[2] = {L->ctrl_gain[c], L->ctrl_forget[c]};
   void *g16 = bx16_at(f, 5);
   if (r16 && batchable(f, gf, 2, G) &&
-      mm_run_x16(ink2_type(L->ctrl_down[c]), d->ctrl_down[c], G, 2 * C, f->x16, n, f->cgate, G, g16, f->overflow, NULL))
+      mm_run_x16(ink2_type(L->ctrl_down[c]), d->ctrl_down[c], G, 2 * C, f->x16, n, f->cgate, G, g16, f->overflow, f->st))
     return mm_tokens(ink2_type(gf[0]), d->ctrl_gain[c], C, f->cgain, C, d->ctrl_forget[c], C, f->cforget, C, G,
-                     f->cgate, G, n, g16, f->overflow, true, NULL) &&
-           (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL));
+                     f->cgate, G, n, g16, f->overflow, true, f->st) &&
+           (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, f->st));
   return ink2_mat2(f, L->ctrl_down[c], d->ctrl_down[c], f->cgate, NULL, NULL, NULL, f->ccat, n, r16) &&
          ink2_mat2(f, L->ctrl_gain[c], d->ctrl_gain[c], f->cgain, L->ctrl_forget[c], d->ctrl_forget[c], f->cforget,
               f->cgate, n, false) &&
-         (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, NULL));
+         (!out || ink2_loop_ctrl(x, m, f->cgain, f->cforget, (uint64_t)n * C, out, f->st));
 }
 
 /* a decode's three controls (q, k, v: control's for each) in batches: their norms each control's (x16s bx16 2 .. 4),
@@ -154,13 +154,13 @@ bool ink2_controls3(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, const 
     pg[2 * c] = (MmPart){d->ctrl_gain[k], C, x16g, gain, C};
     pg[2 * c + 1] = (MmPart){d->ctrl_forget[k], C, x16g, forget, C};
   }
-  *ok = ops_rms_x16_many(norms, 6, C, eps, n, f->overflow, NULL) && mm_batch(ink2_type(down[0]), 2 * C, pd, 3, n, NULL);
-  *ok = *ok && mm_x16_heads(f->cgate3, 3 * G, n, 3, G, G, bx16_at(f, 5), f->overflow, NULL);
-  *ok = *ok && mm_batch(ink2_type(gf[0]), G, pg, 6, n, NULL);
+  *ok = ops_rms_x16_many(norms, 6, C, eps, n, f->overflow, f->st) && mm_batch(ink2_type(down[0]), 2 * C, pd, 3, n, f->st);
+  *ok = *ok && mm_x16_heads(f->cgate3, 3 * G, n, 3, G, G, bx16_at(f, 5), f->overflow, f->st);
+  *ok = *ok && mm_batch(ink2_type(gf[0]), G, pg, 6, n, f->st);
   Ink2LoopCtrlPart lc[3];
   for (int c = 0; c < 3; c++)
     lc[c] = (Ink2LoopCtrlPart){x[c], m + c * nC, f->cgain3 + (uint64_t)c * MM_BATCH_TOKENS * C,
                                f->cforget3 + (uint64_t)c * MM_BATCH_TOKENS * C, out + c * nC};
-  *ok = *ok && ink2_loop_ctrl_many(lc, 3, nC, NULL);
+  *ok = *ok && ink2_loop_ctrl_many(lc, 3, nC, f->st);
   return true;
 }
