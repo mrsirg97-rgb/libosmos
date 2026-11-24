@@ -136,15 +136,13 @@ One descriptor and one kernel skeleton:
 - **Speed:** stamps for each piece (the profiler's timestamps are broken on this box since 2026-11-23), plus
   end-to-end tok/s.
 
-## Decisions for the operator
+## Decisions (the operator's, 2026-11-24)
 
-1. **One-time bit changes.** Qwen, DeepSeek, Hy4, osmos1.7b and the 27B would each change bits once when they move
-   onto the core, validated by KL, not hashes. Or should the core reproduce each family's current order, at the
-   cost of more variants?
-2. **Scope for 0.17.0.** A only (Mini's prompt attention, about 1.3x prefill), or A + B + C (the whole core, every
-   family)? C is several days of work and touches every pack.
-3. **Unit size.** 256 keys is Inkling's today. Families without a prompt == decode contract could use one softmax
-   per query (no units), which is cheaper.
+1. **One-time bit changes are acceptable** when KL matches today's, nothing regresses (speed, quality, drafted ==
+   plain, the serve tests), and the gain outweighs what's there now.
+2. **0.17.0 = Phase A + building B.** C's size is measured once B exists; C goes in 0.17.0 or in the release after,
+   decided then.
+3. Unit size: decided per family when it moves (C).
 
 ## Open questions to measure
 
