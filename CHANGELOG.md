@@ -1,11 +1,11 @@
 # Changelog
 
-## [0.17.0]: every pack measured against its ceiling; faster prompts on inkling-2-mini and osmos1.7b; the same answers
+## [0.17.0]: every pack measured against its ceiling; inkling-2-mini's prompts 6.4% faster; the same answers
 
 Every pack's answers are unchanged, token for token (hashed against 0.16.0's, greedy and sampled). This release
 measures where each pack's time goes against what this box can do, and takes the first shared fixes from that map.
 
-- **inkling-2-mini reads prompts 6.6% faster** (a ~3K prompt 1,004-1,011 -> 1,073 tok/s at low-power, three rounds
+- **inkling-2-mini reads prompts 6.4% faster** (a ~3K prompt 1,009-1,014 -> 1,076-1,077 tok/s at low-power, three rounds
   against 0.16.0), and decodes slightly faster (drafted +0.3%):
   - its prompt attention stages 64 keys per synchronization instead of 16 (a sliding-window layer -18%);
   - each layer's MoE preparation at decode is one GPU launch instead of three;
@@ -13,8 +13,12 @@ measures where each pack's time goes against what this box can do, and takes the
     every matrix that reads them;
   - a looped layer's controls no longer write a copy nothing reads, and its attention preparation no longer
     launches 190,000 one-row blocks.
-- **osmos1.7b reads prompts ~1% faster**: each activation is converted to f16 once for all the matrices that read
-  it (q, k, v and the gate; the FFN's gate and up).
+  - at the performance profile its ~3K prompt reads at 1,252 tok/s (0.16.0: 1,153), and in the agents bench (4
+    agents x 8 turns, cached prompts) its first token comes 14% sooner (mean 5.70 -> 4.90 s) and its turns finish 7%
+    sooner (20.39 -> 18.99 s).
+- **osmos1.7b's prompts convert each activation to f16 once** for all the matrices that read it (q, k, v and the
+  gate; the FFN's gate and up): 306 fewer passes a ~3K step. End to end it is within noise (3,770-3,796 ->
+  3,772-3,813 tok/s at low-power, three rounds against 0.16.0).
 - **Measured and written down** (DESIGN.md, docs/attention-core.md):
   - every pack's decode and prefill ceilings against what it measures; prefill is every pack's gap (32-53% of
     practical);

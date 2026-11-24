@@ -97,7 +97,7 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.16.0 on one Strix Halo (the plain column 0.15.0's), the `performance` profile, nothing else running. Every
+osmos 0.17.0 on one Strix Halo (the plain column 0.15.0's), the `performance` profile, nothing else running. Every
 number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
@@ -105,16 +105,16 @@ and plain answers are the same tokens, bit for bit (their hashes compared); draf
 
 | Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 1,153 tok/s | **45.9** / **42.4** tok/s | 28.8 tok/s |
-| `qwen38-ud-iq3_xxs` | 955 | **50.4** / **44.1** | 28.7 / 29.2 |
-| `osmos-evo-1017` | 391 | **29.0** / **24.2** | 18.8 / 19.3 |
-| `hy4-flash` | 409 | **22.8** / **20.1** | 17.4 / 17.4 |
-| `osmos-evo-inkling` | 359 | 14.2 / 14.2 | 12.6 / 13.2 |
-| `osmos1.7b` (no drafter) | **5,199** | | **126.7** / **126.2** |
+| `inkling-2-mini` | 1,252 tok/s | **45.9** / **42.4** tok/s | 28.8 tok/s |
+| `qwen38-ud-iq3_xxs` | 954 | **50.0** / **44.3** | 28.7 / 29.2 |
+| `osmos-evo-1017` | 384 | **29.0** / **24.2** | 18.8 / 19.3 |
+| `hy4-flash` | 408 | **22.9** / **20.2** | 17.4 / 17.4 |
+| `osmos-evo-inkling` | 371 | 14.5 / 14.3 | 12.6 / 13.2 |
+| `osmos1.7b` (no drafter) | **5,321** | | **126.6** / **124.0** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
-45.6 tok/s drafted (28.6 plain, 0.15.0).
+45.5 tok/s drafted (28.6 plain, 0.15.0).
 
 **Maya's three bench questions** (osmos 0.15.0; a CSV parser, photosynthesis for a student, a bouncing-ball web page;
 256 tokens, temperature 0, drafted / plain):
