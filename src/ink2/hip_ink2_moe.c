@@ -61,7 +61,9 @@ bool ink2_mat2(Ink2Forward *f, const GgufTensor *t0, const void *w0, float *y0, 
   if (!ink2_mm_takes(f, type, r0, cols) || (t1 && (ink2_type(t1) != type || (uint32_t)t1->dims[0] != cols ||
                                            !ink2_mm_takes(f, type, r1, cols))))
     return ink2_mat(f, t0, w0, x, n, y0) && (!t1 || ink2_mat(f, t1, w1, x, n, y1));
-  return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, ready,
+  if (ready && n <= f->x16_rows) /* (x16 this x's f16, every row: no conversion, any step) */
+    return mm_tokens_x16(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, f->x16, n, f->st);
+  return mm_tokens(type, w0, r0, y0, r0, t1 ? w1 : NULL, r1, y1, r1, cols, x, cols, n, f->x16, f->overflow, false,
                    f->st);
 }
 
@@ -72,7 +74,7 @@ bool ink2_rms_for(Ink2Forward *f, const GgufTensor *t, const float *x, const flo
 {
   const uint32_t C = (uint32_t)f->w->geo.n_embd;
   const float eps = f->w->geo.rms_eps;
-  *ready = n <= MM_MAX_TOKENS && ink2_mm_takes(f, ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
+  *ready = n <= f->x16_rows && ink2_mm_takes(f, ink2_type(t), (uint32_t)t->dims[1], (uint32_t)t->dims[0]);
   return *ready ? ops_rms_x16(x, C, C, w, eps, n, y, C, f->x16, f->overflow, f->st)
                 : ops_rms(x, C, C, w, eps, n, y, C, f->st);
 }

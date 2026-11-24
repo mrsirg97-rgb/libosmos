@@ -797,7 +797,7 @@ static uint32_t tiles(uint32_t n) { return (n + mm::kTile - 1) / mm::kTile * mm:
 
 extern "C" bool ops_rms_x16(const float* x, uint32_t n, uint32_t xs, const float* w, float eps, uint32_t rows,
                             float* y, uint32_t ys, void* x16, int32_t* overflow, void* stream) {
-  if (!n || n % mm::kTile || !rows || rows > MM_MAX_TOKENS || !x16 || !overflow) return false;
+  if (!n || n % mm::kTile || !rows || rows > MM_X16_ROWS_MAX || !x16 || !overflow) return false;  // (x16: rows' room the caller's)
   rms_kernel<<<tiles(rows), kThreads, 0, st(stream)>>>(x, n, xs, w, eps, y, ys, rows, (_Float16*) x16, overflow, n, 0);
   return ok();
 }

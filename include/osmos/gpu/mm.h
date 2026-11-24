@@ -20,6 +20,12 @@ bool mm_run(uint32_t type, const void *w, uint32_t rows, uint32_t cols, const vo
 bool mm_tokens(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
                float *y1, uint32_t ys1, uint32_t cols, const float *x, uint32_t xs, uint32_t n, void *x16,
                int32_t *overflow, bool ready, void *stream);
+/* mm_tokens on an x16 already holding all n rows (its producer's: a norm's, an activation's f16 beside its F32) - any
+   n, MM_MAX_TOKENS rows a launch over x16's slices (its tiles contiguous: x16_at), no conversion; the same bits as
+   mm_tokens converting x. x16's buffer the caller's: n rows (whole tiles) of cols */
+bool mm_tokens_x16(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, const void *w1, uint32_t rows1,
+                   float *y1, uint32_t ys1, uint32_t cols, const void *x16, uint32_t n, void *stream);
+#define MM_X16_ROWS_MAX 65536 /* an x16's rows at most (a producer's: ops_rms_x16) - a family's step, past MM_MAX_TOKENS */
 bool mm_tokens_scaled(uint32_t type, const void *w0, uint32_t rows0, float *y0, uint32_t ys0, float s0, const void *w1,
                       uint32_t rows1, float *y1, uint32_t ys1, float s1, uint32_t cols, const float *x, uint32_t xs,
                       uint32_t n, void *x16, int32_t *overflow, bool ready, void *stream);

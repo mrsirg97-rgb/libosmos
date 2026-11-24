@@ -121,10 +121,11 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     else
     {
       GPU(ink2_rms_for(f, L->q, aq, q_norm, n, f->xn, &ready));
+      const bool xn16 = ready; /* x16 xn's f16, every row (the q norm's): the other matrices on xn too, not converted again */
       /* the projections on xn in pairs through its one f16 (the norm's; a sliding layer's k and v too: xn theirs),
          then a full layer's k on kn and v on vn, each its norm's f16 - each matrix's bits its own launch's */
       GPU(ink2_mat2(f, L->q, d->q, f->q, L->gate, d->gate, f->gate, f->xn, n, ready) &&
-          ink2_mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, true));
+          ink2_mat2(f, L->rel, d->rel, f->rel, NULL, NULL, NULL, f->xn, n, xn16));
       if (apart)
       {
         GPU(ink2_rms_for(f, L->k, ak, k_norm, n, f->kn, &ready) &&
@@ -133,8 +134,9 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
             ink2_mat2(f, L->v, d->v, f->v, NULL, NULL, NULL, xv, n, ready));
       }
       else
-        GPU(ink2_mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, true));
-      GPU(ink2_mat(f, L->sink, d->sink, f->xn, n, f->sink));
+        GPU(ink2_mat2(f, L->k, d->k, f->k, L->v, d->v, f->v, f->xn, n, xn16));
+      GPU(apart ? ink2_mat(f, L->sink, d->sink, f->xn, n, f->sink) /* (x16 vn's now: xn converted) */
+                : ink2_mat2(f, L->sink, d->sink, f->sink, NULL, NULL, NULL, f->xn, n, xn16));
       if (full)
       {
         GPU(ink2_mat(f, L->k_conv_proj, d->k_conv_proj, xk, n, dyn_k));

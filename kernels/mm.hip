@@ -705,6 +705,21 @@ extern "C" bool mm_tokens_scaled(uint32_t type, const void* w0, uint32_t rows0, 
   return ok;
 }
 
+extern "C" bool mm_tokens_x16(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
+                              uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const void* x16, uint32_t n,
+                              void* stream) {
+  if (!w0 || !x16 || !n || n > MM_X16_ROWS_MAX || !cols || cols % mm::kTile) return false;
+  bool ok = true;
+  for (uint32_t k0 = 0; ok && k0 < n; k0 += MM_MAX_TOKENS) {  // (k0 a whole tile: a slice x16 + k0 cols)
+    const uint32_t m = n - k0 < MM_MAX_TOKENS ? n - k0 : MM_MAX_TOKENS;
+    Mats ms{{w0, w1}, {rows0, w1 ? rows1 : 0}, {y0 + (uint64_t) k0 * ys0, w1 ? y1 + (uint64_t) k0 * ys1 : nullptr},
+            {ys0, w1 ? ys1 : 0}};
+    ms.scale[0] = 1.0f, ms.scale[1] = 1.0f;
+    ok = run(type, ms, cols, (const _Float16*) x16 + mm::x16_at(k0, 0, cols), m, (hipStream_t) stream);
+  }
+  return ok;
+}
+
 extern "C" bool mm_tokens(uint32_t type, const void* w0, uint32_t rows0, float* y0, uint32_t ys0, const void* w1,
                           uint32_t rows1, float* y1, uint32_t ys1, uint32_t cols, const float* x, uint32_t xs,
                           uint32_t n, void* x16, int32_t* overflow, bool ready, void* stream) {

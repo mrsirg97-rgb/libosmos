@@ -172,6 +172,7 @@ struct Ink2Forward
   int32_t *slot;       /* a step's row's logits slot, or -1 (none kept) */
   uint32_t logit_rows, n_slots; /* the logits' slots, and the step's taken */
   uint32_t n; /* the last step's rows */
+  uint32_t x16_rows; /* x16's rows: a step's (max_tokens), so a norm's f16 holds all of it (mm_tokens_x16) */
   void *st;   /* the step's stream: NULL, the default stream - a stream of its own, its drafter's and tails' launches
                  on the default one, measured 6.5% slower (DESIGN.md "0.16.1: a stream of Mini's own") */
 };
