@@ -7172,3 +7172,26 @@ another 0.46%.
 the noise); the rotation (which would itself need re-quantized weights) still 18%. A large MoE tolerates more (0.6.0:
 DeepSeek's experts' gate / up at int4, top-1 5.4% against its noise's 2.8%) - still twice the noise, on one tensor kind.
 `--fast` on iu4 is not built. iu8 (W4A8) runs at f16's rate here (0.6.0: mmq 0.87x / 0.68x at 64 / 128 tokens).
+
+### 0.16.1: Mini's decode step, counted (2026-11-24, low-power; branch stamps-spike, local)
+
+**How.** rocprofv3's timestamps (and HIP events) read 0 on this box since 2026-11-23's boot - the command processor's
+stamps, not the shader's clock, which ticks. So a spike stamped the stream itself: a one-thread kernel writing
+wall_clock64 (100 MHz) and a tag after each statement of Mini's step and each part of its MoE (kernels/stamp.hip),
+a stamp's own cost (2.6 us, a back-to-back pair) subtracted. A plain decode, 160 steps after a 400-token prompt.
+
+**The step: 41.8 ms; 1,374 launches** (a verify step the same launches; rocprofv3's kernel names, counts intact):
+
+| | ms a step | share | |
+| --- | ---: | ---: | --- |
+| the dense projections: q, gate, k, v, rel (37.7 MiB a layer, 195 us: 203 GB/s); the output (13.5 MiB, 72 us: 196 GB/s) | 12.9 | 31% | the roofline |
+| the experts (mm_group, gate / up / down, 8 of 128: 81 us a launch) | 11.7 | 28% | mmsweep mini's 151-177 GB/s |
+| the head | 3.8 | 9% | |
+| the attention, the controls | 4.5 | 11% | |
+| ~600 small kernels at 10-16 us each (a bare launch 2.6) | 8.8 | 21% | their own latency |
+
+The small ones: the MoE's preparation (the router's scores, the experts' tiles, their scales, the rows to f16: 4
+launches a layer, ~2.3 ms; the router's matvec ~0.6 more), the attention residuals (~1.9; one launch tried slower, in
+DESIGN "the attention residual's dots and mix in one launch"), the convs (~1.0), the norms (~0.7), attn_prep and the
+swiglu (~1.1). The weights' reads (68%) are at the roofline: on the release weights, decode's reducible work is the
+small kernels' latency - at most ~15-20% if every one were a bare launch.
