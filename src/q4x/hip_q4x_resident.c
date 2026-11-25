@@ -1,6 +1,7 @@
 /* Qwen's forward, its weights made resident (q4x_impl.h): every tensor's bytes on the device (read through a
    pinned piece) or the membrane's, the room left as it goes, the experts' pool, the step's and drafters' buffers */
 #define _GNU_SOURCE /* O_DIRECT */
+#include <math.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -302,6 +303,24 @@ bool q4x_buffers(Q4xForward *f, char *err)
   free(iota);
   if (!put)
     return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  /* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
+     q4x_attn's bits), over b.fa */
+  const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads,
+                           .kv_heads = (uint32_t)g->n_kv_heads,
+                           .dk = (uint32_t)g->head_dim,
+                           .dv = (uint32_t)g->head_dim,
+                           .k_rows = ATTN_ROWS_Q8_0,
+                           .v_rows = ATTN_ROWS_Q8_0,
+                           .scaling = 1.0f / sqrtf((float)g->head_dim),
+                           .term = ATTN_TERM_NONE,
+                           .gate = ATTN_GATE_VALUE,
+                           .block = ATTN_BLOCK_HEADS,
+                           .ratio = (uint32_t)g->ix_ratio,
+                           .unit = 128,
+                           .max_tokens = f->max_tokens,
+                           .max_keys = f->max_ctx};
+  if (!(f->attn = attn_core_create(&ad, b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F, err)))
+    return false;
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
           pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
           (b->slot = malloc(n * sizeof *b->slot)) && memset(b->slot, 0xff, n * sizeof *b->slot)) ||

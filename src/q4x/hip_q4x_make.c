@@ -65,6 +65,7 @@ void q4x_forward_destroy(Q4xForward *f)
   free(f->ple_off);
   if (f->ple_copied)
     (void)hipEventDestroy(f->ple_copied);
+  attn_core_destroy(f->attn);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made (the step's, the MTP head's, the experts'
                               table, the n-gram stage): from the record - the readers of the stage stopped above */
   free(f->sub_seq);

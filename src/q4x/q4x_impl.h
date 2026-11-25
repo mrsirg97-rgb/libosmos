@@ -6,6 +6,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/npu_pack.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/mem/rowread.h"
 #include "osmos/npu/npu.h"
@@ -84,6 +85,7 @@ struct Q4xForward
   uint32_t max_ctx, max_tokens;
   Q4xRope rope; /* every rotation's: plain to the native context, YaRN past it (q4x_rope) */
   Q4xBuf b;
+  AttnCore *attn; /* the full layers' attention (attn_core: its scratch b.fa, borrowed) */
   Q4xMtpBuf m;
   q4x_probe_fn probe;
   void *probe_arg;

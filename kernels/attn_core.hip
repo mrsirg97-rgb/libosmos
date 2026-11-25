@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "attn_core_heads.h"
+#include "attn_core_kernel.h"
 
 using namespace attn;
 
@@ -80,57 +81,36 @@ bool launch(const AttnCore& c, const AttnStep& s, const KV* k, const KV* v, hipS
 // a heads block's desc (Qwen's): its refusal, or nullptr
 const char* heads_bad(const AttnCoreDesc& d) {
   const uint32_t G = d.kv_heads && !(d.heads % d.kv_heads) ? d.heads / d.kv_heads : 0;
-  return d.dk != 256 || d.dv != 256 ? "dk / dv: a heads block's head 256 (C1: Qwen's)"
+  return d.dk != Q4X_HEAD_DIM || d.dv != Q4X_HEAD_DIM ? "dk / dv: a heads block's head 256 (C1: Qwen's)"
          : !G ? "kv_heads: not a group of heads"
-         : G > (uint32_t) kFaTile ? "group: a heads block's query heads a KV head 16 at most (a tile's rows)"
+         : G > (uint32_t) attn_q4x::kTile ? "group: a heads block's query heads a KV head 16 at most (a tile's rows)"
          : d.k_rows != ATTN_ROWS_Q8_0 || d.v_rows != ATTN_ROWS_Q8_0 ? "k_rows / v_rows: a heads block's Q8_0 (C1)"
          : d.term != ATTN_TERM_NONE ? "term: a heads block's none"
          : d.sink ? "sink: a heads block's none (C1)"
          : d.gate == ATTN_GATE_HEAD ? "gate: a value's or none (C1)"
          : d.window ? "window: a heads block's none (C1)"
-         : d.ratio && kFaTile % d.ratio ? "ratio: picks' blocks a divisor of a tile's 16 keys"
-         : d.unit % ATTN_TILE ? "unit: a whole number of tiles"
-                                        : nullptr;
+         : d.ratio == 1 || (d.ratio && attn_q4x::kChunk % d.ratio) ? "ratio: picks' blocks of 2 or more, a chunk's divisor"
+         : d.unit != (uint32_t) attn_q4x::kChunk ? "unit: a heads block's 128 (its chunks: Qwen's bits)"
+                                                 : nullptr;
 }
 
-// a heads block's step (Qwen's: q4x_attn's scheme, its bits): a block a (token, KV head, unit) - its partial - then
-// the units merged max-first; a step in pieces of at most kHeadsPairs (token, unit) pairs (the scratch's)
-constexpr uint32_t kHeadsPairs = 8192, kHeadsStepTokens = 64;  // (q4x_attn's kPieceChunks, kStepTokens)
+// a heads block's step: q4x_attn's (its picks, no window, a gate a value's, the side at x16_row0)
 bool heads_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
   const AttnCoreDesc& d = c.d;
   const AttnKeys& k = s.keys;
-  const uint32_t U = d.unit ? d.unit : kFaUnit;
-  // a step's token's most entries: its position's, or with picks at most its blocks' and a tail short of a block
-  const uint64_t dense = (uint64_t) s.pos0 + s.n_tok, picked = (uint64_t) d.ratio * k.stride + d.ratio - 1;
-  const uint64_t longest = k.sel && picked < dense ? picked : dense;
-  const uint32_t most = (uint32_t) ((longest - 1) / U + 1), fit = kHeadsPairs / most;
-  const uint32_t piece = fit < 1 ? 1 : fit < kHeadsStepTokens ? fit : kHeadsStepTokens;
-  for (uint32_t t0 = 0; t0 < s.n_tok; t0 += piece) {
-    const uint32_t n = s.n_tok - t0 < piece ? s.n_tok - t0 : piece, p0 = s.pos0 + t0;
-    const uint64_t pd = (uint64_t) p0 + n, pl = k.sel && picked < pd ? picked : pd;
-    const uint32_t units = (uint32_t) ((pl - 1) / U + 1);
-    const HeadsArgs a = {d.heads, d.kv_heads, d.ratio, k.stride, U, d.scaling, k.key0, p0, s.x16_row0 + t0, d.heads * d.dv};
-    const uint64_t qa = (uint64_t) t0 * d.heads * d.dk, oa = (uint64_t) t0 * d.heads * d.dv;
-    const int32_t *sel = k.sel ? k.sel + (uint64_t) t0 * k.stride : nullptr, *np = k.npick ? k.npick + t0 : nullptr;
-    heads_kernel<256, true><<<dim3(n, d.kv_heads, units), kHeadsWaves * 32, 0, stream>>>(
-        a, s.q + qa, nullptr, n, (const uint8_t*) k.k, (const uint8_t*) k.v, sel, np, nullptr, nullptr, nullptr, 0,
-        c.part);
-    heads_merge_kernel<256><<<n * d.heads, 256, 0, stream>>>(c.part, n, a, sel, np, s.gate ? s.gate + oa : nullptr,
-                                                              s.out + oa, (_Float16*) s.x16, s.overflow);
-    if (hipGetLastError() != hipSuccess) return false;
-  }
-  return true;
+  const Q4xPick pick = {k.sel, k.npick, d.ratio, k.stride};
+  const AttnShape sh = {1, 0, 0};
+  const Q4xX16 side = {s.x16, s.overflow, d.heads * d.dv, s.x16_row0};
+  return attn_q4x::attn<Q4X_HEAD_DIM>(s.q, k.k, k.v, s.n_tok, d.heads, d.kv_heads, s.pos0, s.gate, k.sel ? &pick : nullptr,
+                                       sh, c.part, s.out, s.x16 ? &side : nullptr, stream);
 }
 
 }  // namespace
 
 extern "C" uint64_t attn_core_scratch(const AttnCoreDesc* d) {
   if (!d) return 0;
+  if (d->block == ATTN_BLOCK_HEADS) return q4x_attn_scratch(d->heads, d->max_keys) * sizeof(float);
   const uint32_t U = d->unit ? d->unit : kFaUnit;
-  if (d->block == ATTN_BLOCK_HEADS) {  // a piece's (token, unit) pairs: kHeadsPairs, or one token's every unit
-    const uint64_t units = ((uint64_t) d->max_keys + U - 1) / U;
-    return (units > kHeadsPairs ? units : kHeadsPairs) * d->heads * (d->dv + 2) * sizeof(float);
-  }
   return ((uint64_t) d->max_keys / U + 2) * kFaTile * d->heads * (kFaHead + 2) * sizeof(float);
 }
 
@@ -181,9 +161,9 @@ extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream
   const AttnCoreDesc& d = c->d;
   const AttnKeys& k = s->keys;
   if (d.block == ATTN_BLOCK_HEADS) {  // positions from key0 (the cache's rows), or picks of them
-    if (!s->n_tok || s->n_tok > d.max_tokens || s->pos0 + s->n_tok > k.key0 + k.n_keys || s->pos0 < k.key0 ||
-        k.n_keys > d.max_keys || k.key0 % ATTN_TILE || k.lists || (k.sel != nullptr) != (k.npick != nullptr) ||
-        (k.sel && (!d.ratio || !k.stride)) || (s->x16 && !s->overflow))
+    if (!s->n_tok || s->n_tok > d.max_tokens || s->pos0 + s->n_tok > k.n_keys || k.key0 || k.n_keys > d.max_keys ||
+        k.lists || (k.sel != nullptr) != (k.npick != nullptr) || (k.sel && (!d.ratio || !k.stride)) || !s->gate ||
+        (s->x16 && !s->overflow))  // (the cache's rows from position 0: key0 0; a gate - q4x_attn's)
       return false;
     return heads_launch(*c, *s, (hipStream_t) stream);
   }
@@ -201,3 +181,52 @@ extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream
     default: return false;
   }
 }
+
+// q4x_attn and q4x_attn_lists (q4x_ops.h) - osmos1.7b's and q35's callers until C2 moves them onto the core: the same
+// code the core's heads block runs
+namespace attn_q4x {
+extern "C" uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx) {
+  const uint64_t chunks = (max_ctx + kChunk - 1) / kChunk, pairs = chunks < kPieceChunks ? kPieceChunks : chunks;
+  return pairs * heads * (kHead + 2);  // a piece of at least one token at the context's end
+}
+
+extern "C" uint64_t q4x_attn_scratch_dim(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx) {
+  if (dim != Q4X_QK_HEAD_NARROW || !kv_heads || heads % kv_heads) return q4x_attn_scratch(heads, max_ctx);
+  const uint64_t a = span_pairs(heads, kv_heads, max_ctx) * heads * (dim + 2), b = q4x_attn_scratch(heads, max_ctx);
+  return a > b ? a : b;
+}
+
+extern "C" bool q4x_attn(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
+                         uint32_t kv_heads, uint32_t dim, uint32_t pos0, const float* gate, const Q4xPick* pick,
+                         const AttnShape* shape, float* scratch, float* out, const Q4xX16* side, void* stream) {
+  const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
+  if (!n_tok || !heads || !kv_heads || heads % kv_heads || heads / kv_heads > kTile ||
+      (dim != (uint32_t) kHead && dim != Q4X_QK_HEAD_NARROW) || (sh.gate_span != 1 && sh.gate_span != dim) ||
+      (sh.slots && (!sh.window || sh.slots < sh.window + n_tok - 1)) || (uint64_t) pos0 + n_tok > OPS_ATTN_MAX_KEYS)
+    return false;
+  if (!q || !kc || !vc || !gate || !scratch || !out ||
+      (pick && (!pick->npick || !pick->sel || pick->ratio < 2 || !pick->blocks || sh.window)))
+    return false;
+  return dim == (uint32_t) kHead
+             ? attn<Q4X_HEAD_DIM>(q, kc, vc, n_tok, heads, kv_heads, pos0, gate, pick, sh, scratch, out, side, stream)
+             : attn<Q4X_QK_HEAD_NARROW>(q, kc, vc, n_tok, heads, kv_heads, pos0, gate, pick, sh, scratch, out, side,
+                                        stream);
+}
+
+extern "C" bool q4x_attn_lists(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
+                               uint32_t kv_heads, uint32_t dim, const uint32_t* lists, const int32_t* counts,
+                               uint32_t list_stride, const float* gate, const AttnShape* shape, float* out,
+                               void* stream) {
+  const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
+  if (!q || !kc || !vc || !lists || !counts || !gate || !out || !n_tok || !kv_heads || heads % kv_heads ||
+      heads / kv_heads > (uint32_t) kListGqa || dim != Q4X_QK_HEAD_NARROW || !list_stride || sh.window || sh.slots ||
+      (sh.gate_span != 1 && sh.gate_span != dim))
+    return false;
+  fa_list_kernel<<<dim3(n_tok, kv_heads), 32, 0, st(stream)>>>(
+      q, (const uint8_t*) kc, (const uint8_t*) vc, heads, kv_heads, lists, counts, list_stride, gate, sh.gate_span,
+      1.0f / sqrtf((float) dim), out);
+  return ok();
+}
+
+
+}  // namespace attn_q4x
