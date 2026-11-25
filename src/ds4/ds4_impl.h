@@ -23,6 +23,7 @@
 #include "osmos/gpu/quant.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/npu_pack.h"
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/model/engram.h"
 #include "osmos/npu/npu.h"
@@ -90,7 +91,7 @@ typedef struct Scratch
   float *ckv_f;                  /* a prompt step's compressed rows unpacked once for its attention (hip_ds4_attn.c), up
                                     to ckv_f_rows of them */
   float *ring_f;                 /* and the window's ring (the forward's slots) */
-  float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
+  float *att;                   /* the attention's scores, then their denominators (the latent core borrows it) */
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
@@ -155,6 +156,7 @@ struct Forward
   bool no_guess;                              /* ForwardOptions': nothing guessed, no router copy made */
   float *freqs_win, *freqs_comp;
   Scratch b;
+  AttnCore *latent; /* the attention (the core's latent: the window's FP8 ring, the selected FP4 rows) */
   OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed */
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables

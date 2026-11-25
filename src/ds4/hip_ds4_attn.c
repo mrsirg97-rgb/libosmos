@@ -236,7 +236,6 @@ bool fwd_attention(Forward *f, int l, char *err)
     const uint32_t vis = (uint32_t)(f->at + 1) / ratio;
     fwd_probe(f, "sel", l, f->at, b->sel, vis < (uint32_t)g->ix_topk ? vis : (uint32_t)g->ix_topk, true);
   }
-  const float scale = (float)pow(HD, -0.5);
   for (uint32_t i = 0, run; ok && i < n; i += run) /* a launch a run of one sequence's tokens (a block a token) */
   {
     for (run = 1; i + run < n && f->bs[i + run] == f->bs[i]; run++)
@@ -264,10 +263,14 @@ bool fwd_attention(Forward *f, int l, char *err)
       ring = b->ring_f, rfmt = KV_F32;
     }
     const int32_t floor = f->dec >= 0 && l > f->dec ? f->bs[i]->dec_from : 0; /* the decoder's: hip_ds4_skip.c */
-    ok = ok && ops_sparse_attn(b->q + (uint64_t)i * H * HD, ring, rfmt, f->slots, b->pos + i, g->window, floor, ckv,
-                         fmt, ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL, ckv ? b->n_sel + i : NULL, OPS_MAX_SELECT,
-                         (uint32_t)g->ix_topk, F(f, L->sinks), scale, H, HD, run, b->att, b->o + (uint64_t)i * H * HD,
-                         NULL);
+    ok = ok && attn_core_run(f->latent,
+                             &(AttnStep){.q = b->q + (uint64_t)i * H * HD, .n_tok = run, .pos = b->pos + i,
+                                         .sink = F(f, L->sinks), .out = b->o + (uint64_t)i * H * HD,
+                                         .keys = {.k = ring, .v = ring, .rows = ckv, .k_wide = rfmt == KV_F32,
+                                                  .rows_wide = fmt == KV_F32, .floor = floor,
+                                                  .sel = ckv ? b->sel + (uint64_t)i * OPS_MAX_SELECT : NULL,
+                                                  .npick = ckv ? b->n_sel + i : NULL, .stride = ckv ? OPS_MAX_SELECT : 0}},
+                             NULL);
   }
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the attention)");

@@ -143,6 +143,15 @@ static bool scratch(Drafter *d)
   }
   for (uint32_t m = 0; m < P; m++)
     pair[m] = (int32_t)m;
+  const uint32_t W = (uint32_t)g->window;
+  const AttnCoreDesc ad = {.heads = g->n_heads, .kv_heads = 1, .dk = g->head_dim, .dv = g->head_dim,
+                           .k_rows = ATTN_ROWS_FP8, .v_rows = ATTN_ROWS_FP8, .s_rows = ATTN_ROWS_F32, .max_sel = (uint32_t)T,
+                           .window = W, .slots = W, .scaling = (float)(1.0 / sqrt((double)hd)), .term = ATTN_TERM_NONE,
+                           .sink = ATTN_SINK_HEAD, .gate = ATTN_GATE_NONE, .block = ATTN_BLOCK_HEADS,
+                           .max_tokens = (uint32_t)T, .max_keys = W + (uint32_t)T};
+  char aerr[OSMOS_ERR];
+  if (!(d->latent = attn_core_create(&ad, d->att, OPS_ATTN_SCRATCH(T, g->n_heads, (uint64_t)W + T) * F, aerr)))
+    return false;
   return fwd_put(d->sel, sel, sizeof sel) && fwd_put(d->n_sel, n_sel, sizeof n_sel) &&
          fwd_put(d->pair, pair, sizeof pair) && fwd_put(d->pre0, pre0, T * hc * F) &&
          fwd_pinned(&d->bufs, &d->pin, sizeof *d->pin);
@@ -235,6 +244,7 @@ void fwd_drafter_destroy(Drafter *d)
 {
   if (!d)
     return;
+  attn_core_destroy(d->latent);
   gpu_bufs_free(&d->bufs); /* every GPU and pinned buffer the drafter made: from its record */
   resident_destroy(d->res);
   hip_slots_destroy(d->slots); /* after the resident set: its memory released through it */

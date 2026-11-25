@@ -36,7 +36,21 @@ typedef enum AttnRows
   ATTN_ROWS_KV8,  /* Inkling's Q8 records (ink2_to_kv8's): a head's int8s, then a f16 scale a 32 */
   ATTN_ROWS_KV5,  /* Inkling's Q5 records (ink2_to_kv5's), values alone */
   ATTN_ROWS_Q8_0, /* ggml's Q8_0 blocks (q4x_kv_put's) */
+  ATTN_ROWS_MLA_F32, /* an MLA row (hy4_mla_kv's): the latent then the rope part, F32 - keys the whole row (dk), values
+                        its latent (dv); keys and values the same rows */
+  ATTN_ROWS_MLA_Q8,  /* an MLA row, its latent Q8_0 blocks then its rope part F32 */
+  ATTN_ROWS_FP8,     /* DeepSeek's window (kvfmt.h's KV_FP8): E4M3 codes, a power-of-two scale a 32 - a latent row, its
+                        key and its value for every head */
+  ATTN_ROWS_FP4,     /* DeepSeek's compressed rows (KV_FP4_E4M3): E2M1 codes, an E4M3 scale a 16 */
 } AttnRows;
+
+/* a sink logit (no value): none, a (token, head)'s (Inkling's), or a head's (Hy4's, DeepSeek's) */
+typedef enum AttnSink
+{
+  ATTN_SINK_NONE,
+  ATTN_SINK_TOKEN,
+  ATTN_SINK_HEAD,
+} AttnSink;
 
 /* a logit's term past q . k scaling */
 typedef enum AttnTerm
@@ -52,6 +66,9 @@ typedef enum AttnBlock
 {
   ATTN_BLOCK_TOKENS,
   ATTN_BLOCK_HEADS,
+  ATTN_BLOCK_DRAFT, /* a drafter's block: its queries against the ring's context (from keys.key0 to the block, a
+                       position's row position % slots) and the block's own keys (keys.own_k / own_v, F32), not causal;
+                       the ring's rows its family's kernel: f16 Inkling's MTP, F32 Qwen's DFlash */
 } AttnBlock;
 
 /* what one gate value scales: none, a head's values, a value */
@@ -72,15 +89,17 @@ typedef struct AttnCoreDesc
   float scaling;            /* q . k's */
   AttnTerm term;
   uint32_t d_rel, extent;   /* ATTN_TERM_REL's */
-  bool sink;                /* a sink logit a (token, head), no value */
+  AttnSink sink;
   AttnGate gate;            /* sigmoid(gate) times the output */
   AttnBlock block;
-  uint32_t ratio;           /* picks' blocks of keys (0: no picks; ATTN_BLOCK_HEADS alone) */
+  uint32_t ratio;           /* picks' blocks of keys (0: no picks; ATTN_BLOCK_HEADS alone) - MLA's: its groups' */
   uint32_t unit;            /* a unit's keys, a multiple of ATTN_TILE (0: ATTN_UNIT); a family's, fixed with its bits */
   uint32_t slots;           /* the cache's rows: 0 a row a position, else a ring (a position's row position % slots: at
                                least the window and a step's tokens past it) */
   bool apart;               /* a family whose prompt and decode read apart (osmos1.7b's, q35's): the step's read picks
                                the prompt's kernel or the decode's, each its own bits; else one kernel for both */
+  AttnRows s_rows;          /* the selected rows' (a latent's: AttnKeys' rows, FP4 or F32) */
+  uint32_t max_sel;         /* a latent's selected rows a query at most (0: its window alone) */
   uint32_t max_tokens;      /* a step's queries at most */
   uint32_t max_keys;        /* a query's keys at most (positions: the context; lists: their stride) */
 } AttnCoreDesc;
@@ -98,7 +117,9 @@ void attn_core_destroy(AttnCore *c);
 /* a step's keys: the cache's rows from key0's position (row r the key at position key0 + r), n_keys of them; picks
    given (the desc's ratio), each query's keys its picked blocks (sel[t stride ..] ascending, npick[t] of them - npick
    equal to its visible blocks, (pos + 1) / ratio: every one, none read) then its tail (its visible blocks' end to
-   itself); lists given, each query's own counts[t] positions (lists[t stride ..], any order) of the same rows */
+   itself); lists given, each query's own counts[t] positions (lists[t stride ..], any order) of the same rows. MLA's
+   rows (the ring's or a row a position, read at a query's positions; key0 and n_keys unread): its groups given, each
+   query's keys its npick[t] groups' of ratio positions (sel[t stride ..], ascending), the last its own to itself */
 typedef struct AttnKeys
 {
   const void *k, *v;
@@ -107,6 +128,13 @@ typedef struct AttnKeys
   const uint32_t *lists;  /* NULL: positions */
   const int32_t *counts;
   uint32_t stride;        /* sel's or lists' entries a query */
+  /* a latent's (FP8 rows): its window's ring k (= v; position % slots), then each query's npick[t] selected rows
+     (sel[t stride ..]: rows of `rows`, in order); no window key below floor. k_wide / rows_wide: those rows given
+     unpacked to F32 (ops_kv_unpack's: the same bits) */
+  const void *rows;
+  int32_t floor;
+  bool k_wide, rows_wide;
+  const float *own_k, *own_v; /* a draft block's own keys and values: [n_tok][kv_heads][dk] */
 } AttnKeys;
 
 /* a step: n_tok queries at positions pos0 .. pos0 + n_tok - 1 (with positions: each a key, pos0 + t - key0 < n_keys) */
@@ -114,9 +142,10 @@ typedef struct AttnStep
 {
   const float *q; /* [n_tok][heads][dk] */
   uint32_t n_tok, pos0;
+  const int32_t *pos;          /* [n_tok]: each query's position, on the device (MLA's; NULL elsewhere: pos0 + t) */
   AttnKeys keys;
   const float *rel, *rel_proj; /* ATTN_TERM_REL's: [n_tok][heads][d_rel], [d_rel][extent] */
-  const float *sink;           /* [n_tok][heads] (the desc's sink) */
+  const float *sink;           /* [n_tok][heads] (ATTN_SINK_TOKEN) or [heads] (ATTN_SINK_HEAD) */
   const float *gate;           /* [n_tok][heads][dv] or [n_tok][heads] (the desc's gate) */
   float *out;                  /* [n_tok][heads][dv] */
   void *x16;                   /* out also as mm_x16 lays it (NULL: not): its rows x16_row0 .. */

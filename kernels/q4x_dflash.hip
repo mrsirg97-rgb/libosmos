@@ -53,49 +53,6 @@ __global__ void ring_kernel(float* ring, uint32_t ring_rows, const float* x, uin
   ring[(uint64_t) (((uint64_t) pos0 + t) % ring_rows) * row + d] = x[i];
 }
 
-// a block a (query, head): its visible keys' scores into the LDS (the ring's then the block's), their max and sum by
-// block_sum's tree order, then each of its dims the weighted sum over the keys in order
-__global__ void attn_kernel(const float* q, uint32_t n_q, int32_t pos0, const float* kb, const float* vb, const float* kr,
-                            const float* vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads,
-                            uint32_t window, float* out) {
-  extern __shared__ float lds[];
-  __shared__ float qv[Q4X_DF_HEAD], red[kThreads];
-  const uint32_t qi = blockIdx.x, h = blockIdx.y, g = h / (heads / kv_heads), row = kv_heads * Q4X_DF_HEAD;
-  const int32_t qp = pos0 + (int32_t) qi;
-  const int32_t lo = ctx_from > qp - (int32_t) window + 1 ? ctx_from : qp - (int32_t) window + 1;
-  const uint32_t nctx = pos0 > lo ? (uint32_t) (pos0 - lo) : 0, nk = nctx + n_q;
-  const float* qh = q + ((uint64_t) qi * heads + h) * Q4X_DF_HEAD;
-  for (uint32_t d = threadIdx.x; d < Q4X_DF_HEAD; d += kThreads) qv[d] = qh[d];
-  __syncthreads();
-  const float scale = 1.0f / sqrtf((float) Q4X_DF_HEAD);
-  float mx = -INFINITY;
-  for (uint32_t j = threadIdx.x; j < nk; j += kThreads) {
-    const float* k = j < nctx ? kr + (uint64_t) ((uint64_t) (lo + (int32_t) j) % ring_rows) * row + g * Q4X_DF_HEAD
-                              : kb + (uint64_t) (j - nctx) * row + g * Q4X_DF_HEAD;
-    float s = 0.0f;
-    for (uint32_t d = 0; d < Q4X_DF_HEAD; d++) s = s + qv[d] * k[d];
-    lds[j] = s * scale;
-    mx = fmaxf(mx, lds[j]);
-  }
-  mx = block_max<kThreads>(mx, red);
-  float sum = 0.0f;
-  for (uint32_t j = threadIdx.x; j < nk; j += kThreads) {
-    lds[j] = expf(lds[j] - mx);
-    sum = sum + lds[j];
-  }
-  sum = block_sum<kThreads>(sum, red);
-  __syncthreads();
-  for (uint32_t d = threadIdx.x; d < Q4X_DF_HEAD; d += kThreads) {
-    float o = 0.0f;
-    for (uint32_t j = 0; j < nk; j++) {
-      const float* v = j < nctx ? vr + (uint64_t) ((uint64_t) (lo + (int32_t) j) % ring_rows) * row + g * Q4X_DF_HEAD
-                                : vb + (uint64_t) (j - nctx) * row + g * Q4X_DF_HEAD;
-      o = o + lds[j] / sum * v[d];
-    }
-    out[((uint64_t) qi * heads + h) * Q4X_DF_HEAD + d] = o;
-  }
-}
-
 __device__ inline bool better(float a, int32_t ia, float b, int32_t ib) { return a > b || (a == b && ia < ib); }
 
 // a block a row: each thread its strided values' k best (insertion), then thread 0 the block's k best of those
@@ -180,18 +137,6 @@ extern "C" bool q4x_df_ring(float* ring, uint32_t ring_rows, const float* x, uin
   if (!ring || !x || !ring_rows || !row || pos0 < 0) return false;
   if (!n) return true;
   ring_kernel<<<grid((uint64_t) n * row), kThreads, 0, st(stream)>>>(ring, ring_rows, x, n, row, pos0);
-  return ok();
-}
-
-extern "C" bool q4x_df_attn(const float* q, uint32_t n_q, int32_t pos0, const float* kb, const float* vb, const float* kr,
-                            const float* vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads,
-                            uint32_t window, float* out, void* stream) {
-  if (!q || !kb || !vb || !kr || !vr || !out || !n_q || !heads || !kv_heads || heads % kv_heads || !window ||
-      window < n_q || ctx_from < 0 || ctx_from > pos0 || ctx_from < pos0 - (int32_t) ring_rows)
-    return false;
-  const size_t lds = ((size_t) ring_rows + n_q) * sizeof(float);
-  attn_kernel<<<dim3(n_q, heads), kThreads, lds, st(stream)>>>(q, n_q, pos0, kb, vb, kr, vr, ring_rows, ctx_from, heads,
-                                                                kv_heads, window, out);
   return ok();
 }
 

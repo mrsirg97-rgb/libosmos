@@ -54,7 +54,7 @@ static AttnCoreDesc desc(Kind kind, uint32_t window, uint32_t max_tokens, uint32
   d.v_rows = kind == KIND_F32 ? ATTN_ROWS_F32 : kind == KIND_F16 ? ATTN_ROWS_F16 : kind == KIND_KV8 ? ATTN_ROWS_KV8 : ATTN_ROWS_KV5;
   d.window = window, d.scaling = kScale;
   d.term = ATTN_TERM_REL, d.d_rel = R, d.extent = E;
-  d.sink = true, d.gate = ATTN_GATE_VALUE;
+  d.sink = ATTN_SINK_TOKEN, d.gate = ATTN_GATE_VALUE;
   d.max_tokens = max_tokens, d.max_keys = max_keys;
   return d;
 }

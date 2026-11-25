@@ -12,6 +12,8 @@
 #include <cstring>
 #include <vector>
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
 }
@@ -138,12 +140,12 @@ static void ring_attn() {
     }
   float *dq = dev_of(q), *dkb = dev_of(kb), *dvb = dev_of(vb), *dout;
   CHECK(hipMalloc(&dout, want.size() * 4) == hipSuccess);
-  CHECK(q4x_df_attn(dq, nq, pos0, dkb, dvb, dkr, dvr, ring, from, heads, kvh, window, dout, nullptr));
+  CHECK(core_q4x_df_attn(dq, nq, pos0, dkb, dvb, dkr, dvr, ring, from, heads, kvh, window, dout, nullptr));
   const double e = max_rel(host_of(dout, want.size()), want);
   std::printf("  ring and attention: the ring's rows at p %% %u (wrapped); attention max rel error %.2e (%u of %u heads,"
               " window %u, not causal)\n", ring, e, heads, kvh, window);
   CHECK(e < 1e-4);
-  CHECK(!q4x_df_attn(dq, nq, pos0, dkb, dvb, dkr, dvr, ring, from - 1, heads, kvh, window, dout, nullptr));  // past the ring
+  CHECK(!core_q4x_df_attn(dq, nq, pos0, dkb, dvb, dkr, dvr, ring, from - 1, heads, kvh, window, dout, nullptr));  // past the ring
   hipFree(dkr), hipFree(dvr), hipFree(dkc), hipFree(dvc), hipFree(dq), hipFree(dkb), hipFree(dvb), hipFree(dout);
 }
 

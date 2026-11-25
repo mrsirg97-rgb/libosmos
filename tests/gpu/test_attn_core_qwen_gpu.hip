@@ -124,7 +124,7 @@ static const struct { uint64_t hash; double err; } kToday[] = {
 static AttnCoreDesc qwen_desc(uint32_t max_tokens, uint32_t max_keys) {
   AttnCoreDesc d{};
   d.heads = H, d.kv_heads = KV, d.dk = d.dv = D, d.k_rows = d.v_rows = ATTN_ROWS_Q8_0, d.window = 0;
-  d.scaling = kScale, d.term = ATTN_TERM_NONE, d.sink = false, d.gate = ATTN_GATE_VALUE;
+  d.scaling = kScale, d.term = ATTN_TERM_NONE, d.sink = ATTN_SINK_NONE, d.gate = ATTN_GATE_VALUE;
   d.block = ATTN_BLOCK_HEADS, d.ratio = kRatio, d.max_tokens = max_tokens, d.max_keys = max_keys, d.unit = 128;
   return d;
 }

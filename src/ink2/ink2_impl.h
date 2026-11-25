@@ -63,6 +63,7 @@ typedef struct Ink2MtpDev
   void *x16;         /* the block's activations as mm reads them: a tile of its widest input */
   int32_t *overflow; /* an x16 value past f16's range (the draft's refusal, not the step's) */
   OverflowFlag ovf;  /* its reset (osmos/gpu/overflow.h) */
+  AttnCore *attn[INK2_MTP_MAX_LAYERS]; /* a layer's attention (the core's draft block: its ring, its window), scr its scratch */
 } Ink2MtpDev;
 
 enum

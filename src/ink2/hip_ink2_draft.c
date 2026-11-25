@@ -36,6 +36,18 @@ static uint32_t ring_rows(const Ink2Forward *f, int l)
   return m->local[l] ? (uint32_t)(m->window + 2 * m->block) : f->max_ctx;
 }
 
+/* layer l's attention: the block's B queries against its ring's context (a local layer's window) and its own keys */
+static AttnCoreDesc mtp_desc(const Ink2Forward *f, int l, uint32_t B)
+{
+  const Ink2Mtp *m = f->mtp;
+  return (AttnCoreDesc){.heads = (uint32_t)m->n_heads, .kv_heads = (uint32_t)m->n_kv_heads, .dk = INK2_MTP_HEAD,
+                        .dv = INK2_MTP_HEAD, .k_rows = ATTN_ROWS_F16, .v_rows = ATTN_ROWS_F16,
+                        .window = m->local[l] ? (uint32_t)(m->window + m->block - 1) : 0,
+                        .scaling = 1.0f / sqrtf((float)INK2_MTP_HEAD), .term = ATTN_TERM_NONE, .sink = ATTN_SINK_NONE,
+                        .gate = ATTN_GATE_NONE, .block = ATTN_BLOCK_DRAFT, .slots = ring_rows(f, l), .max_tokens = B,
+                        .max_keys = ring_rows(f, l) + B};
+}
+
 /* the block's y0 = W0 x (and y1 = W1 x: W1 NULL, or of W0's type and cols) on n rows: mm where it tiles (the weights
    read once, a slab decoded once for the tile), else the matvec. *held: d->x16 holds this x (an mm before it on the
    same x), set by an mm */
@@ -136,6 +148,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
       ledger_free(f->ledger, tmp[i]);
   if (!ok)
     return osmos_fail(err, "the drafter: the drafter's mixtures, Markov projections or fold not made");
+  const AttnCoreDesc ad = mtp_desc(f, 0, B); /* (every layer's scratch the same: its heads and block) */
   struct
   {
     void **p;
@@ -150,13 +163,19 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
       {(void **)&d->inv, (uint64_t)B * 3 * R * 4}, {(void **)&d->vec, 2 * R * 4}, {(void **)&d->p, 3 * R * 4},
       {(void **)&d->state, R * 4}, {(void **)&d->latent, R * 4}, {(void **)&d->corr, (uint64_t)VR * 4},
       {(void **)&d->base, (uint64_t)B * VR * 4}, {(void **)&d->lg, ink2_mtp_pick_scratch()}, {(void **)&d->probs, B * 4},
-      {(void **)&d->scr, ink2_mtp_attn_scratch(B, (uint32_t)m->n_heads, (uint32_t)m->n_kv_heads)}, {(void **)&d->f_rnn, C * 4},
+      {(void **)&d->scr, attn_core_scratch(&ad)}, {(void **)&d->f_rnn, C * 4},
       {(void **)&d->pos, B * 4}, {(void **)&d->prev, 4}, {(void **)&d->ids, B * 4},
       {&d->x16, (uint64_t)MM_TILE * wide * 2}, {(void **)&d->overflow, 4},
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
       return osmos_fail(err, "the drafter: GPU memory refused (the drafter's buffers)");
+  for (int l = 0; l < m->n_layers; l++)
+  {
+    const AttnCoreDesc ld = mtp_desc(f, l, B);
+    if (!(d->attn[l] = attn_core_create(&ld, d->scr, attn_core_scratch(&ad), err)))
+      return false;
+  }
   d->ovf = (OverflowFlag){d->overflow, 4, false};
   return overflow_reset(&d->ovf, err);
 }
@@ -277,7 +296,6 @@ static bool layer(Ink2Forward *f, const Ink2Seq *s, int l, uint32_t B, int32_t p
   int32_t from = s->mfrom;
   if ((int64_t)pos - from > (int64_t)s->mrows[l]) /* the ring's newest */
     from = pos - (int32_t)s->mrows[l];
-  const uint32_t window = m->local[l] ? (uint32_t)(m->window + m->block - 1) : 0;
   bool held = false, att = false, post = false, act = false;
   return ok && ops_rms(d->res, C, C, d->in_norm[l], m->eps, B, d->nrm, C, NULL) &&
          dmat(f, L->q, d->wq[l], d->q, NULL, NULL, NULL, d->nrm, B, &held) &&
@@ -286,7 +304,10 @@ static bool layer(Ink2Forward *f, const Ink2Seq *s, int l, uint32_t B, int32_t p
          ops_rms(d->kb, INK2_MTP_HEAD, INK2_MTP_HEAD, d->k_norm[l], m->eps, B * KH, d->kb, INK2_MTP_HEAD, NULL) &&
          q4x_df_rope(d->q, B, H, Q, d->pos, m->rope_base, NULL) &&
          q4x_df_rope(d->kb, B, KH, KV, d->pos, m->rope_base, NULL) &&
-         ink2_mtp_attn(d->q, B, pos, d->kb, d->vb, s->mk[l], s->mv[l], s->mrows[l], from, H, KH, window, d->scr, d->att,
+         attn_core_run(d->attn[l],
+                       &(AttnStep){.q = d->q, .n_tok = B, .pos0 = (uint32_t)pos, .out = d->att,
+                                   .keys = {.k = s->mk[l], .v = s->mv[l], .key0 = (uint32_t)from, .own_k = d->kb,
+                                            .own_v = d->vb}},
                        NULL) &&
          dmat(f, L->o, d->wo[l], d->ob, NULL, NULL, NULL, d->att, B, &att) &&
          ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&

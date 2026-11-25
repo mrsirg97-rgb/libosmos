@@ -6,6 +6,8 @@
 
 #include "q4x_ref.h"
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/ink2_ops.h"
@@ -417,14 +419,14 @@ int main() {
       AttnCoreDesc d{};
       d.heads = H, d.kv_heads = KV, d.dk = d.dv = D, d.k_rows = kr, d.v_rows = vr, d.window = full ? 0u : 1024u;
       d.scaling = 0.08838834764831845f, d.term = ATTN_TERM_REL, d.d_rel = d_rel ? d_rel : R, d.extent = (uint32_t) rp.ne[0];
-      d.sink = true, d.gate = ATTN_GATE_VALUE, d.block = ATTN_BLOCK_TOKENS, d.max_tokens = n, d.max_keys = n;
+      d.sink = ATTN_SINK_TOKEN, d.gate = ATTN_GATE_VALUE, d.block = ATTN_BLOCK_TOKENS, d.max_tokens = n, d.max_keys = n;
       const uint64_t sb = attn_core_scratch(&d);
       void* sc = dev_alloc<uint8_t>(sb);
       char e[OSMOS_ERR] = "";
       AttnCore* core = attn_core_create(&d, sc, sb, e);
       bool ok = false;
       if (core) {
-        const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, {k, v, k0, nk, nullptr, nullptr, nullptr, nullptr, 0},
+        const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, nullptr, {k, v, k0, nk, nullptr, nullptr, nullptr, nullptr, 0},
                              dr + (uint64_t) s * H * R, drp, ds + (uint64_t) s * H, g ? g + (uint64_t) s * H * D : nullptr,
                              o, x16, ov, 0, false};
         ok = attn_core_run(core, &st, nullptr) && hipDeviceSynchronize() == hipSuccess;
@@ -690,16 +692,16 @@ int main() {
           for (uint32_t d = 0; d < D; d++) want[((size_t) i * H + h) * D + d] = (float) (o[d] / l);
         }
       float *dq = dev_from(q), *dkb = dev_from(kb), *dvb = dev_from(vb), *dout = dev_alloc<float>(want.size()),
-            *dscr = dev_alloc<float>(ink2_mtp_attn_scratch(nq, H, KH) / 4);
+            *dscr = dev_alloc<float>(1);
       uint16_t *dkr = dev_alloc<uint16_t>(kr.size()), *dvr = dev_alloc<uint16_t>(vr.size());
       CHECK(hipMemcpy(dkr, kr.data(), kr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
       CHECK(hipMemcpy(dvr, vr.data(), vr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
-      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(core_ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       const std::vector<float> got = host_of(dout, want.size());
-      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(core_ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       const std::vector<float> again = host_of(dout, want.size());
       CHECK(std::memcmp(got.data(), again.data(), got.size() * 4) == 0);
-      CHECK(!ink2_mtp_attn(dq, nq + 1, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(!core_ink2_mtp_attn(dq, nq + 1, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       double worst = 0;
       for (size_t i = 0; i < got.size(); i++) worst = std::max(worst, (double) std::fabs(got[i] - want[i]));
       CHECK(worst < 1e-5 || (std::printf("  mtp_attn: %d keys back: max |err| %.2e\n", c.pos0 - c.from, worst), false));

@@ -184,7 +184,7 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, lat = (uint32_t)g->kv_lora;
   const uint32_t vd = (uint32_t)g->v_dim, qk = nope + rd, row = lat + rd, ID = (uint32_t)g->ix_dim;
   const uint32_t IH = (uint32_t)g->ix_heads, top = (uint32_t)(g->ix_topk / g->ix_pool);
-  const float *freqs = sw ? f->freqs_swa : f->freqs_sparse, scale = 1.0f / sqrtf((float)qk);
+  const float *freqs = sw ? f->freqs_swa : f->freqs_sparse; /* (the scale qk's: the core's desc) */
   /* the matrices on xn: a token's one joint (its outputs in jo_attn), else each its own */
   const bool joint = n == 1 && !read;
   const Hy4Joint *J = &f->j_attn[l];
@@ -213,9 +213,12 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
                 : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
                             f->qa + o * H * row, f->table, f->st)) &&
          (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw, read)) && dfly_snap(f, s, l, (uint32_t)o, m) &&
-         hy4_mla_attn(f->qa + o * H * row, s->cache[l], sw ? f->ring : 0, f->kv8, hy4_fv(f, L->sinks), H, lat, rd,
-                      sw ? (uint32_t)g->window : 0, sw ? NULL : f->sel + o * top, sw ? NULL : f->n_sel + o,
-                      sw ? 0 : top, sw ? 0 : (uint32_t)g->ix_pool, scale, f->pos + o, m, f->olat + o * H * lat, f->attn_part, read, f->st);
+         attn_core_run(f->mla[l],
+                       &(AttnStep){.q = f->qa + o * H * row, .n_tok = m, .pos = f->pos + o, .sink = hy4_fv(f, L->sinks),
+                                   .out = f->olat + o * H * lat, .read = read,
+                                   .keys = {.k = s->cache[l], .v = s->cache[l], .sel = sw ? NULL : f->sel + o * top,
+                                            .npick = sw ? NULL : f->n_sel + o, .stride = sw ? 0 : top}},
+                       f->st);
   }
   ok = ok && (read ? heads_mm(f, f->vb_tab + (uint64_t)l * HY4_MAX_HEADS, H, vd, lat, f->olat, H * lat, n, f->ao,
                               H * vd, f->vb_xo, f->vb_yo) &&

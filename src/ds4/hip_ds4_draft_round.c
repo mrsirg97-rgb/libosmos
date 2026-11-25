@@ -9,7 +9,7 @@ static bool attention(Drafter *d, const DBlock *k, const uint8_t *ring)
 {
   const Geometry *g = d->f->g;
   const uint32_t T = DRAFTER_BLOCK, D = g->n_embd, H = g->n_heads, HD = g->head_dim, RD = g->rope_dim;
-  const uint32_t QL = g->q_lora, G = g->o_groups, OL = g->o_lora, oin = H * HD / G, W = (uint32_t)g->window;
+  const uint32_t QL = g->q_lora, G = g->o_groups, OL = g->o_lora, oin = H * HD / G;
   const float *fr = d->f->freqs_win;
   return mv_strided(DRAFTER_Q8_0, k->wq_a, QL, D, d->x, D, T, d->qa, QL, NULL) &&
          ops_rms(d->qa, QL, QL, k->q_norm, g->rms_eps, T, d->qa, QL, NULL) &&
@@ -20,8 +20,11 @@ static bool attention(Drafter *d, const DBlock *k, const uint8_t *ring)
          ops_rope(d->kv, 1, HD, RD, HD, fr, d->pos_q, false, T, NULL) && ops_fp8_round(d->kv, (uint64_t)T * HD, NULL, 0, NULL) &&
          /* the ring's rows before p0 (every row's window: positions p0 - window .. p0 - 1), then the block's own T
             rows - every row's, no causal mask - as the selected rows */
-         ops_sparse_attn(d->q, ring, KV_FP8, W, d->pos_a, W, 0, d->kv, KV_F32, d->sel, d->n_sel, OPS_MAX_SELECT, T, k->sink,
-                         (float)(1.0 / sqrt((double)HD)), H, HD, T, d->att, d->o, NULL) &&
+         attn_core_run(d->latent,
+                       &(AttnStep){.q = d->q, .n_tok = T, .pos = d->pos_a, .sink = k->sink, .out = d->o,
+                                   .keys = {.k = ring, .v = ring, .rows = d->kv, .sel = d->sel, .npick = d->n_sel,
+                                            .stride = OPS_MAX_SELECT}},
+                       NULL) &&
          ops_rope(d->o, H, HD, RD, H * HD, fr, d->pos_q, true, T, NULL) &&
          ops_fp8_round(d->o, (uint64_t)T * H * HD, NULL, 0, NULL) &&
          mv_group(DRAFTER_Q8_0, k->oa_tab, T * G, OL, oin, d->o, oin, 1, d->oa, NULL) &&

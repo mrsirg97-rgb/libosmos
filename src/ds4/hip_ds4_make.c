@@ -4,6 +4,7 @@
 #define _GNU_SOURCE /* O_DIRECT */
 #include <fcntl.h>
 #include <stdio.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -228,6 +229,18 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
         osmos_fail(err, "out of memory"));
   if (ok && !(freqs(f) && scratch(f)))
     ok = osmos_fail(err, "a GPU allocation refused");
+  if (ok)
+  { /* the attention: a token's window over the ring, then its selected compressed rows (ix_topk at most) */
+    const Geometry *g = f->g;
+    const AttnCoreDesc d = {.heads = g->n_heads, .kv_heads = 1, .dk = g->head_dim, .dv = g->head_dim,
+                            .k_rows = ATTN_ROWS_FP8, .v_rows = ATTN_ROWS_FP8, .s_rows = ATTN_ROWS_FP4,
+                            .max_sel = (uint32_t)g->ix_topk, .window = (uint32_t)g->window, .slots = f->slots,
+                            .scaling = (float)pow(g->head_dim, -0.5), .term = ATTN_TERM_NONE, .sink = ATTN_SINK_HEAD,
+                            .gate = ATTN_GATE_NONE, .block = ATTN_BLOCK_HEADS, .max_tokens = (uint32_t)f->step,
+                            .max_keys = (uint32_t)g->window + (uint32_t)g->ix_topk};
+    ok = (f->latent = attn_core_create(&d, f->b.att, OPS_ATTN_SCRATCH(f->step, g->n_heads, (uint64_t)g->window + g->ix_topk) * sizeof(float),
+                                       err)) != NULL;
+  }
   /* made whole (ForwardOptions'): the lane and the drafter, then the experts in what the whole build's budget leaves
      past them, then the NPU (it maps the experts' host slots) */
   ok = ok && fwd_lane_make(f, o->cpu_threads, o->cpu_cores, err);
@@ -264,6 +277,7 @@ void forward_destroy(Forward *f)
     return;
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
   fwd_drafter_destroy(f->drafter); /* first: it borrows the forward (its taps, its head) */
+  attn_core_destroy(f->latent);
   membrane_destroy(f->mem);
   host_slots_destroy(f->hs), host_slots_destroy(f->hs_stream); /* after the membrane: no unit still in them */
   resident_destroy(f->res);

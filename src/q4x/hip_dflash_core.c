@@ -28,7 +28,8 @@ static bool mat2(const DfHost *h, const GgufTensor *t0, uint32_t rows0, float *y
                  : h->mat(h->ctx, t0, rows0, cols, x, xs, n, y0, ys0) && h->mat(h->ctx, t1, rows1, cols, x, xs, n, y1, ys1);
 }
 
-bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx)
+bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx,
+                uint32_t ring)
 {
   const uint64_t n = max_tokens, B = (uint64_t)g->block, D = (uint64_t)g->n_embd, V = (uint64_t)g->n_vocab;
   const uint64_t kv = (uint64_t)g->n_kv_heads * g->head_dim, q = (uint64_t)g->n_heads * g->head_dim;
@@ -53,11 +54,19 @@ bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t m
   ok = h && hipMemcpy(d->iota, h, iota * 4, hipMemcpyHostToDevice) == hipSuccess &&
        hipMemcpy(d->tok, d->pin_tok, B * 4, hipMemcpyHostToDevice) == hipSuccess;
   free(h);
-  return ok;
+  const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads, .kv_heads = (uint32_t)g->n_kv_heads, .dk = (uint32_t)g->head_dim,
+                           .dv = (uint32_t)g->head_dim, .k_rows = ATTN_ROWS_F32, .v_rows = ATTN_ROWS_F32,
+                           .window = (uint32_t)g->window, .scaling = 1.0f / sqrtf((float)Q4X_DF_HEAD),
+                           .term = ATTN_TERM_NONE, .sink = ATTN_SINK_NONE, .gate = ATTN_GATE_NONE,
+                           .block = ATTN_BLOCK_DRAFT, .slots = ring, .max_tokens = (uint32_t)B,
+                           .max_keys = ring + (uint32_t)B};
+  char err[OSMOS_ERR];
+  return ok && (d->attn = attn_core_create(&ad, NULL, 0, err)) != NULL; /* (its scores in the LDS: no scratch) */
 }
 
 void df_buffers_free(DfBuf *d)
 {
+  attn_core_destroy(d->attn);
   gpu_bufs_free(&d->bufs); /* (its device and pinned buffers alike: the record's) */
   memset(d, 0, sizeof *d);
 }
@@ -112,8 +121,11 @@ static bool block_layer(const DfHost *h, const Q4xDflash *df, DfBuf *d, const Df
          conv(h, df, d, L->attn_conv, d->x, 0, d->xc, B) && h->mat(h->ctx, L->q, q, D, d->xc, D, B, d->q, q) &&
          ops_rms(d->q, Q4X_DF_HEAD, Q4X_DF_HEAD, f32(h, L->q_norm), g->eps, B * H, d->q, Q4X_DF_HEAD, s) &&
          q4x_df_rope(d->q, B, H, q, pos, g->rope_base, s) && keys(h, df, L, d, d->xc, B, pos) &&
-         q4x_df_attn(d->q, B, pos0, d->k, d->v, r->k[l], r->v[l], r->ring, ctx_from, H, (uint32_t)g->n_kv_heads,
-                     (uint32_t)g->window, d->att, s) &&
+         attn_core_run(d->attn,
+                       &(AttnStep){.q = d->q, .n_tok = B, .pos0 = (uint32_t)pos0, .out = d->att,
+                                   .keys = {.k = r->k[l], .v = r->v[l], .key0 = (uint32_t)ctx_from, .own_k = d->k,
+                                            .own_v = d->v}},
+                       s) &&
          h->mat(h->ctx, L->out, D, q, d->att, q, B, d->a, D) && conv(h, df, d, L->attn_conv, d->a, 1, d->x, B) &&
          ops_add(d->h, d->x, (uint64_t)B * D, s) && ops_rms(d->h, D, D, f32(h, L->ffn_norm), g->eps, B, d->x, D, s) &&
          h->mat(h->ctx, L->ffn_conv_proj, dyn, D, d->x, D, B, d->dyn, dyn) &&

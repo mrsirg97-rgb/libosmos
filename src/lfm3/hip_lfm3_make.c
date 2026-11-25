@@ -41,7 +41,7 @@ static bool upload(Lfm3Forward *f, char *err) { return upload_file(f, f->w->mode
 static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
   const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
-  return (lfm3_alloc(&f->bufs, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx)) ||
+  return (lfm3_alloc(&f->bufs, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx, f->df_ring)) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 

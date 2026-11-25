@@ -215,7 +215,7 @@ bool q4x_mtp_buffers(Q4xForward *f, char *err)
 /* the drafter's buffers (the DFlash2 core's): a feed's max_tokens context rows, a block's */
 bool q4x_df_buffers(Q4xForward *f, char *err)
 {
-  return df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx) ||
+  return df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx, f->df_ring) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 

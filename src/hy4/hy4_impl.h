@@ -5,6 +5,7 @@
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
@@ -65,7 +66,8 @@ struct Hy4Forward
   float *h, *xn, *y, *post;            /* the streams, a sublayer's input, its output, iHC's post */
   float *hcs;                          /* iHC's dots' slices (hy4_hc_scratch) */
   void *table;                         /* MLA's per-head matvecs' table (hy4_mla_table_bytes) */
-  float *attn_part;                    /* MLA's attention's partials (hy4_mla_attn_scratch) */
+  float *attn_part;                    /* MLA's attention's partials (attn_core_scratch: the layers' cores borrow it) */
+  AttnCore *mla[HY4_MAX_LAYERS];       /* a layer's MLA attention (a sliding one's window and ring, a sparse one's groups) */
   /* the read math's: the f16 activations an mm reads (MM_MAX_TOKENS of the widest input), the experts' gathered
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;

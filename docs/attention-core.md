@@ -244,6 +244,33 @@ max-first, byte for byte. Every Qwen step a block a (token, KV head, unit), then
 (q4x_attn's scratch, borrowed). A family's tiles are its list's entries (picked blocks, then the tail): every block
 picked tiles exactly as dense.
 
+### C2 and C3: the reads-apart families, Hy4 and DeepSeek (moved whole)
+
+C1 settled the method: a family moves with its own kernels' code, whole, into the core - the core's desc and step
+naming what each takes, its refusals by name at create - and its bits stay as they were, proven by hashes of the old
+kernels' outputs frozen before their code moved (each set 3 runs the same) and a mutation of each path (the hashes
+must fail). The one sums' order and the one precision (decisions 1 and 2) are then a change inside the core, measured
+per family by KL - not a condition of moving.
+
+- **C2: osmos1.7b and q35** (`apart`: the step's `read` picks the prompt's kernel or the decode's): `q4x_attn`,
+  `q4x_attn_lists`, `q35_attn_decode` and `q35_attn_read` as `attn_q4x` / `attn_q35` (19 frozen cases).
+- **C3: Hy4's MLA** (`ATTN_ROWS_MLA_F32` / `_Q8`: one latent row for every head, keys the row - latent and rope -
+  and values its latent; `kv_heads` 1, `dk` 576, `dv` 512; a head's sink, `ATTN_SINK_HEAD`; unit 32, its splits;
+  apart: a read on the matrix cores, mla_mm's, else the F32 splits; the indexer's groups as `ratio` = its pool, each
+  query's groups in `sel`, the last its own; each query's position in the step's `pos`) - `hy4_mla_attn` as
+  `attn_hy4` (`kernels/attn_core_mla.h`; the row layout `mla_row.h`, its writer's and its reader's). 19 frozen cases
+  (dense, sliding over a ring, selected groups, F32 and Q8, 64 / 32 / 16 / 8 heads), both kernels mutated (9 and 10
+  cases fail, every case one of the two). A core a layer (its heads, a sliding one's window or a sparse one's groups),
+  the DFly2 drafter on its target layers' cores. Hy4's answers through osmos-api the pre-C3 build's to the hash.
+- **C3: DeepSeek's latent** (`ATTN_ROWS_FP8`: a token's window over the FP8 ring, then its selected rows of
+  `AttnKeys.rows` in `s_rows` - FP4 compressed rows, or the drafter's block's own F32 - at most `max_sel`; a floor;
+  `k_wide` / `rows_wide` when a step unpacked them to F32, ops_kv_unpack's, the same bits; unit 0, one softmax) -
+  `ops_sparse_attn` as `attn_ds4` (`kernels/attn_core_latent.h`). 11 frozen cases (packed and unpacked, the window
+  alone, a floor, small and large tiles, 128 heads, the drafter's block). The forward's core and the drafter's.
+
+The drafters left: Inkling's MTP (`ink2_mtp_attn`) and Qwen's DFlash (`q4x_df_attn`) - Hy4's DFly2 and DeepSeek's
+drafter moved with their families.
+
 ## Proofs and checks
 
 - **Per kernel change:** a byte comparison against the old kernel on seeded inputs (`fa_bits`-style, every format,

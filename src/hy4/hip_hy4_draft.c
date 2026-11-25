@@ -230,8 +230,8 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   const uint32_t D = (uint32_t)g->n_embd, ql = (uint32_t)g->q_lora, lat = (uint32_t)g->kv_lora;
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, vd = (uint32_t)g->v_dim;
   for (int i = 0; i < HY4_DFLY_LAYERS; i++)
-    if (TARGETS[i] >= g->n_layers || g->sliding[TARGETS[i]])
-      return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers");
+    if (TARGETS[i] >= g->n_layers || g->sliding[TARGETS[i]] || g->n_heads[TARGETS[i]] != g->n_heads[TARGETS[0]])
+      return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers (each the same heads)");
   if (MASK_TOKEN >= g->n_vocab)
     return osmos_fail(err, "DFly2: its mask token past this model's vocabulary");
   if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads) */
@@ -374,7 +374,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, vd = (uint32_t)g->v_dim, qk = nope + rd;
   const uint32_t row = lat + rd, H = (uint32_t)g->n_heads[TARGETS[0]], V = (uint32_t)g->n_vocab;
   const uint32_t top = (uint32_t)(g->ix_topk / g->ix_pool), pool = (uint32_t)g->ix_pool;
-  const float eps = g->rms_eps, scale = 1.0f / sqrtf((float)qk);
+  const float eps = g->rms_eps;
   const GgufTensor *emb = f->w->embed;
   const uint64_t erow = emb->bytes / emb->dims[1];
   for (uint32_t j = 0; j < R; j++)
@@ -400,8 +400,10 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          hy4_dfly_sel(s->dsel + ((uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i) * top,
                       s->dn + (uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i, anchor, pool, top, R, d->cap, d->sel, d->n_sel,
                       f->st) &&
-         hy4_mla_attn(d->qa, s->cache[tl], 0, f->kv8, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
-                      d->olat, f->attn_part, false, f->st) &&
+         attn_core_run(f->mla[tl], &(AttnStep){.q = d->qa, .n_tok = R, .pos = d->pos, .sink = L->sinks, .out = d->olat,
+                                               .keys = {.k = s->cache[tl], .v = s->cache[tl], .sel = d->sel,
+                                                        .npick = d->n_sel, .stride = d->cap}},
+                       f->st) &&
          hy4_mla_out(d->olat, L->v_b, d->gt, H, lat, vd, R, d->ao, f->table, f->st) &&
          mat(f, d->wtype, L->o, D, H * vd, d->ao, R, d->out) &&
          ops_rms_add_rms(d->h, d->out, L->post_proj_norm, L->ffn_norm, eps, D, R, d->xn, f->st) &&

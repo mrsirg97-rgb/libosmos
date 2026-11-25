@@ -1,10 +1,16 @@
-// the attention core (osmos/gpu/attn_core.h): a desc checked whole at create, a step launched on its rows' kernels
-// (attn_core_kernel.h) - B2: Inkling's formats (F32, f16, Q8 records, Q8 keys with Q5 values)
+// the attention core (osmos/gpu/attn_core.h): a desc checked whole at create, a step launched on its family's kernels -
+// Inkling's (attn_core_kernel.h: F32, f16, Q8 records, Q8 keys with Q5 values), a heads block's (Qwen's, and apart
+// osmos1.7b's and q35's: attn_core_heads.h, attn_core_q35.h), Hy4's MLA (attn_core_mla.h), DeepSeek's latent
+// (attn_core_latent.h) and the drafters' blocks (attn_core_draft.h) - each moved whole, its bits (docs/attention-core.md
+// C1 - C3); one order and one precision across them next, a family at a time, by KL
 #include <hip/hip_runtime.h>
 
 #include <cstdlib>
 
+#include "attn_core_draft.h"
 #include "attn_core_heads.h"
+#include "attn_core_latent.h"
+#include "attn_core_mla.h"
 #include "attn_core_q35.h"
 #include "attn_core_kernel.h"
 
@@ -79,6 +85,115 @@ bool launch(const AttnCore& c, const AttnStep& s, const KV* k, const KV* v, hipS
   return false;
 }
 
+// MLA's rows (Hy4's: one latent row for every head, keys the row, values its latent)
+bool is_mla(const AttnCoreDesc& d) { return d.k_rows == ATTN_ROWS_MLA_F32 || d.k_rows == ATTN_ROWS_MLA_Q8; }
+
+// an MLA desc (hy4_mla_attn's bounds): its refusal, or nullptr
+const char* mla_bad(const AttnCoreDesc& d) {
+  const bool q8 = d.k_rows == ATTN_ROWS_MLA_Q8;
+  const uint32_t rope = d.dk > d.dv ? d.dk - d.dv : 0;
+  return d.v_rows != d.k_rows ? "v_rows: MLA's the keys' rows (its latent)"
+         : !d.heads || d.kv_heads != 1 ? "kv_heads: MLA's one latent row for every head (1)"
+         : !d.dv || d.dv > HY4_MLA_MAX_LATENT || d.dv % (q8 ? 32 : 4) ? "dv: the latent 4 .. HY4_MLA_MAX_LATENT (Q8: whole blocks)"
+         : !rope || rope > mla::kMaxRope || rope % 4 ? "dk: the latent and a rope part of 4 .. 128"
+         : q8 && mla::mla_row_bytes(d.dv, rope, true) % 16 ? "dk: a Q8 row not whole 16 bytes"
+         : d.term != ATTN_TERM_NONE ? "term: MLA's none"
+         : d.sink != ATTN_SINK_HEAD ? "sink: MLA's a head's logit"
+         : d.gate != ATTN_GATE_NONE ? "gate: MLA's none (hy4_mla_out's, after)"
+         : d.unit != attn_hy4::kSplitKeys ? "unit: MLA's 32 (its splits: its bits)"
+         : !d.apart ? "apart: MLA's prompt and decode read apart"
+         : d.window > HY4_MLA_MAX_KEYS ? "window: past HY4_MLA_MAX_KEYS"
+         : d.slots && d.slots < d.window ? "slots: a ring short of its window"
+         : d.ratio && d.window ? "ratio: groups under no window"
+         : d.max_keys > HY4_MLA_MAX_KEYS ? "max_keys: past HY4_MLA_MAX_KEYS"
+                                          : nullptr;
+}
+
+// an MLA step: hy4_mla_attn's, as its callers had it - a read by mla_mm, else the splits
+bool mla_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
+  const AttnCoreDesc& d = c.d;
+  const AttnKeys& k = s.keys;
+  if (!s.pos || !s.sink || k.k != k.v || k.lists || (k.sel != nullptr) != (d.ratio != 0) ||
+      (k.sel && (!k.npick || !k.stride || (uint64_t) k.stride * d.ratio > d.max_keys)) || s.x16 || !s.n_tok ||
+      s.n_tok > d.max_tokens)
+    return false;
+  return attn_hy4::run(s.q, k.k, d.slots, d.k_rows == ATTN_ROWS_MLA_Q8, s.sink, d.heads, d.dv, d.dk - d.dv, d.window,
+                       k.sel, k.npick, k.stride, d.ratio, d.scaling, s.pos, s.n_tok, s.out, c.part, s.read, stream);
+}
+
+// a latent's rows (DeepSeek's: one row a key, its value the same row, for every head)
+bool is_latent(const AttnCoreDesc& d) { return d.k_rows == ATTN_ROWS_FP8; }
+
+// a latent desc (ops_sparse_attn's bounds): its refusal, or nullptr
+const char* latent_bad(const AttnCoreDesc& d) {
+  return d.kv_heads != 1 ? "kv_heads: a latent's one row for every head (1)"
+         : !d.heads || d.heads % attn_ds4::kHeads ? "heads: whole blocks of 64"
+         : d.dv != d.dk ? "dv: a latent's value its key's row"
+         : !d.dk || d.dk % attn_ds4::kVdims || d.dk % attn_ds4::kStep ? "dk: whole blocks of 256"
+         : d.v_rows != ATTN_ROWS_FP8 ? "v_rows: a latent's its keys' (FP8)"
+         : !d.window || d.window > OPS_MAX_WINDOW ? "window: 1 .. OPS_MAX_WINDOW"
+         : d.slots < d.window ? "slots: a ring short of its window"
+         : d.max_sel > OPS_MAX_SELECT ? "max_sel: past OPS_MAX_SELECT"
+         : d.s_rows != ATTN_ROWS_FP4 && d.s_rows != ATTN_ROWS_F32 ? "s_rows: a latent's selected rows FP4 or F32"
+         : d.term != ATTN_TERM_NONE ? "term: a latent's none"
+         : d.sink != ATTN_SINK_HEAD ? "sink: a latent's a head's logit"
+         : d.gate != ATTN_GATE_NONE ? "gate: a latent's none"
+         : d.unit ? "unit: a latent's 0 (one softmax over a query's keys: its bits)"
+         : d.apart ? "apart: a latent's one kernel for its prompt and its decode"
+         : d.ratio ? "ratio: a latent's selection its rows', not blocks"
+         : d.max_keys < d.window + d.max_sel ? "max_keys: short of the window and its selected rows"
+                                             : nullptr;
+}
+
+// a latent step: ops_sparse_attn's, as its callers had it (the rows unpacked a step's choice: the same bits)
+bool latent_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
+  const AttnCoreDesc& d = c.d;
+  const AttnKeys& k = s.keys;
+  if (!s.pos || !s.sink || k.k != k.v || k.lists || !s.n_tok || s.n_tok > d.max_tokens || k.floor < 0 || s.x16 ||
+      (k.rows && (!k.sel || !k.npick || k.stride < d.max_sel || !d.max_sel)) || (!k.rows && k.sel))
+    return false;
+  const uint32_t rfmt = k.k_wide ? KV_F32 : KV_FP8;
+  const uint32_t fmt = k.rows_wide || d.s_rows == ATTN_ROWS_F32 ? KV_F32 : KV_FP4_E4M3;
+  return attn_ds4::run(s.q, k.k, rfmt, d.slots, s.pos, d.window, k.floor, k.rows, fmt, k.rows ? k.sel : nullptr,
+                       k.rows ? k.npick : nullptr, k.rows ? k.stride : 0, k.rows ? d.max_sel : 0, s.sink, d.scaling,
+                       d.heads, d.dk, s.n_tok, c.part, s.out, stream);
+}
+
+// a drafter's block desc (Inkling's MTP: an f16 ring; Qwen's DFlash: an F32 ring): its refusal, or nullptr
+const char* draft_bad(const AttnCoreDesc& d) {
+  const bool mtp = d.k_rows == ATTN_ROWS_F16;
+  const uint32_t G = d.kv_heads && !(d.heads % d.kv_heads) ? d.heads / d.kv_heads : 0;
+  return d.dk != d.dv || d.dk != INK2_MTP_HEAD || d.dk != Q4X_DF_HEAD ? "dk / dv: a drafter's heads of 128"
+         : !G ? "kv_heads: not a group of heads"
+         : (d.k_rows != ATTN_ROWS_F16 && d.k_rows != ATTN_ROWS_F32) || d.v_rows != d.k_rows
+             ? "k_rows / v_rows: a drafter's ring f16 (Inkling's MTP) or F32 (Qwen's DFlash)"
+         : !d.max_tokens ? "max_tokens: 0"
+         : mtp && (uint64_t) d.max_tokens * G > attn_mtp::kRows ? "max_tokens: a block's rows past the MTP's 48"
+         : !d.slots ? "slots: the ring's rows"
+         : !mtp && (!d.window || d.window < d.max_tokens) ? "window: DFlash's at least its block"
+         : !mtp && ((uint64_t) d.slots + d.max_tokens) * sizeof(float) > 65536 ? "slots: past the LDS DFlash's scores take"
+         : d.term != ATTN_TERM_NONE ? "term: a drafter's none"
+         : d.sink != ATTN_SINK_NONE ? "sink: a drafter's none"
+         : d.gate != ATTN_GATE_NONE ? "gate: a drafter's none"
+         : d.unit ? "unit: a drafter's 0 (its family's split: its bits)"
+         : d.ratio ? "ratio: a drafter's no picks"
+                   : nullptr;
+}
+
+// a drafter's step: its family's kernel as its caller had it - the context from keys.key0 to the block, then its own
+bool draft_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
+  const AttnCoreDesc& d = c.d;
+  const AttnKeys& k = s.keys;
+  if (!k.own_k || !k.own_v || !s.n_tok || s.n_tok > d.max_tokens || k.key0 > s.pos0 || k.lists || k.sel || s.x16 ||
+      s.pos0 > (uint32_t) INT32_MAX)
+    return false;
+  if (d.k_rows == ATTN_ROWS_F16)
+    return attn_mtp::run(s.q, s.n_tok, (int32_t) s.pos0, k.own_k, k.own_v, (const uint16_t*) k.k, (const uint16_t*) k.v,
+                         d.slots, (int32_t) k.key0, d.heads, d.kv_heads, d.window, c.part, s.out, stream);
+  return attn_df::run(s.q, s.n_tok, (int32_t) s.pos0, k.own_k, k.own_v, (const float*) k.k, (const float*) k.v, d.slots,
+                      (int32_t) k.key0, d.heads, d.kv_heads, d.window, s.out, stream);
+}
+
 // a heads block's desc (Qwen's; osmos1.7b's and q35's, apart): its refusal, or nullptr
 const char* heads_bad(const AttnCoreDesc& d) {
   const uint32_t G = d.kv_heads && !(d.heads % d.kv_heads) ? d.heads / d.kv_heads : 0;
@@ -89,7 +204,7 @@ const char* heads_bad(const AttnCoreDesc& d) {
          : d.apart && !decode_g ? "group: an apart family's decode's 1, 2, 4, 6 or 8 a KV head"
          : d.k_rows != ATTN_ROWS_Q8_0 || d.v_rows != ATTN_ROWS_Q8_0 ? "k_rows / v_rows: a heads block's Q8_0"
          : d.term != ATTN_TERM_NONE ? "term: a heads block's none"
-         : d.sink ? "sink: a heads block's none"
+         : d.sink != ATTN_SINK_NONE ? "sink: a heads block's none"
          : d.gate == ATTN_GATE_NONE ? "gate: a heads block's a value's or a head's"
          : d.slots && (!d.window || d.slots < d.window + d.max_tokens - 1) ? "slots: a ring of the window and a step past it"
          : d.ratio == 1 || (d.ratio && attn_q4x::kChunk % d.ratio) ? "ratio: picks' blocks of 2 or more, a chunk's divisor"
@@ -147,6 +262,11 @@ bool heads_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
 
 extern "C" uint64_t attn_core_scratch(const AttnCoreDesc* d) {
   if (!d) return 0;
+  if (d->block == ATTN_BLOCK_DRAFT)  // the MTP's spans' partials; DFlash's in its LDS
+    return d->k_rows == ATTN_ROWS_F16 ? attn_mtp::scratch_bytes(d->max_tokens, d->heads, d->kv_heads) : 0;
+  if (d->block == ATTN_BLOCK_HEADS && is_mla(*d)) return attn_hy4::scratch_floats(d->heads) * sizeof(float);
+  if (d->block == ATTN_BLOCK_HEADS && is_latent(*d))
+    return OPS_ATTN_SCRATCH(d->max_tokens, d->heads, (uint64_t) d->window + d->max_sel) * sizeof(float);
   if (d->block == ATTN_BLOCK_HEADS) {  // the prompt's (q4x_attn's) and, apart, the decode's (q35_attn's): one at a time
     const uint64_t p = attn_q4x::scratch_floats(d->heads, d->kv_heads, d->dk, d->max_keys),
                    q = d->apart ? attn_q35::scratch_floats(d->heads, Q35_ATTN_DECODE_MAX) : 0;
@@ -159,8 +279,18 @@ extern "C" uint64_t attn_core_scratch(const AttnCoreDesc* d) {
 extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint64_t scratch_bytes,
                                       char err[OSMOS_ERR]) {
   if (!d) return refuse(err, "no desc"), nullptr;
+  if (d->block == ATTN_BLOCK_DRAFT) {
+    const char* bad = draft_bad(*d);
+    const uint64_t need = bad ? 0 : attn_core_scratch(d);
+    if (!bad && need && (!scratch || scratch_bytes < need)) bad = "max_tokens: past the scratch given";
+    if (bad) return refuse(err, bad), nullptr;
+    AttnCore* c = (AttnCore*) std::calloc(1, sizeof *c);
+    if (!c) return refuse(err, "out of memory"), nullptr;
+    c->d = *d, c->part = (float*) scratch;
+    return c;
+  }
   if (d->block == ATTN_BLOCK_HEADS) {
-    const char* bad = heads_bad(*d);
+    const char* bad = is_mla(*d) ? mla_bad(*d) : is_latent(*d) ? latent_bad(*d) : heads_bad(*d);
     if (!bad && !d->max_tokens) bad = "max_tokens: 0";
     if (!bad && !d->max_keys) bad = "max_keys: 0";
     if (!bad && (!scratch || scratch_bytes < attn_core_scratch(d))) bad = "max_keys: past the scratch given";
@@ -182,7 +312,7 @@ extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint
                     : d->d_rel != ATTN_REL ? "d_rel: ATTN_REL alone"
                     : !d->extent || d->extent > ATTN_EXTENT_MAX ? "extent: 1 .. ATTN_EXTENT_MAX"
                     : d->window % ATTN_TILE ? "window: a whole number of tiles"
-                    : !d->sink ? "sink: a sink logit alone (B2: Inkling's)"
+                    : d->sink != ATTN_SINK_TOKEN ? "sink: a (token, head)'s logit alone (B2: Inkling's)"
                     : d->gate == ATTN_GATE_HEAD ? "gate: a value's or none (B2: Inkling's)"
                     : d->block != ATTN_BLOCK_TOKENS ? "block: not a block made"
                     : !d->max_tokens ? "max_tokens: 0"
@@ -202,6 +332,9 @@ extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream
   if (!c || !s || !s->q || !s->out || !s->keys.k || !s->keys.v) return false;
   const AttnCoreDesc& d = c->d;
   const AttnKeys& k = s->keys;
+  if (d.block == ATTN_BLOCK_DRAFT) return draft_launch(*c, *s, (hipStream_t) stream);
+  if (d.block == ATTN_BLOCK_HEADS && is_mla(d)) return mla_launch(*c, *s, (hipStream_t) stream);
+  if (d.block == ATTN_BLOCK_HEADS && is_latent(d)) return latent_launch(*c, *s, (hipStream_t) stream);
   if (d.block == ATTN_BLOCK_HEADS) {  // positions from key0 (the cache's rows), or picks of them
     if (!s->n_tok || s->n_tok > d.max_tokens || k.key0 || k.n_keys > d.max_keys || !s->gate ||
         (!k.lists && !d.slots && s->pos0 + s->n_tok > k.n_keys) || (k.lists && (!k.counts || !k.stride || k.sel)) ||

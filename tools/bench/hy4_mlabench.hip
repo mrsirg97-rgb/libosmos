@@ -12,6 +12,7 @@
 #include <random>
 #include <vector>
 
+#include "attn_core_call.h"
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
 }
@@ -60,7 +61,7 @@ int main() {
     int32_t *dp, *dsel = nullptr, *dn = nullptr;
     CHECK(hipMalloc(&dq, q.size() * 4) == hipSuccess && hipMalloc(&ds, H * 4) == hipSuccess &&
           hipMalloc(&dout, (size_t) T * H * lat * 4) == hipSuccess && hipMalloc(&dp, T * 4) == hipSuccess &&
-          hipMalloc(&scr, hy4_mla_attn_scratch(H) * 4) == hipSuccess);
+          hipMalloc(&scr, 1 * 4) == hipSuccess);
     CHECK(hipMemcpy(dq, q.data(), q.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
     CHECK(hipMemcpy(ds, sinks.data(), H * 4, hipMemcpyHostToDevice) == hipSuccess);
     CHECK(hipMemcpy(dp, pos.data(), T * 4, hipMemcpyHostToDevice) == hipSuccess);
@@ -74,7 +75,7 @@ int main() {
       for (int r = 0; r < 6; r++) {
         CHECK(hipDeviceSynchronize() == hipSuccess);
         const auto t0 = std::chrono::steady_clock::now();
-        CHECK(hy4_mla_attn(dq, dc, 0, true, ds, H, lat, rd, window, dsel, dn, sparse ? top : 0, sparse ? pool : 0,
+        CHECK(core_hy4_mla_attn(dq, dc, 0, true, ds, H, lat, rd, window, dsel, dn, sparse ? top : 0, sparse ? pool : 0,
                            0.0625f, dp, T, dout, scr, !exact, nullptr));
         CHECK(hipDeviceSynchronize() == hipSuccess);
         if (r) ms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());

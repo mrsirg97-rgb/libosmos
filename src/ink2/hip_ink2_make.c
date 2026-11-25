@@ -70,7 +70,7 @@ static AttnCoreDesc attn_desc(const Ink2Forward *f, bool full)
                         .term = ATTN_TERM_REL,
                         .d_rel = (uint32_t)g->d_rel,
                         .extent = full ? (uint32_t)g->rel_extent : window,
-                        .sink = true,
+                        .sink = ATTN_SINK_TOKEN,
                         .gate = ATTN_GATE_VALUE,
                         .block = ATTN_BLOCK_TOKENS,
                         .max_tokens = f->max_tokens,
@@ -227,6 +227,8 @@ void ink2_forward_destroy(Ink2Forward *f)
   }
   hipDeviceSynchronize();
   attn_core_destroy(f->attn[0]), attn_core_destroy(f->attn[1]);
+  for (int l = 0; l < INK2_MTP_MAX_LAYERS; l++)
+    attn_core_destroy(f->md.attn[l]);
   membrane_destroy(f->mem);
   host_slots_destroy(f->slots), host_slots_destroy(f->stream);
   for (int i = 0; f->fds && i < f->w->model->n_files; i++)

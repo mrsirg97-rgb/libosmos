@@ -164,9 +164,6 @@ bool q4x_df_rope(float *x, uint32_t n_tok, uint32_t heads, uint32_t stride, cons
 bool q4x_df_conv(const float *x, uint32_t n_tok, uint32_t dim, uint32_t group, const float *base, const float *dyn,
                  uint32_t dyn_stride, float *y, void *stream);
 bool q4x_df_ring(float *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0, void *stream);
-bool q4x_df_attn(const float *q, uint32_t n_q, int32_t pos0, const float *kb, const float *vb, const float *kr,
-                 const float *vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads, uint32_t window,
-                 float *out, void *stream);
 bool q4x_df_topk(const float *logits, uint32_t rows, uint32_t vocab, uint32_t k, float *val, int32_t *idx, void *stream);
 bool q4x_df_select(const float *val, const int32_t *idx, uint32_t rows, uint32_t k, const float *hp, uint32_t rank,
                    const void *pred, const void *succ, int32_t anchor, int32_t *path, void *stream);
@@ -208,12 +205,9 @@ q4x_df_ring
   more rows than the ring: only the newest ring_rows written (each slot once).
 
 q4x_df_attn
-  the drafter's attention for a block: n_q queries (q [n_q][heads][Q4X_DF_HEAD]) at positions pos0 .. pos0 + n_q,
-  against the context's keys and values in the ring (kr, vr: a position p at row p % ring_rows, [kv_heads][..]) for
-  positions ctx_from .. pos0, and the block's own (kb, vb [n_q][kv_heads][Q4X_DF_HEAD]): a key visible to query i
-  when its position is within `window` of i's either way (not causal). head h reads KV head h / (heads / kv_heads).
-  scores q.k / sqrt(Q4X_DF_HEAD) in F32, a softmax (its max first), out [n_q][heads][Q4X_DF_HEAD]. ctx_from must be
-  pos0 - ring_rows or later (the ring holds no older).
+  moved into the attention core (osmos/gpu/attn_core.h's ATTN_BLOCK_DRAFT: kernels/attn_core_draft.h, its bits) - a
+  desc of the ring's F32 rows, slots its rows, the window (at least the block); a step's keys.key0 the context's
+  first position, own_k / own_v the block's
 
 q4x_df_topk
   each of rows rows' (vocab logits, a row vocab apart) k greatest (k at most Q4X_DF_TOPK): val[r][j], idx[r][j]
