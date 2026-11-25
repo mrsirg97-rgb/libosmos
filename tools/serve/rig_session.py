@@ -17,6 +17,7 @@ import sqlite3
 import sys
 
 EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+SCOPES = re.compile(r"(Token scopes:)[^\n]*")  # gh auth status: what a token may do
 TOKEN = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|hf_[A-Za-z0-9]{20,})\b")
 
 
@@ -26,7 +27,7 @@ class Sanitizer:
     def __init__(self, names, home):
         self.names = sorted({n for n in names if n}, key=len, reverse=True)  # the longest first: a handle before its stem
         self.home = home.rstrip("/") if home else None
-        self.count = {"email": 0, "token": 0, "home": 0, "name": 0}
+        self.count = {"email": 0, "token": 0, "scopes": 0, "home": 0, "name": 0}
 
     def __call__(self, s):
         if not isinstance(s, str):
@@ -35,6 +36,8 @@ class Sanitizer:
         self.count["email"] += n
         s, n = TOKEN.subn("<token>", s)
         self.count["token"] += n
+        s, n = SCOPES.subn(r"\1 <scopes>", s)
+        self.count["scopes"] += n
         if self.home:
             n = s.count(self.home)
             s = s.replace(self.home, "/home/user")
