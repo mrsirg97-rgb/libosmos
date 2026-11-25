@@ -426,7 +426,7 @@ int main() {
       if (core) {
         const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, {k, v, k0, nk, nullptr, nullptr, nullptr, nullptr, 0},
                              dr + (uint64_t) s * H * R, drp, ds + (uint64_t) s * H, g ? g + (uint64_t) s * H * D : nullptr,
-                             o, x16, ov, 0};
+                             o, x16, ov, 0, false};
         ok = attn_core_run(core, &st, nullptr) && hipDeviceSynchronize() == hipSuccess;
       }
       attn_core_destroy(core), hipFree(sc);

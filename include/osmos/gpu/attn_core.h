@@ -77,6 +77,10 @@ typedef struct AttnCoreDesc
   AttnBlock block;
   uint32_t ratio;           /* picks' blocks of keys (0: no picks; ATTN_BLOCK_HEADS alone) */
   uint32_t unit;            /* a unit's keys, a multiple of ATTN_TILE (0: ATTN_UNIT); a family's, fixed with its bits */
+  uint32_t slots;           /* the cache's rows: 0 a row a position, else a ring (a position's row position % slots: at
+                               least the window and a step's tokens past it) */
+  bool apart;               /* a family whose prompt and decode read apart (osmos1.7b's, q35's): the step's read picks
+                               the prompt's kernel or the decode's, each its own bits; else one kernel for both */
   uint32_t max_tokens;      /* a step's queries at most */
   uint32_t max_keys;        /* a query's keys at most (positions: the context; lists: their stride) */
 } AttnCoreDesc;
@@ -118,6 +122,7 @@ typedef struct AttnStep
   void *x16;                   /* out also as mm_x16 lays it (NULL: not): its rows x16_row0 .. */
   int32_t *overflow;           /* x16's flag (mm_x16's) */
   uint32_t x16_row0;           /* the step's first row in x16 (a sequence's among a step's) */
+  bool read;                   /* a prompt's step (the desc's apart: its kernel; else unread) */
 } AttnStep;
 
 /* the step on stream; false (nothing written) when it is past the core's desc: more tokens or keys, a list with

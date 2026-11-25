@@ -29,7 +29,7 @@ inline bool attn_core_call(uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
   AttnCore* c = attn_core_create(&d, scratch, have, err);
   if (!c) return false;
   const AttnStep s = {q,    n_tok,    key0 + n_keys - n_tok, {k, v, key0, n_keys, nullptr, nullptr, nullptr, nullptr, 0},
-                      rel,  rel_proj, sink, gate, out, nullptr, nullptr, 0};
+                      rel,  rel_proj, sink, gate, out, nullptr, nullptr, 0, false};
   const bool ok = attn_core_run(c, &s, stream);
   attn_core_destroy(c);
   return ok;

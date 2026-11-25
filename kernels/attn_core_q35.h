@@ -1,9 +1,11 @@
-// a decode step's attention (q35_attn_decode): flash decoding over the Q8_0 cache (q4x_kv_put's rows), every key a
+// the attention core's decode and LSA read for the reads-apart families (osmos1.7b, q35: attn_core.h's apart), as
+// q35_attn.hip had it, moved whole. a decode step's attention (q35_attn_decode): flash decoding over the Q8_0 cache (q4x_kv_put's rows), every key a
 // token's own position or before. a warp a run of keys of one KV head for one token - its lanes a key's 256 dims, 8
 // each (a load's 8 int8 within one Q8_0 block, its f16 scale), the KV head's G query heads' scores summed across the
 // warp, an online softmax a head and O's 8 dims a lane a head; each warp's (max, sum, O) to scratch, then a merge
 // block a (token, query head): the warps in order, the gate's sigmoid on the result (q4x_attn's). F32 throughout
 // (fa_kernel's f16 Q, K, V and P not taken): q35's own bits. q4x_attn's prefill unchanged
+#pragma once
 #include <hip/hip_runtime.h>
 
 #include <cmath>
@@ -11,10 +13,13 @@
 
 #include "block.h"
 #include "launch.h"
+extern "C" {
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
+}
 
-namespace {
+namespace attn_q35 {
+
 
 constexpr int kGMax = Q35_ATTN_GQA_MAX, kWarps = 4;
 constexpr int kHeadWide = Q4X_HEAD_DIM, kHeadNarrow = Q4X_QK_HEAD_NARROW;  // Qwen's 256, LFM3's 128
@@ -132,14 +137,9 @@ __global__ __launch_bounds__(HD) void merge_kernel(const float* ml, const float*
   out[i] = acc / sum * sigmoid(gate[i / gate_span]);
 }
 
-}  // namespace
-
-extern "C" uint64_t q35_attn_decode_scratch(uint32_t heads, uint32_t max_tokens) {
-  return (uint64_t) max_tokens * heads * Q35_ATTN_PARTS * (kHeadWide + 2);  // the widest head's
-}
 
 template <int HD>
-static bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_t n_tok, uint32_t heads,
+inline bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_t n_tok, uint32_t heads,
                    uint32_t kv_heads, uint32_t pos0, uint32_t window, uint32_t slots, uint32_t gate_span,
                    const uint32_t* list, const uint32_t* list_len, uint32_t len, const float* gate, float* scratch,
                    float* out, hipStream_t s) {
@@ -176,7 +176,7 @@ static bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_
   return launches::ok();
 }
 
-static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
+inline bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
                 uint32_t dim, const AttnShape* shape, uint32_t pos0, const uint32_t* list, const uint32_t* list_len,
                 uint32_t list_max, const float* gate, float* scratch, float* out, void* stream) {
   const AttnShape sh = shape ? *shape : AttnShape{1, 0, 0};
@@ -198,14 +198,5 @@ static bool run(const float* q, const void* kc, const void* vc, uint32_t n_tok, 
                                    list_len, len, gate, scratch, out, s);
 }
 
-extern "C" bool q35_attn_decode(const float* q, const void* kc, const void* vc, uint32_t n_tok, uint32_t heads,
-                                uint32_t kv_heads, uint32_t dim, const AttnShape* shape, uint32_t pos0,
-                                const float* gate, float* scratch, float* out, void* stream) {
-  return run(q, kc, vc, n_tok, heads, kv_heads, dim, shape, pos0, nullptr, nullptr, 0, gate, scratch, out, stream);
-}
 
-extern "C" bool q35_attn_read(const float* q, const void* kc, const void* vc, uint32_t heads, uint32_t kv_heads,
-                              uint32_t dim, const AttnShape* shape, const uint32_t* list, const uint32_t* list_len,
-                              uint32_t list_max, const float* gate, float* scratch, float* out, void* stream) {
-  return run(q, kc, vc, 1, heads, kv_heads, dim, shape, 0, list, list_len, list_max, gate, scratch, out, stream);
-}
+}  // namespace attn_q35

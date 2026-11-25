@@ -180,7 +180,7 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* the layer kind's core (its rows: a full layer's Q8 keys, Q5 or Q8 values - Ink2Options' values_q8; a window's
        f16): the step's queries at pos, its keys from pos0 */
     const AttnStep step = {f->q, n, pos, {keys, vals, pos0, n_keys, NULL, NULL, NULL, NULL, 0}, f->rel, d->rel_proj, f->sink, f->gate,
-                           f->att, att16 ? f->x16 : NULL, att16 ? f->overflow : NULL, 0};
+                           f->att, att16 ? f->x16 : NULL, att16 ? f->overflow : NULL, 0, false};
     const bool attended = attn_core_run(f->attn[full], &step, f->st);
     GPU(attended);
     ink2_pf(f, full ? PF_FULL : PF_ATTN);
