@@ -4,6 +4,7 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3_step.c (the step) */
 
+#include "osmos/gpu/attn_core.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/lsa_ops.h"
@@ -41,7 +42,8 @@ struct Lfm3Forward
   bool *in_joint;     /* a tensor's bytes inside a joint (not freed alone) */
   float *jo;          /* a joint's outputs (a token's) */
   void *x16;          /* a read's matrices' f16 input (a step's rows, whole tiles, of the widest: mm_x16_whole once) */
-  float *fa_scratch;  /* a read's attention's (q4x_attn: the matrix cores'), q4x_attn_scratch_dim floats */
+  float *fa_scratch;  /* the attention cores' scratch (borrowed by both: attn_core_scratch, a step's one at a time) */
+  AttnCore *attn[2];  /* a full layer's attention, a sliding layer's (its window over the ring) */
   /* latent sparse attention (Lfm3Options' lsa): a full layer's maps (device, lsa_in x LSA_DIM), the read's scratch,
      a query's index and read (device), a block's index vectors, centroids and buckets on the host (Ward's) */
   bool lsa;
@@ -66,7 +68,7 @@ struct Lfm3Forward
   void *st;
   /* a step's buffers: max_tokens rows each */
   int32_t *tok, *pin_tok;
-  float *h, *xn, *y, *bcx, *u, *qf, *kf, *vf, *qr, *kr, *g, *att, *ga, *up, *act, *attn_scratch;
+  float *h, *xn, *y, *bcx, *u, *qf, *kf, *vf, *qr, *kr, *g, *att, *ga, *up, *act;
   float *xf, *logits, *pin_logits; /* the kept rows' final norm and logits */
   float *hk;                        /* the kept rows' residuals, gathered */
   int32_t *slot;                    /* each row of the last step its logits' row, -1 not kept (host) */

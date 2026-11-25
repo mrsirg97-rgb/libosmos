@@ -36,6 +36,7 @@ void q35_forward_destroy(Q35Forward *f)
   if (!f)
     return;
   gpu_free_table(f->ledger, f->w->model, f->dev, NULL);
+  attn_core_destroy(f->attn);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made - the step's, LSA's maps and read, the
                               pins: from the record */
   free(f->slot);
@@ -133,14 +134,28 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2ull * g->ssm_groups * g->ssm_state + in;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
   const uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down */
+  const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads,
+                           .kv_heads = (uint32_t)g->n_kv_heads,
+                           .dk = (uint32_t)g->head_dim,
+                           .dv = (uint32_t)g->head_dim,
+                           .k_rows = ATTN_ROWS_Q8_0,
+                           .v_rows = ATTN_ROWS_Q8_0,
+                           .scaling = 1.0f / sqrtf((float)g->head_dim),
+                           .term = ATTN_TERM_NONE,
+                           .gate = ATTN_GATE_VALUE,
+                           .block = ATTN_BLOCK_HEADS,
+                           .unit = 128,
+                           .apart = true,
+                           .max_tokens = max_tokens,
+                           .max_keys = max_ctx};
+  const uint64_t scratch = attn_core_scratch(&ad);
   const GpuWant want[] = {
       {&f->h, n * D * F},       {&f->xn, n * D * F},  {&f->out, n * D * F},     {&f->qkv, n * ch * F},
       {&f->z, n * in * F},      {&f->al, n * vh * F}, {&f->be, n * vh * F},     {&f->g, n * vh * F},
       {&f->b, n * vh * F},      {&f->cv, n * ch * F}, {&f->qkn, n * 2 * g->ssm_groups * g->ssm_state * F},
       {&f->ro, n * in * F},     {&f->fo, n * in * F}, {&f->qf, n * 2 * q * F},  {&f->kr, n * kv * F},
       {&f->vr, n * kv * F},     {&f->q, n * q * F},   {&f->gt, n * q * F},      {&f->kq, n * kv * F},
-      {&f->ao, n * q * F},      {&f->fa, q4x_attn_scratch((uint32_t)g->n_heads, max_ctx) * F},
-      {&f->da, q35_attn_decode_scratch((uint32_t)g->n_heads, Q35_ATTN_DECODE_MAX) * F},
+      {&f->ao, n * q * F},      {&f->fa, scratch},
       {&f->ga, n * ff * F},     {&f->up, n * ff * F}, {&f->y, n * ff * F},      {&f->logits, lr * g->n_vocab * F},
       {&f->hx, lr * D * F},     {&f->ids, lr * 4},    {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
       {&f->tok, n * 4},         {&f->overflow, 4},    {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2},
@@ -148,6 +163,7 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   bool ok = q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, max_ctx, Q4X_THETA_GGML, &f->rope) && upload(f, err);
   ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
+  ok = ok && (f->attn = attn_core_create(&ad, f->fa, scratch, err)) != NULL;
   f->head_type = w->output->type;
   ok = ok && head_q8(f, err) && (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) &&
        q35_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && q35_pinned(&f->bufs, &f->pin_tok, n * 4) &&

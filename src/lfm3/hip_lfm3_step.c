@@ -130,7 +130,6 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
   const uint32_t H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
   const uint32_t q = H * hd, kv = KV * hd, P = (uint32_t)R->s->pos, n = R->len;
   const LsaDims fd = lfm3_free_dims(g);
-  const AttnShape shape = {hd, 0, 0};
   Lfm3Seq *s = R->s;
   *dense = n;
   if (!lsa_index_gpu(f->kr + (uint64_t)R->off * kv, n, kv, KV, 1, hd, &fd, f->wk[l], true,
@@ -145,11 +144,18 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     if (!m)
       return true;
     const uint64_t at = (uint64_t)R->off + d;
+    const AttnStep st = {.q = f->qr + at * q,
+                         .n_tok = m,
+                         .pos0 = P + d,
+                         .keys = {.k = s->kc[l], .v = s->vc[l], .n_keys = P + n, .lists = f->lists, .counts = f->counts,
+                                  .stride = LSA_READ_MAX},
+                         .gate = gt + at * H,
+                         .out = f->att + at * q,
+                         .read = true};
     return lsa_index_gpu(f->qr + at * q, m, q, KV, H / KV, hd, &fd, f->wq[l], false, f->iqb, f->st) &&
            lsa_read_batch_gpu(f->iqb, m, P + d, s->cent[l], s->mem[l], (P + n) / LSA_WINDOW, f->lsa_sc, f->sub_n,
                               f->max_buckets, f->lists, f->counts, f->st) &&
-           q4x_attn_lists(f->qr + at * q, s->kc[l], s->vc[l], m, H, KV, hd, f->lists, f->counts, LSA_READ_MAX,
-                          gt + at * H, &shape, f->att + at * q, f->st);
+           attn_core_run(f->attn[0], &st, f->st);
   }
   if (P + n <= f->sparse_from) /* a decode below sparse_from: the dense attention's, as a prompt's rows there (its
                                   blocks still closed: the reads past it) - LSA's read every step cost 6% of decode */
@@ -162,8 +168,15 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     if (!close_blocks(f, s, l, want, closed) ||
         !lsa_index_gpu(f->qr + at * q, 1, q, KV, H / KV, hd, &fd, f->wq[l], false, f->iq, f->st) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], want, f->lsa_s, f->list, f->list_n, f->st) ||
-        !q35_attn_read(f->qr + at * q, s->kc[l], s->vc[l], H, KV, hd, &shape, f->list, f->list_n, LSA_READ_MAX,
-                       gt + at * H, f->attn_scratch, f->att + at * q, f->st))
+        !attn_core_run(f->attn[0],
+                       &(AttnStep){.q = f->qr + at * q,
+                                   .n_tok = 1,
+                                   .pos0 = P + t,
+                                   .keys = {.k = s->kc[l], .v = s->vc[l], .n_keys = P + t + 1, .lists = f->list,
+                                            .counts = (const int32_t *)f->list_n, .stride = LSA_READ_MAX},
+                                   .gate = gt + at * H,
+                                   .out = f->att + at * q},
+                       f->st))
       return false;
     closed = want > closed ? want : closed;
   }
@@ -178,7 +191,6 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
   const uint32_t D = (uint32_t)g->n_embd, H = (uint32_t)g->n_heads, KV = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = H * hd, kv = KV * hd;
   const bool sliding = g->kind[l] == LFM3_SLIDING;
-  const AttnShape shape = {hd, sliding ? (uint32_t)g->window : 0, sliding ? f->ring : 0};
   /* q, k, v and the gate on xn: a token's one joint launch (their outputs in jo, one after another), else each */
   const bool joint = n == 1 && !read && f->j_attn[l];
   float *qf = joint ? f->jo : f->qf, *kf = joint ? f->jo + q : f->kf, *vf = joint ? f->jo + q + kv : f->vf;
@@ -200,19 +212,15 @@ static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, 
       ok = lsa_attention(f, R, l, gt, read, &dense);
     if (!dense)
       continue;
-    if (read) /* a prompt's: the run's step on the matrix cores (q4x_attn: f16 q, k, v and weights) */
-    {
-      ok = ok && q4x_attn(f->qr + o * q, R->s->kc[l], R->s->vc[l], dense, H, KV, hd, (uint32_t)R->s->pos,
-                          gt + o * H, NULL, &shape, f->fa_scratch, f->att + o * q, NULL, f->st);
-      continue;
-    }
-    for (uint32_t t0 = 0; ok && t0 < R->len; t0 += Q35_ATTN_DECODE_MAX)
-    {
-      const uint32_t m = R->len - t0 < Q35_ATTN_DECODE_MAX ? R->len - t0 : Q35_ATTN_DECODE_MAX;
-      ok = q35_attn_decode(f->qr + (o + t0) * q, R->s->kc[l], R->s->vc[l], m, H, KV, hd, &shape,
-                           (uint32_t)R->s->pos + t0, gt + (o + t0) * H, f->attn_scratch, f->att + (o + t0) * q,
-                           f->st);
-    }
+    /* the layer kind's core: a prompt's (a read) the matrix cores' over its dense rows, a decode's flash decoding */
+    const AttnStep st = {.q = f->qr + o * q,
+                         .n_tok = read ? dense : R->len,
+                         .pos0 = (uint32_t)R->s->pos,
+                         .keys = {.k = R->s->kc[l], .v = R->s->vc[l], .n_keys = sliding ? f->ring : f->max_ctx},
+                         .gate = gt + o * H,
+                         .out = f->att + o * q,
+                         .read = read};
+    ok = ok && attn_core_run(f->attn[sliding], &st, f->st);
   }
   return ok && mat(f, L->out, D, q, f->att, n, f->y, read);
 }

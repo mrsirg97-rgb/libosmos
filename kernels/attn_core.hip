@@ -203,7 +203,7 @@ extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream
   const AttnKeys& k = s->keys;
   if (d.block == ATTN_BLOCK_HEADS) {  // positions from key0 (the cache's rows), or picks of them
     if (!s->n_tok || s->n_tok > d.max_tokens || k.key0 || k.n_keys > d.max_keys || !s->gate ||
-        (!k.lists && s->pos0 + s->n_tok > k.n_keys) || (k.lists && (!k.counts || !k.stride || k.sel)) ||
+        (!k.lists && !d.slots && s->pos0 + s->n_tok > k.n_keys) || (k.lists && (!k.counts || !k.stride || k.sel)) ||
         (k.sel != nullptr) != (k.npick != nullptr) || (k.sel && (!d.ratio || !k.stride)) || (s->x16 && !s->overflow) ||
         (s->x16 && (k.lists || (d.apart && !s->read))))  // (the cache's rows from 0: key0 0; a gate; a side the prompt's)
       return false;

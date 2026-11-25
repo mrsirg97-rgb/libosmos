@@ -139,33 +139,35 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
     if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
         !lsa_index_gpu(f->q + at, 1, q, kvh, heads / kvh, hd, &free_dims, f->wq[l], false, f->iq, NULL) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, f->list_n, NULL) ||
-        !q35_attn_read(f->q + at, s->kc[l], s->vc[l], heads, kvh, hd, NULL, f->list, f->list_n, LSA_READ_MAX, f->gt + at, f->da,
-                       f->ao + at, NULL))
+        !attn_core_run(f->attn,
+                       &(AttnStep){.q = f->q + at,
+                                   .n_tok = 1,
+                                   .pos0 = P + t,
+                                   .keys = {.k = s->kc[l], .v = s->vc[l], .n_keys = P + t + 1, .lists = f->list,
+                                            .counts = (const int32_t *)f->list_n, .stride = LSA_READ_MAX},
+                                   .gate = f->gt + at,
+                                   .out = f->ao + at},
+                       NULL))
       return false;
   }
   *done = true;
   return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
 }
 
-/* a run's attention, dense: read the prompt's kernel (q4x_attn) at any size; decode q35_attn_decode in steps of
+/* a run's attention, dense, on the core: a read the prompt's kernel at any size, a decode the decode's in steps of
    Q35_ATTN_DECODE_MAX tokens (a token's split softmax its own: its bits whatever the step) */
 static bool dense_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_t n, bool read)
 {
   const Q35Geometry *g = &f->w->geo;
-  const uint32_t heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads, hd = (uint32_t)g->head_dim;
-  const uint64_t q = (uint64_t)heads * hd;
-  if (read)
-    return q4x_attn(f->q + off * q, s->kc[l], s->vc[l], n, heads, kvh, hd, (uint32_t)s->pos, f->gt + off * q, NULL,
-                    NULL,
-                    f->fa, f->ao + off * q, NULL, NULL);
-  bool ok = true;
-  for (uint32_t t = 0; ok && t < n; t += Q35_ATTN_DECODE_MAX)
-  {
-    const uint64_t at = (uint64_t)(off + t) * q;
-    ok = q35_attn_decode(f->q + at, s->kc[l], s->vc[l], n - t < Q35_ATTN_DECODE_MAX ? n - t : Q35_ATTN_DECODE_MAX, heads,
-                         kvh, hd, NULL, (uint32_t)s->pos + t, f->gt + at, f->da, f->ao + at, NULL);
-  }
-  return ok;
+  const uint64_t q = (uint64_t)g->n_heads * g->head_dim;
+  const AttnStep st = {.q = f->q + off * q,
+                       .n_tok = n,
+                       .pos0 = (uint32_t)s->pos,
+                       .keys = {.k = s->kc[l], .v = s->vc[l], .n_keys = (uint32_t)s->pos + n},
+                       .gate = f->gt + off * q,
+                       .out = f->ao + off * q,
+                       .read = read};
+  return attn_core_run(f->attn, &st, NULL);
 }
 
 static bool attention(Q35Forward *f, const Run *run, uint32_t runs, uint32_t n, int l, bool read)
