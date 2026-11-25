@@ -215,10 +215,12 @@ value's, no sink, no bias; its output also as the out matrix's f16 (Q4xX16, the 
   is one token and one KV head, its rows the token's 12 query heads (16 with padding) - `q4x_attn`'s layout - where
   Inkling's are 16 tokens of a head. The skeleton takes the row map as a parameter; the units, tiles and fold are the
   same, so the contract is.
-- **Its keys: whole tiles.** A token's list is its picked blocks (ascending) then its tail (ascending to itself): the
-  core walks the absolute 16-key tiles those cover, skips the rest, and cuts units at absolute multiples of 256 -
-  every block picked reads exactly the dense tiles, so all-picked == dense bit for bit (today's property, kept).
-  A block of the index's ratio is whole tiles (the ratio a multiple of 16: refused at create otherwise).
+- **Its keys: the tiles its list touches, the rest of a tile zeros.** QSA's blocks are 4 keys (compress_ratios 4:
+  its top 2,048 keys 512 blocks), so a 16-key tile can be part picked. A block's rows are one token's, so every row
+  reads the same keys: a tile's keys the token did not pick are loaded as zeros and masked (`q4x_attn`'s rule for
+  the keys past a token) - tiles at absolute multiples of 16, units at absolute multiples of 256, tiles the list
+  never touches skipped. Every block picked reads exactly the dense tiles: all-picked == dense bit for bit (today's
+  property, kept), and a token's bits are its picks' alone.
 - **A head of 256.** Q's fragments and O's accumulators double (~256 registers before the softmax). A wave pair a row
   tile: each the tile's scores (one WMMA chain over all 256 dims, in order - the contract's), each half of O's columns
   (`q4x_attn`'s split). Measured against keeping Q in LDS before it is chosen.
