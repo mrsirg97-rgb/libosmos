@@ -138,6 +138,11 @@ __global__ __launch_bounds__(HD) void merge_kernel(const float* ml, const float*
 }
 
 
+// the scratch's floats (q35_attn_decode_scratch's): the widest head's parts for max_tokens tokens
+inline uint64_t scratch_floats(uint32_t heads, uint32_t max_tokens) {
+  return (uint64_t) max_tokens * heads * Q35_ATTN_PARTS * (kHeadWide + 2);
+}
+
 template <int HD>
 inline bool launch(const float* q, const uint8_t* k8, const uint8_t* v8, uint32_t n_tok, uint32_t heads,
                    uint32_t kv_heads, uint32_t pos0, uint32_t window, uint32_t slots, uint32_t gate_span,

@@ -12,6 +12,8 @@
 
 #include "q4x_ref.h"
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -198,9 +200,9 @@ int main() {
   CHECK(hipMemcpy(hk.data(), kc, hk.size(), hipMemcpyDeviceToHost) == hipSuccess &&
         hipMemcpy(hv.data(), vc, hv.size(), hipMemcpyDeviceToHost) == hipSuccess);
   float *dq = dev_from(rq.v), *dg = dev_from(gate), *out = dev_alloc<float>((size_t) kTok * kQ);
-  float* scr = dev_alloc<float>(q4x_attn_scratch(kHeads, kTok));
+  float* scr = dev_alloc<float>(1);
   const Q4xPick pick = {sel, npick, kR, kBlocks};
-  CHECK(q4x_attn(dq, kc, vc, kTok, kHeads, kKv, kHead, 0, dg, &pick, nullptr, scr, out, nullptr, nullptr));
+  CHECK(core_q4x_attn(dq, kc, vc, kTok, kHeads, kKv, kHead, 0, dg, &pick, nullptr, scr, out, nullptr, nullptr));
   const std::vector<float> whole = host_of(out, (size_t) kTok * kQ);
   // double over each sampled token's picked keys (the cache's own values)
   auto kv = [&](const std::vector<uint8_t>& c, uint32_t p, uint32_t i) {
@@ -237,19 +239,19 @@ int main() {
   uint32_t at = 0;
   for (uint32_t n : kSteps) {
     const Q4xPick pp = {sel + (size_t) at * kBlocks, npick + at, kR, kBlocks};
-    CHECK(q4x_attn(dq + (size_t) at * kQ, kc, vc, n, kHeads, kKv, kHead, at, dg + (size_t) at * kQ, &pp, nullptr, scr,
+    CHECK(core_q4x_attn(dq + (size_t) at * kQ, kc, vc, n, kHeads, kKv, kHead, at, dg + (size_t) at * kQ, &pp, nullptr, scr,
                    out + (size_t) at * kQ, nullptr, nullptr));
     at += n;
   }
   CHECK(std::memcmp(host_of(out, whole.size()).data(), whole.data(), whole.size() * 4) == 0);
   for (uint32_t t = kTok - 3; t < kTok; t++) {
     const Q4xPick pp = {sel + (size_t) t * kBlocks, npick + t, kR, kBlocks};
-    CHECK(q4x_attn(dq + (size_t) t * kQ, kc, vc, 1, kHeads, kKv, kHead, t, dg + (size_t) t * kQ, &pp, nullptr, scr, out,
+    CHECK(core_q4x_attn(dq + (size_t) t * kQ, kc, vc, 1, kHeads, kKv, kHead, t, dg + (size_t) t * kQ, &pp, nullptr, scr, out,
                    nullptr, nullptr));
     CHECK(std::memcmp(host_of(out, kQ).data(), &whole[(size_t) t * kQ], kQ * 4) == 0);
   }
   // every block picked (below the budget): the dense attention's bits
-  CHECK(q4x_attn(dq, kc, vc, 2048, kHeads, kKv, kHead, 0, dg, nullptr, nullptr, scr, out, nullptr, nullptr));
+  CHECK(core_q4x_attn(dq, kc, vc, 2048, kHeads, kKv, kHead, 0, dg, nullptr, nullptr, scr, out, nullptr, nullptr));
   CHECK(std::memcmp(host_of(out, (size_t) 2048 * kQ).data(), whole.data(), (size_t) 2048 * kQ * 4) == 0);
   std::printf("  in pieces and one at a time the bits of one run; every block picked, the dense attention's bits\n");
   gguf_destroy(gg);

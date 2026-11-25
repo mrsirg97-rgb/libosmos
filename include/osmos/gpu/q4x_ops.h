@@ -93,20 +93,8 @@ typedef struct Q4xPick
   const int32_t *sel, *npick;
   uint32_t ratio, blocks;
 } Q4xPick;
-uint64_t q4x_attn_scratch(uint32_t heads, uint32_t max_ctx);
-/* the scratch at a shape (LFM3's head of 128: its prompt's spans a group's tokens a piece, to 2M) - at least
-   q4x_attn_scratch's */
-/* a prompt's sparse reads (LSA's: lsa_read_batch_gpu's lists): token t's attention over its own counts[t] positions
-   lists[t list_stride ..] (any order, at most list_stride), on the matrix cores (f16 q, k, v and weights) - a block a
-   token's KV head, one wave over its list in order; no scratch. a head of 128; the gate's span
-   AttnShape's (no window or ring). a token's bits its list's alone, whatever its batch */
-bool q4x_attn_lists(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-                    uint32_t dim, const uint32_t *lists, const int32_t *counts, uint32_t list_stride, const float *gate,
-                    const AttnShape *shape, float *out, void *stream);
-uint64_t q4x_attn_scratch_dim(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx);
-bool q4x_attn(const float *q, const void *kc, const void *vc, uint32_t n_tok, uint32_t heads, uint32_t kv_heads,
-              uint32_t dim, uint32_t pos0, const float *gate, const Q4xPick *pick, const AttnShape *shape,
-              float *scratch, float *out, const Q4xX16 *side, void *stream);
+/* the attention over the cache (q4x_attn, q4x_attn_lists - every key, QSA's picks, a window and ring, LSA's lists):
+   the attention core's heads block now (osmos/gpu/attn_core.h, kernels/attn_core_heads.h) */
 
 #define Q4X_IX_DIM 128 /* an indexer head's dim (qwen4exp.attention.indexer.key_length) */
 /* the kernels' fixed shapes - the loader refuses a model past them (q4x_geo.h), never a step */
@@ -317,16 +305,6 @@ q4x_kv_row_bytes, q4x_kv_put
   (F32, values apart) into kc and vc - a row its own, so a token's the same whatever its batch. a quarter of F32's
   bytes, the cache a long context reads whole at each decode step.
 
-q4x_attn
-  out[t][h][d] = sigmoid(gate[t][h][d]) sum over p in K(t) of softmax_p(q[t][h] . kc[p][g] / sqrt(dim)) vc[p][g][d],
-  K(t) the token's keys: with no pick every position up to its own, pos0 + t; with one its key list - its picked blocks'
-  positions (ratio of them a block, in block order), then its tail (the positions past its visible blocks, ratio nv ..
-  pos0 + t, nv = (pos0 + t + 1) / ratio) - every block picked, the list 0 .. pos0 + t: the dense bits. g = h / (heads /
-  kv_heads) (llama.cpp's GQA: a KV head's heads consecutive). kc, vc: the cache, Q8_0 rows of kv_heads x dim
-  (q4x_kv_put's), rows 0 .. pos0 + n_tok - 1 written; at most OPS_ATTN_MAX_KEYS keys. on the matrix cores: q, k, v and
-  the softmax's weights as f16, the sums F32; a token's key list in chunks of 128, a row's chunks merged in order - a
-  row's bits its own whatever its batch (its q, its keys, its position alone). scratch: q4x_attn_scratch(heads, max_ctx)
-  floats (a step of more tokens taken in pieces).
 
 QSA's indexer (llama.cpp's build_qsa_sel; DESIGN.md, "QSA"): a layer's keys pooled in blocks of `ratio` positions,
 a token's keys its top `blocks` of them by score and its tail.

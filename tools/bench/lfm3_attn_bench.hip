@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <vector>
 
+#include "attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/attn_shape.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -34,15 +36,15 @@ int main(int argc, char** argv) {
     }
     CK(hipMalloc((void**) &q, (size_t) T * H * D * 4) == hipSuccess && hipMalloc((void**) &g, (size_t) T * H * 4) == hipSuccess);
     CK(hipMalloc((void**) &out, (size_t) T * H * D * 4) == hipSuccess);
-    CK(hipMalloc((void**) &fa, q4x_attn_scratch_dim(H, KV, D, C) * 4) == hipSuccess);
+    CK(hipMalloc((void**) &fa, 1 * 4) == hipSuccess);
     CK(hipMemcpy(q, h.data(), (size_t) T * H * D * 4 < h.size() * 4 ? (size_t) T * H * D * 4 : h.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
     CK(hipMemset(g, 0, (size_t) T * H * 4) == hipSuccess);
     const AttnShape sh = {D, 0, 0};
-    CK(q4x_attn(q, kc, vc, T, H, KV, D, pos0, g, nullptr, &sh, fa, out, nullptr, nullptr));
+    CK(core_q4x_attn(q, kc, vc, T, H, KV, D, pos0, g, nullptr, &sh, fa, out, nullptr, nullptr));
     CK(hipDeviceSynchronize() == hipSuccess);
     const int reps = C > 200000 ? 1 : 3;
     const auto t0 = std::chrono::steady_clock::now();
-    for (int r = 0; r < reps; r++) CK(q4x_attn(q, kc, vc, T, H, KV, D, pos0, g, nullptr, &sh, fa, out, nullptr, nullptr));
+    for (int r = 0; r < reps; r++) CK(core_q4x_attn(q, kc, vc, T, H, KV, D, pos0, g, nullptr, &sh, fa, out, nullptr, nullptr));
     CK(hipDeviceSynchronize() == hipSuccess);
     const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() / reps;
     const double pairs = (double) T * pos0 + (double) T * (T + 1) / 2, fl = pairs * H * D * 4;

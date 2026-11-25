@@ -109,18 +109,17 @@ static std::vector<double> exact(const Seq& s) {
   return out;
 }
 
-// today's kernel on the sequence (q4x_attn: its picks, no shape - every key, a gate a value)
-static std::vector<float> today(const Seq& s) {
-  float *out = dev<float>((size_t) s.T * H * D), *scratch = dev<float>(q4x_attn_scratch(H, s.K) + 1);
-  const Q4xPick pick = {s.dsel, s.dnpick, kRatio, s.stride};
-  HIP_OK(q4x_attn(s.dq, s.dkc, s.dvc, s.T, H, KV, D, s.K - s.T, s.dg, &pick, nullptr, scratch, out, nullptr, nullptr)
-             ? hipSuccess : hipErrorUnknown);
-  std::vector<float> o((size_t) s.T * H * D);
-  HIP_OK(hipDeviceSynchronize());
-  HIP_OK(hipMemcpy(o.data(), out, o.size() * 4, hipMemcpyDeviceToHost));
-  (void) hipFree(out), (void) hipFree(scratch);
-  return o;
-}
+// q4x_attn's output on each accuracy case (0.17.1's kernel, before the core took its code: FNV-1a of its bytes) and
+// its rms error against exact math - the core held to both (3 runs the same)
+static const struct { uint64_t hash; double err; } kToday[] = {
+    {0x204f43d29e168475ull, 4.80791107e-05},
+    {0xd46cc2317e33a80eull, 1.65705736e-05},
+    {0x59f3476a2f84d1aeull, 1.14412353e-05},
+    {0x196e73a8f70d827bull, 1.06926389e-05},
+    {0x721068e649649c24ull, 1.0849094e-05},
+    {0x680b2417bee6d614ull, 7.60536842e-06},
+    {0x80441847ff5e0799ull, 3.19096905e-06}
+};
 
 static AttnCoreDesc qwen_desc(uint32_t max_tokens, uint32_t max_keys) {
   AttnCoreDesc d{};
@@ -169,7 +168,7 @@ static std::vector<uint8_t> bytes(const std::vector<float>& v) {
   return std::vector<uint8_t>((const uint8_t*) v.data(), (const uint8_t*) (v.data() + v.size()));
 }
 
-// against exact math: the core's error no larger than q4x_attn's, case by case
+// q4x_attn's bits byte for byte on every case (its frozen hashes), its error against exact math reported
 static void accuracy() {
   struct Case { uint32_t T, K, stride; bool all; };
   const Case cases[] = {{37, 37, 64, true},   {600, 600, 1024, true},   {1, 1500, 64, false}, {3, 1503, 64, false},
@@ -177,18 +176,15 @@ static void accuracy() {
   for (const Case& c : cases) {
     Seq s = make(c.T, c.K, c.stride, c.all);
     const std::vector<double> ref = exact(s);
-    const std::vector<float> was = today(s);
     std::string why;
     const std::vector<float> got = core(s, 0, c.T, &why);
-    // no larger than today's past the rms estimate's own noise: two of its relative standard errors, 1 / sqrt(2 N)
-    // over N values - an equally exact kernel's sums in another order land on either side of it
-    const double ew = rms_err(was, ref), eg = got.empty() ? INFINITY : rms_err(got, ref);
-    const double noise = 2.0 / std::sqrt(2.0 * (double) ref.size());
+    // q4x_attn's bits byte for byte (its hash), and so its error; the error against exact math reported
+    const size_t i = &c - cases;
+    const double ew = kToday[i].err, eg = got.empty() ? INFINITY : rms_err(got, ref);
     char name[240];
-    std::snprintf(name, sizeof name, "qwen accuracy: %u tokens of %u keys%s - rms error core %.6g, q4x_attn %.6g (%+.3f%%, "
-                  "noise %.3f%%)%s", c.T, c.K, c.all ? " (dense)" : " (picks)", eg, ew, 100 * (eg / ew - 1), 100 * noise,
-                  got.empty() ? (" (" + why + ")").c_str() : "");
-    check(!got.empty() && eg <= ew * (1 + noise), name);
+    std::snprintf(name, sizeof name, "qwen accuracy: %u tokens of %u keys%s - rms error core %.6g, q4x_attn %.6g%s", c.T,
+                  c.K, c.all ? " (dense)" : " (picks)", eg, ew, got.empty() ? (" (" + why + ")").c_str() : "");
+    check(!got.empty() && fnv(bytes(got)) == kToday[i].hash, name);
     std::printf("  %s\n", name);
     free_seq(s);
   }

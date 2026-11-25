@@ -78,9 +78,34 @@ static std::vector<uint8_t> core(const Shape& sh, const AttnCoreDesc& d, const S
 
 static std::vector<uint8_t> out_of(const Shape& sh, const Step& s) { return down(s.out, (size_t) s.n * sh.H * sh.D * 4); }
 
-static void compare(const char* what, const Shape& sh, const std::vector<uint8_t>& was, const std::vector<uint8_t>& got,
-                    const std::string& why) {
-  check(!got.empty() && same(was, got), std::string(sh.name) + " " + what + (got.empty() ? " (" + why + ")" : ""));
+// each path's output as its kernel gave it as its caller called it (q4x_attn, q4x_attn_lists, q35_attn_decode,
+// q35_attn_read - before the core took their code: FNV-1a of the bytes, the cases' order below, 3 runs the same)
+static const uint64_t kWas[] = {
+    0xdf93412d49c129cbull,
+    0x7b890818cb32beabull,
+    0x64c9c6043948eb3dull,
+    0x6435c02484eb8cbeull,
+    0xe28e4ccc78c99f56ull,
+    0x919116513326ecccull,
+    0xf930dfcf161b0b6bull,
+    0x7b80e4c9f3a8f0f0ull,
+    0x8bd88e31688307beull,
+    0x622cfbb30dc88d16ull,
+    0xb379a46496a918e0ull,
+    0xe2377dff7e9aa553ull,
+    0xd8a93157449cd351ull,
+    0x8222432ef8594b0aull,
+    0xe32745355e3ba52eull,
+    0xd7ed26f5d9242fb0ull,
+    0x12b5967711146118ull,
+    0x88dd1971bd5f4119ull,
+    0x0badb720ff1aa837ull
+};
+static size_t g_case = 0;
+static void compare(const char* what, const Shape& sh, const std::vector<uint8_t>& got, const std::string& why) {
+  const size_t i = g_case++;
+  check(!got.empty() && i < sizeof kWas / sizeof *kWas && fnv(got) == kWas[i],
+        std::string(sh.name) + " " + what + (got.empty() ? " (" + why + ")" : ""));
 }
 
 // a dense prompt (a read): q4x_attn's, no shape's window (LFM3's spans at 128) - at 0 and at depth
@@ -88,19 +113,14 @@ static void dense_prompt(const Shape& sh) {
   for (auto [n, pos0] : {std::pair<uint32_t, uint32_t>{600, 0}, {500, 1000}}) {
     Cache c = cache(sh, pos0 + n);
     Step s = step(sh, n);
-    const AttnShape ash = {sh.head_gate ? sh.D : 1u, 0, 0};
-    float* scr = dev<float>(q4x_attn_scratch_dim(sh.H, sh.KV, sh.D, c.K) + 1);
-    HIP_OK(q4x_attn(s.q, c.kc, c.vc, n, sh.H, sh.KV, sh.D, pos0, s.gate, nullptr, &ash, scr, s.out, nullptr, nullptr)
-               ? hipSuccess : hipErrorUnknown);
-    const std::vector<uint8_t> was = out_of(sh, s);
     std::string why;
     AttnKeys k{};
     k.k = c.kc, k.v = c.vc, k.n_keys = c.K;
     const std::vector<uint8_t> got = core(sh, desc(sh, 0, 0, n, c.K), s, k, pos0, true, &why);
     char name[96];
     std::snprintf(name, sizeof name, "dense prompt: %u tokens from %u", n, pos0);
-    compare(name, sh, was, got, why);
-    (void) hipFree(scr), (void) hipFree(c.kc), (void) hipFree(c.vc), free_step(s);
+    compare(name, sh, got, why);
+    (void) hipFree(c.kc), (void) hipFree(c.vc), free_step(s);
   }
 }
 
@@ -108,28 +128,19 @@ static void dense_prompt(const Shape& sh) {
 static void sliding(const Shape& sh) {
   const uint32_t W = 512, slots = 2048, pos0 = 1200, n = 300;
   Cache c = cache(sh, slots);
-  const AttnShape ash = {sh.head_gate ? sh.D : 1u, W, slots};
   AttnKeys k{};
   k.k = c.kc, k.v = c.vc, k.n_keys = slots;
   std::string why;
   {  // the prompt (a read): q4x_attn under the shape
     Step s = step(sh, n);
-    float* scr = dev<float>(q4x_attn_scratch_dim(sh.H, sh.KV, sh.D, slots) + 1);
-    HIP_OK(q4x_attn(s.q, c.kc, c.vc, n, sh.H, sh.KV, sh.D, pos0, s.gate, nullptr, &ash, scr, s.out, nullptr, nullptr)
-               ? hipSuccess : hipErrorUnknown);
-    const std::vector<uint8_t> was = out_of(sh, s);
-    compare("sliding prompt: window 512, a ring of 2,048", sh, was, core(sh, desc(sh, W, slots, n, slots), s, k, pos0, true, &why), why);
-    (void) hipFree(scr), free_step(s);
+    compare("sliding prompt: window 512, a ring of 2,048", sh, core(sh, desc(sh, W, slots, n, slots), s, k, pos0, true, &why), why);
+    free_step(s);
   }
   for (uint32_t m : {1u, 3u}) {  // a decode and a verify (not a read): q35_attn_decode under the shape
     Step s = step(sh, m);
-    float* scr = dev<float>(q35_attn_decode_scratch(sh.H, Q35_ATTN_DECODE_MAX) + 1);
-    HIP_OK(q35_attn_decode(s.q, c.kc, c.vc, m, sh.H, sh.KV, sh.D, &ash, pos0 + n, s.gate, scr, s.out, nullptr)
-               ? hipSuccess : hipErrorUnknown);
-    const std::vector<uint8_t> was = out_of(sh, s);
-    compare(m == 1 ? "sliding decode" : "sliding verify of 3", sh, was,
+    compare(m == 1 ? "sliding decode" : "sliding verify of 3", sh,
             core(sh, desc(sh, W, slots, 16, slots), s, k, pos0 + n, false, &why), why);
-    (void) hipFree(scr), free_step(s);
+    free_step(s);
   }
   (void) hipFree(c.kc), (void) hipFree(c.vc);
 }
@@ -139,22 +150,13 @@ static void decodes(const Shape& sh) {
   for (auto [m, pos0] : {std::pair<uint32_t, uint32_t>{1, 2999}, {4, 1500}, {7, 900}}) {
     Cache c = cache(sh, pos0 + m);
     Step s = step(sh, m);
-    const AttnShape ash = {sh.head_gate ? sh.D : 1u, 0, 0};
-    float* scr = dev<float>(q35_attn_decode_scratch(sh.H, Q35_ATTN_DECODE_MAX) + 1);
-    for (uint32_t t0 = 0; t0 < m; t0 += Q35_ATTN_DECODE_MAX) {  // (its callers' steps)
-      const uint32_t k = m - t0 < Q35_ATTN_DECODE_MAX ? m - t0 : Q35_ATTN_DECODE_MAX, g = sh.head_gate ? sh.H : sh.H * sh.D;
-      HIP_OK(q35_attn_decode(s.q + (size_t) t0 * sh.H * sh.D, c.kc, c.vc, k, sh.H, sh.KV, sh.D, &ash, pos0 + t0,
-                             s.gate + (size_t) t0 * g, scr, s.out + (size_t) t0 * sh.H * sh.D, nullptr)
-                 ? hipSuccess : hipErrorUnknown);
-    }
-    const std::vector<uint8_t> was = out_of(sh, s);
     std::string why;
     AttnKeys k{};
     k.k = c.kc, k.v = c.vc, k.n_keys = c.K;
     char name[96];
     std::snprintf(name, sizeof name, "decode: %u tokens from %u", m, pos0);
-    compare(name, sh, was, core(sh, desc(sh, 0, 0, 16, c.K), s, k, pos0, false, &why), why);
-    (void) hipFree(scr), (void) hipFree(c.kc), (void) hipFree(c.vc), free_step(s);
+    compare(name, sh, core(sh, desc(sh, 0, 0, 16, c.K), s, k, pos0, false, &why), why);
+    (void) hipFree(c.kc), (void) hipFree(c.vc), free_step(s);
   }
 }
 
@@ -173,29 +175,20 @@ static void lists(const Shape& sh) {
   int32_t* dc = dev<int32_t>(n);
   HIP_OK(hipMemcpy(dl, lst.data(), lst.size() * 4, hipMemcpyHostToDevice));
   HIP_OK(hipMemcpy(dc, cnt.data(), n * 4, hipMemcpyHostToDevice));
-  const AttnShape ash = {sh.head_gate ? sh.D : 1u, 0, 0};
   AttnKeys k{};
   k.k = c.kc, k.v = c.vc, k.n_keys = K, k.lists = dl, k.counts = dc, k.stride = stride;
   std::string why;
   if (sh.D == Q4X_QK_HEAD_NARROW) {  // the prompt's (q4x_attn_lists takes heads of 128)
     Step s = step(sh, n);
-    HIP_OK(q4x_attn_lists(s.q, c.kc, c.vc, n, sh.H, sh.KV, sh.D, dl, dc, stride, s.gate, &ash, s.out, nullptr)
-               ? hipSuccess : hipErrorUnknown);
-    const std::vector<uint8_t> was = out_of(sh, s);
-    compare("LSA prompt lists: 40 tokens", sh, was, core(sh, desc(sh, 0, 0, n, K), s, k, K - n, true, &why), why);
+    compare("LSA prompt lists: 40 tokens", sh, core(sh, desc(sh, 0, 0, n, K), s, k, K - n, true, &why), why);
     free_step(s);
   }
   {  // the decode's read: its last token alone
     Step s = step(sh, 1);
-    float* scr = dev<float>(q35_attn_decode_scratch(sh.H, Q35_ATTN_DECODE_MAX) + 1);
-    HIP_OK(q35_attn_read(s.q, c.kc, c.vc, sh.H, sh.KV, sh.D, &ash, dl + (size_t) (n - 1) * stride,
-                         (const uint32_t*) dc + (n - 1), stride, s.gate, scr, s.out, nullptr)
-               ? hipSuccess : hipErrorUnknown);
-    const std::vector<uint8_t> was = out_of(sh, s);
     AttnKeys k1 = k;
     k1.lists = dl + (size_t) (n - 1) * stride, k1.counts = dc + (n - 1);
-    compare("LSA decode read", sh, was, core(sh, desc(sh, 0, 0, 16, K), s, k1, K - 1, false, &why), why);
-    (void) hipFree(scr), free_step(s);
+    compare("LSA decode read", sh, core(sh, desc(sh, 0, 0, 16, K), s, k1, K - 1, false, &why), why);
+    free_step(s);
   }
   (void) hipFree(dl), (void) hipFree(dc), (void) hipFree(c.kc), (void) hipFree(c.vc);
 }

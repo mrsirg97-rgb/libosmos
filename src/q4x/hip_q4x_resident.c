@@ -235,6 +235,33 @@ bool q4x_ple_stream(Q4xForward *f, char *err)
   return true;
 }
 
+/* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
+   q4x_attn's bits) */
+static AttnCoreDesc attn_desc(const Q4xForward *f)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  return (AttnCoreDesc){.heads = (uint32_t)g->n_heads,
+                        .kv_heads = (uint32_t)g->n_kv_heads,
+                        .dk = (uint32_t)g->head_dim,
+                        .dv = (uint32_t)g->head_dim,
+                        .k_rows = ATTN_ROWS_Q8_0,
+                        .v_rows = ATTN_ROWS_Q8_0,
+                        .scaling = 1.0f / sqrtf((float)g->head_dim),
+                        .term = ATTN_TERM_NONE,
+                        .gate = ATTN_GATE_VALUE,
+                        .block = ATTN_BLOCK_HEADS,
+                        .ratio = (uint32_t)g->ix_ratio,
+                        .unit = 128,
+                        .max_tokens = f->max_tokens,
+                        .max_keys = f->max_ctx};
+}
+
+static uint64_t attn_scratch_bytes(const Q4xForward *f)
+{
+  const AttnCoreDesc d = attn_desc(f);
+  return attn_core_scratch(&d);
+}
+
 bool q4x_buffers(Q4xForward *f, char *err)
 {
   const Q4xGeometry *g = &f->w->geo;
@@ -266,7 +293,7 @@ bool q4x_buffers(Q4xForward *f, char *err)
       {&b->fo, n * in * F, 1},         {&b->qf, n * 2 * q * F, 1},      {&b->kr, n * kv * F, 1},         {&b->kq, n * kv * F, 1},         {&b->vr, n * kv * F, 1},         {&b->q, n * q * F, 1},
       {&b->iqr, n * ixq * F, 1},       {&b->iq, n * ixq * F, 1},        {&b->ikr, n * Q4X_IX_DIM * F, 1},
       {&b->ixs, q4x_ix_scratch(f->max_ctx, ratio) * F, 0},           {&b->sel, n * blocks * 4, 1},    {&b->npick, n * 4, 1},
-      {&b->gt, n * q * F, 1},          {&b->ao, n * q * F, 1},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F, 0},          {&b->rl, n * g->n_experts * F, 1}, {&b->w, n * k * F, 1},
+      {&b->gt, n * q * F, 1},          {&b->ao, n * q * F, 1},          {&b->fa, attn_scratch_bytes(f), 0},          {&b->rl, n * g->n_experts * F, 1}, {&b->w, n * k * F, 1},
       {&b->ga, n * k * ff * F, 1},     {&b->up, n * k * ff * F, 1},     {&b->y, n * k * D * F, 1},
       {&b->shg, n * sff * F, 1},       {&b->shu, n * sff * F, 1},       {&b->sh, n * D * F, 1},          {&b->sl, n * F, 1},
       {&b->ids, n * k * 4, 1},         {&b->rows, n * k * 4, 1},        {&b->cnt, entries * 4, 0},       {&b->gidx, slots * 4, 0},
@@ -305,21 +332,8 @@ bool q4x_buffers(Q4xForward *f, char *err)
     return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
   /* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
      q4x_attn's bits), over b.fa */
-  const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads,
-                           .kv_heads = (uint32_t)g->n_kv_heads,
-                           .dk = (uint32_t)g->head_dim,
-                           .dv = (uint32_t)g->head_dim,
-                           .k_rows = ATTN_ROWS_Q8_0,
-                           .v_rows = ATTN_ROWS_Q8_0,
-                           .scaling = 1.0f / sqrtf((float)g->head_dim),
-                           .term = ATTN_TERM_NONE,
-                           .gate = ATTN_GATE_VALUE,
-                           .block = ATTN_BLOCK_HEADS,
-                           .ratio = (uint32_t)g->ix_ratio,
-                           .unit = 128,
-                           .max_tokens = f->max_tokens,
-                           .max_keys = f->max_ctx};
-  if (!(f->attn = attn_core_create(&ad, b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F, err)))
+  const AttnCoreDesc ad = attn_desc(f);
+  if (!(f->attn = attn_core_create(&ad, b->fa, attn_core_scratch(&ad), err)))
     return false;
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
           pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&

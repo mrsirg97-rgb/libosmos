@@ -672,12 +672,24 @@ __global__ __launch_bounds__(32) void fa_list_kernel(const float* q, const uint8
   }
 }
 
+// the scratch's floats (q4x_attn_scratch's, q4x_attn_scratch_dim's): a piece of the chunk path's pairs at the
+// context's end - a head of 128's span path's too, the larger
+inline uint64_t chunk_floats(uint32_t heads, uint32_t max_ctx) {
+  const uint64_t chunks = (max_ctx + kChunk - 1) / kChunk, pairs = chunks < kPieceChunks ? kPieceChunks : chunks;
+  return pairs * heads * (kHead + 2);  // a piece of at least one token at the context's end
+}
 // the span path's pairs: a piece of a group's tokens (its least) at the context's end, or the chunk path's
 inline uint64_t span_pairs(uint32_t heads, uint32_t kv_heads, uint64_t end) {
   const uint64_t chunks = (end + kChunk - 1) / kChunk, spans = (end + kSpan - 1) / kSpan;
   const uint64_t tt = (uint64_t) kSpanRows / (heads / kv_heads), least = tt * spans;
   const uint64_t pairs = chunks < kPieceChunks ? kPieceChunks : chunks;
   return pairs > least ? pairs : least;
+}
+
+inline uint64_t scratch_floats(uint32_t heads, uint32_t kv_heads, uint32_t dim, uint32_t max_ctx) {
+  if (dim != Q4X_QK_HEAD_NARROW || !kv_heads || heads % kv_heads) return chunk_floats(heads, max_ctx);
+  const uint64_t a = span_pairs(heads, kv_heads, max_ctx) * heads * (dim + 2), b = chunk_floats(heads, max_ctx);
+  return a > b ? a : b;
 }
 
 template <int HD>
@@ -688,8 +700,8 @@ inline bool attn(const float* q, const void* kc, const void* vc, uint32_t n_tok,
   if (!pick && !sh.window && !sh.slots) {  // LFM3's dense prompt: by spans
     const float scale = 1.0f / sqrtf((float) HD);
     const uint32_t G = heads / kv_heads, tt = kSpanRows / G;
-    // the scratch's pairs (q4x_attn_scratch's for a context at least this step's end): a piece's tokens x its spans
-    // (q4x_attn_scratch_dim's: a piece of at least a group at the step's end)
+    // the scratch's pairs (chunk_floats' for a context at least this step's end): a piece's tokens x its spans
+    // (scratch_floats': a piece of at least a group at the step's end)
     const uint64_t end = (uint64_t) pos0 + n_tok, pairs = span_pairs(heads, kv_heads, end), spans = (end - 1) / kSpan + 1;
     uint32_t piece = (uint32_t) (pairs / spans / tt * tt);
     piece = piece > kSpanStepTokens ? kSpanStepTokens : piece;
