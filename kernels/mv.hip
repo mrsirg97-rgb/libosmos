@@ -153,39 +153,47 @@ constexpr Tune tune_group1(quant::Type t, bool short_row) {
   }
 }
 
-template <quant::Type T, int NT, int R, int U>
+template <quant::Type T, int NT, int R, int U, bool EXACT>
 bool group_tok_k(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
                  uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
   const uint32_t per_block = mv::kWavesPerBlock * R;
   const dim3 grid((rows + per_block - 1) / per_block, n);
-  mv::group_tok_kernel<T, NT, R, U><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
-      (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
+  if constexpr (EXACT)
+    mv::group_tok_exact_kernel<T, NT, R, U><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
+        (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
+  else
+    mv::group_tok_kernel<T, NT, R, U><<<grid, mv::kWave * mv::kWavesPerBlock, 0, s>>>(
+        (const uint8_t* const*) w, cnt, xrow, rows, cols, x, xs, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
-template <quant::Type T, int NT>
+template <quant::Type T, int NT, bool EXACT>
 bool group_tok_nt(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t rows,
                   uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
   if constexpr (NT == 1) {
     constexpr Tune a = tune_group1(T, true), b = tune_group1(T, false);
-    if (cols < kShortCols) return group_tok_k<T, 1, a.r, a.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
-    return group_tok_k<T, 1, b.r, b.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+    if (cols < kShortCols) return group_tok_k<T, 1, a.r, a.u, EXACT>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+    return group_tok_k<T, 1, b.r, b.u, EXACT>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
   }
   constexpr Tune k = tune(T, NT);
-  return group_tok_k<T, NT, k.r, k.u>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+  return group_tok_k<T, NT, k.r, k.u, EXACT>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
 }
 
+// a table of at most max_cnt tokens a matrix: one launch a count (1 .. max_cnt), each its matrices of exactly that many
+// - a verify's experts mostly one token each, not each at the table's most (16 one-token Q3_K experts: 122.7 us at a
+// count of 1, 224.2 at 6). a token's sums its own at any count (rows_of's): the same bits
 template <quant::Type T>
 bool group_tok(const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n, uint32_t max_cnt,
                uint32_t rows, uint32_t cols, const float* x, uint32_t xs, float* y, uint32_t ys, hipStream_t s) {
   if (cols % quant::Block<T>::values || cols % quant::kChunk || xs < cols || xs % quant::kChunk) return false;
-  switch (max_cnt) {
+  if (max_cnt == 1) return group_tok_nt<T, 1, false>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+  if (max_cnt > MV_MAX_TOKENS) return false;
+  bool ok = true;
 #define TOK(nt) \
-  case nt: return group_tok_nt<T, nt>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
-    TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+  if (ok && max_cnt >= nt) ok = group_tok_nt<T, nt, true>(w, cnt, xrow, n, rows, cols, x, xs, y, ys, s);
+  TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
 #undef TOK
-    default: return false;
-  }
+  return ok;
 }
 
 extern "C" bool mv_group_tok(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow, uint32_t n,

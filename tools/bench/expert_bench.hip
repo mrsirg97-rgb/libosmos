@@ -101,6 +101,16 @@ int main(int argc, char** argv) {
     const double gb = (double) mb * K / 1e3;
     std::printf("  %s: mv_group_tok %7.1f us (%5.1f GB/s) | mm_group %7.1f us (%5.1f GB/s)\n", ty.name, mv, gb / mv, mm,
                 gb / mm);
+    // the same experts, each one token, launched as a verify's table bound (max_cnt 2 .. 6): the cost of the rows past
+    // an expert's count (summed, not stored)
+    std::printf("   one token each, max_cnt:");
+    for (uint32_t mc = 2; mc <= 6; mc++) {
+      const double us = time_us(iters, [&](uint32_t i) {
+        return set(i) && mv_group_tok(ty.type, dw, dcnt, dxrow, K, mc, R, C, x, C, y, R, nullptr);
+      });
+      std::printf(" %u: %.1f us", mc, us);
+    }
+    std::printf("\n");
     CHECK(hipFree(pool) == hipSuccess);
   }
   // MLA's absorptions: a head's own Q8_0 matrix on its own row of x, every head at once (k_b: 512 x 128, v_b: 128 x
