@@ -98,6 +98,8 @@ extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint
                     : d->window % ATTN_TILE ? "window: a whole number of tiles"
                     : !d->sink ? "sink: a sink logit alone (B2: Inkling's)"
                     : d->gate == ATTN_GATE_HEAD ? "gate: a value's or none (B2: Inkling's)"
+                    : d->block != ATTN_BLOCK_TOKENS ? "block: ATTN_BLOCK_TOKENS alone (C1 builds a token's heads)"
+                    : d->ratio ? "ratio: no picks (C1 builds them)"
                     : !d->max_tokens ? "max_tokens: 0"
                     : !d->max_keys ? "max_keys: 0"
                     : !scratch || scratch_bytes < attn_core_scratch(d) ? "max_keys: past the scratch given"
@@ -116,7 +118,7 @@ extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream
   const AttnCoreDesc& d = c->d;
   const AttnKeys& k = s->keys;
   if (!s->n_tok || s->n_tok > d.max_tokens || k.n_keys > d.max_keys || s->n_tok > k.n_keys || k.key0 % ATTN_TILE ||
-      k.lists || s->pos0 != k.key0 + k.n_keys - s->n_tok)  // (B2: positions, the step's tokens its keys' last)
+      k.lists || k.sel || k.npick || s->x16_row0 || s->pos0 != k.key0 + k.n_keys - s->n_tok)  // (B2: positions, the step's tokens its keys' last)
     return false;
   if (s->x16 && (s->n_tok > (uint32_t) kFaTile || !s->overflow)) return false;  // a split decode's alone
   hipStream_t st = (hipStream_t) stream;

@@ -15,8 +15,10 @@ inline bool attn_core_call(uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
                            void* stream = nullptr) {
   static void* scratch = nullptr;
   static uint64_t have = 0;
-  const AttnCoreDesc d = {heads, kv_heads, head_dim, head_dim, k_rows, v_rows, window, scaling, ATTN_TERM_REL, d_rel,
-                          extent, true, ATTN_GATE_VALUE, n_tok, key0 + n_keys};
+  AttnCoreDesc d{};
+  d.heads = heads, d.kv_heads = kv_heads, d.dk = d.dv = head_dim, d.k_rows = k_rows, d.v_rows = v_rows;
+  d.window = window, d.scaling = scaling, d.term = ATTN_TERM_REL, d.d_rel = d_rel, d.extent = extent, d.sink = true;
+  d.gate = ATTN_GATE_VALUE, d.block = ATTN_BLOCK_TOKENS, d.max_tokens = n_tok, d.max_keys = key0 + n_keys;
   const uint64_t need = attn_core_scratch(&d);
   if (need > have) {
     if (scratch) (void) hipFree(scratch);
@@ -26,8 +28,8 @@ inline bool attn_core_call(uint32_t heads, uint32_t kv_heads, uint32_t head_dim,
   char err[OSMOS_ERR] = "";
   AttnCore* c = attn_core_create(&d, scratch, have, err);
   if (!c) return false;
-  const AttnStep s = {q, n_tok, key0 + n_keys - n_tok, {k, v, key0, n_keys, nullptr, nullptr, 0}, rel, rel_proj, sink,
-                      gate, out, nullptr, nullptr};
+  const AttnStep s = {q,    n_tok,    key0 + n_keys - n_tok, {k, v, key0, n_keys, nullptr, nullptr, nullptr, nullptr, 0},
+                      rel,  rel_proj, sink, gate, out, nullptr, nullptr, 0};
   const bool ok = attn_core_run(c, &s, stream);
   attn_core_destroy(c);
   return ok;

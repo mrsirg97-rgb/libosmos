@@ -18,7 +18,8 @@ extern "C" {
 
 #define ATTN_UNIT 256 /* a unit's keys (Inkling's, every family's) */
 #define ATTN_TILE 16  /* a tile's keys (WMMA's) */
-#define ATTN_HEAD 128 /* a head's dims the core takes (B2: Inkling's; C: 256, MLA's) */
+#define ATTN_HEAD 128 /* Inkling's head (its records' rows); C1: 256 too (Qwen's) */
+#define ATTN_HEAD_MAX 256
 #define ATTN_GROUP_MAX 8 /* query heads a KV head at most (a prompt block's waves) */
 #define ATTN_REL 16      /* ATTN_TERM_REL's states a head (its sum unrolled) */
 #define ATTN_EXTENT_MAX 1024
@@ -44,6 +45,15 @@ typedef enum AttnTerm
   ATTN_TERM_REL, /* Inkling's relative bias: rel[t][h] . rel_proj[:, d] at distance d < extent, else 0 */
 } AttnTerm;
 
+/* a prompt block's rows: tokens of one query head (Inkling's: 16 tokens a tile, their keys shared), or one token's
+   query heads (Qwen's: its picks its own - a tile's rows must read the same keys, the matrix cores not blind to a key
+   its weight zeroes) */
+typedef enum AttnBlock
+{
+  ATTN_BLOCK_TOKENS,
+  ATTN_BLOCK_HEADS,
+} AttnBlock;
+
 /* what one gate value scales: none, a head's values, a value */
 typedef enum AttnGate
 {
@@ -64,6 +74,8 @@ typedef struct AttnCoreDesc
   uint32_t d_rel, extent;   /* ATTN_TERM_REL's */
   bool sink;                /* a sink logit a (token, head), no value */
   AttnGate gate;            /* sigmoid(gate) times the output */
+  AttnBlock block;
+  uint32_t ratio;           /* picks' blocks of keys (0: no picks; ATTN_BLOCK_HEADS alone) */
   uint32_t max_tokens;      /* a step's queries at most */
   uint32_t max_keys;        /* a query's keys at most (positions: the context; lists: their stride) */
 } AttnCoreDesc;
@@ -78,15 +90,18 @@ uint64_t attn_core_scratch(const AttnCoreDesc *d);
 AttnCore *attn_core_create(const AttnCoreDesc *d, void *scratch, uint64_t scratch_bytes, char err[OSMOS_ERR]);
 void attn_core_destroy(AttnCore *c);
 
-/* a step's keys: the cache's rows from key0's position (row r the key at position key0 + r), n_keys of them; or,
-   lists given, each query's own counts[t] positions (lists[t stride ..], any order) of the same rows */
+/* a step's keys: the cache's rows from key0's position (row r the key at position key0 + r), n_keys of them; picks
+   given (the desc's ratio), each query's keys its picked blocks (sel[t stride ..] ascending, npick[t] of them - npick
+   equal to its visible blocks, (pos + 1) / ratio: every one, none read) then its tail (its visible blocks' end to
+   itself); lists given, each query's own counts[t] positions (lists[t stride ..], any order) of the same rows */
 typedef struct AttnKeys
 {
   const void *k, *v;
   uint32_t key0, n_keys;  /* key0 a multiple of ATTN_TILE */
+  const int32_t *sel, *npick; /* NULL: every key */
   const uint32_t *lists;  /* NULL: positions */
   const int32_t *counts;
-  uint32_t stride;
+  uint32_t stride;        /* sel's or lists' entries a query */
 } AttnKeys;
 
 /* a step: n_tok queries at positions pos0 .. pos0 + n_tok - 1 (with positions: each a key, pos0 + t - key0 < n_keys) */
@@ -99,8 +114,9 @@ typedef struct AttnStep
   const float *sink;           /* [n_tok][heads] (the desc's sink) */
   const float *gate;           /* [n_tok][heads][dv] or [n_tok][heads] (the desc's gate) */
   float *out;                  /* [n_tok][heads][dv] */
-  void *x16;                   /* out also as mm_x16 lays it (NULL: not) */
+  void *x16;                   /* out also as mm_x16 lays it (NULL: not): its rows x16_row0 .. */
   int32_t *overflow;           /* x16's flag (mm_x16's) */
+  uint32_t x16_row0;           /* the step's first row in x16 (a sequence's among a step's) */
 } AttnStep;
 
 /* the step on stream; false (nothing written) when it is past the core's desc: more tokens or keys, a list with

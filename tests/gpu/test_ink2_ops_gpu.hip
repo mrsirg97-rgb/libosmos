@@ -414,17 +414,19 @@ int main() {
     // thing. fa: a core of the layer's desc over the rows given (k, v from key k0, nk of them), queries s .. s + m - 1
     auto fa = [&](AttnRows kr, AttnRows vr, uint32_t s, uint32_t m, const void* k, const void* v, uint32_t nk,
                   uint32_t k0, const float* g, float* o, void* x16, int32_t* ov, uint32_t d_rel = 0) -> bool {
-      const AttnCoreDesc d = {H, KV, D, D, kr, vr, full ? 0u : 1024u, 0.08838834764831845f, ATTN_TERM_REL,
-                              d_rel ? d_rel : R, (uint32_t) rp.ne[0], true, ATTN_GATE_VALUE, n, n};
+      AttnCoreDesc d{};
+      d.heads = H, d.kv_heads = KV, d.dk = d.dv = D, d.k_rows = kr, d.v_rows = vr, d.window = full ? 0u : 1024u;
+      d.scaling = 0.08838834764831845f, d.term = ATTN_TERM_REL, d.d_rel = d_rel ? d_rel : R, d.extent = (uint32_t) rp.ne[0];
+      d.sink = true, d.gate = ATTN_GATE_VALUE, d.block = ATTN_BLOCK_TOKENS, d.max_tokens = n, d.max_keys = n;
       const uint64_t sb = attn_core_scratch(&d);
       void* sc = dev_alloc<uint8_t>(sb);
       char e[OSMOS_ERR] = "";
       AttnCore* core = attn_core_create(&d, sc, sb, e);
       bool ok = false;
       if (core) {
-        const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, {k, v, k0, nk, nullptr, nullptr, 0},
+        const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, {k, v, k0, nk, nullptr, nullptr, nullptr, nullptr, 0},
                              dr + (uint64_t) s * H * R, drp, ds + (uint64_t) s * H, g ? g + (uint64_t) s * H * D : nullptr,
-                             o, x16, ov};
+                             o, x16, ov, 0};
         ok = attn_core_run(core, &st, nullptr) && hipDeviceSynchronize() == hipSuccess;
       }
       attn_core_destroy(core), hipFree(sc);

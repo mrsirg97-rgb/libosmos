@@ -59,21 +59,22 @@ static AttnCoreDesc attn_desc(const Ink2Forward *f, bool full)
 {
   const Ink2Geometry *g = &f->w->geo;
   const uint32_t window = (uint32_t)g->window, D = (uint32_t)g->head_dim;
-  return (AttnCoreDesc){(uint32_t)g->n_heads,
-                        (uint32_t)g->n_kv_heads,
-                        D,
-                        D,
-                        full ? ATTN_ROWS_KV8 : ATTN_ROWS_F16,
-                        full ? (f->v8 ? ATTN_ROWS_KV8 : ATTN_ROWS_KV5) : ATTN_ROWS_F16,
-                        full ? 0u : window,
-                        1.0f / sqrtf((float)D),
-                        ATTN_TERM_REL,
-                        (uint32_t)g->d_rel,
-                        full ? (uint32_t)g->rel_extent : window,
-                        true,
-                        ATTN_GATE_VALUE,
-                        f->max_tokens,
-                        full ? f->max_ctx : window + f->max_tokens + ATTN_TILE}; /* (a window's keys: tile-aligned) */
+  return (AttnCoreDesc){.heads = (uint32_t)g->n_heads,
+                        .kv_heads = (uint32_t)g->n_kv_heads,
+                        .dk = D,
+                        .dv = D,
+                        .k_rows = full ? ATTN_ROWS_KV8 : ATTN_ROWS_F16,
+                        .v_rows = full ? (f->v8 ? ATTN_ROWS_KV8 : ATTN_ROWS_KV5) : ATTN_ROWS_F16,
+                        .window = full ? 0u : window,
+                        .scaling = 1.0f / sqrtf((float)D),
+                        .term = ATTN_TERM_REL,
+                        .d_rel = (uint32_t)g->d_rel,
+                        .extent = full ? (uint32_t)g->rel_extent : window,
+                        .sink = true,
+                        .gate = ATTN_GATE_VALUE,
+                        .block = ATTN_BLOCK_TOKENS,
+                        .max_tokens = f->max_tokens,
+                        .max_keys = full ? f->max_ctx : window + f->max_tokens + ATTN_TILE}; /* (a window's keys: tile-aligned) */
 }
 
 static bool buffers(Ink2Forward *f)
