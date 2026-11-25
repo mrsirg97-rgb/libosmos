@@ -6,7 +6,8 @@
 #include "osmos/gpu/quant.h"
 #include "hy4_impl.h"
 
-bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n)
+/* the step's rows' file offsets, every Engram layer's (no read yet: hy4_engram_layer reads each as its layer is queued) */
+bool hy4_engram_offsets(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n)
 {
   const Hy4Geometry *g = &f->w->geo;
   const int L = g->n_engram, cols = engram_cols(f->eg), ng = engram_ngram(f->eg);
@@ -31,12 +32,25 @@ bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
           f->eg_off[((uint64_t)e * n + tok) * cols + c] =
               t->offset + (f->eg_first[e] + (uint64_t)rows[e * cols + c]) * f->eg_row_bytes;
     }
-  const uint64_t count = (uint64_t)L * n * cols;
+  return true;
+}
+
+/* Engram layer e's rows of the step (n tokens): read (rowread: threads of pread into its part of the pinned stage),
+   then their copy to the GPU and their decode queued on the step's stream - called as the layer is queued, so the
+   reads of a later Engram layer run while the GPU works the layers before it */
+bool hy4_engram_layer(Hy4Forward *f, int e, uint32_t n)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const GgufTensor *t = f->w->engram_table;
+  const uint64_t cols = (uint64_t)engram_cols(f->eg), count = n * cols, at = (uint64_t)e * count;
   const double t0 = f->pf.on ? hy4_now() : 0;
-  bool ok = rowread(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)count, (uint32_t)f->eg_row_bytes, f->eg_stage);
+  bool ok = rowread(f->eg_read, f->eg_fd, f->eg_off + at, (uint32_t)count, (uint32_t)f->eg_row_bytes,
+                    f->eg_stage + at * f->eg_row_bytes);
   const double t1 = f->pf.on ? hy4_now() : 0;
-  ok = ok && hipMemcpy(f->eg_raw, f->eg_stage, count * f->eg_row_bytes, hipMemcpyHostToDevice) == hipSuccess &&
-       quant_dequant(t->type, f->eg_raw, count * (uint64_t)g->engram_dim, f->eg_rows, f->st);
+  ok = ok && hipMemcpyAsync((uint8_t *)f->eg_raw + at * f->eg_row_bytes, f->eg_stage + at * f->eg_row_bytes,
+                            count * f->eg_row_bytes, hipMemcpyHostToDevice, (hipStream_t)f->st) == hipSuccess &&
+       quant_dequant(t->type, (uint8_t *)f->eg_raw + at * f->eg_row_bytes, count * (uint64_t)g->engram_dim,
+                     f->eg_rows + at * (uint64_t)g->engram_dim, f->st);
   if (f->pf.on)
     f->pf.rowread_s += t1 - t0, f->pf.copy_s += hy4_now() - t1, f->pf.rows += count, f->pf.bytes += count * f->eg_row_bytes;
   return ok;

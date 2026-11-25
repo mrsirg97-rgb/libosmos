@@ -177,7 +177,8 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 bool hy4_mat_pair(Hy4Forward *f, const GgufTensor *t0, uint32_t rows0, float *y0, const GgufTensor *t1, uint32_t rows1,
                   float *y1, const float *x, uint32_t cols, uint32_t n, bool read, bool *ready);
 /* the step's Engram rows read and decoded (f->eg_rows), the runs' tokens already in their sequences' histories */
-bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
+bool hy4_engram_offsets(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
+bool hy4_engram_layer(Hy4Forward *f, int e, uint32_t n);
 /* layer l's blocks on the step's streams */
 bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
 /* a joint's launches over a token's x into out (its members at their offsets) */

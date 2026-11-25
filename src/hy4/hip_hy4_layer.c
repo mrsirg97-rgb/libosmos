@@ -121,7 +121,7 @@ static bool engram(Hy4Forward *f, uint32_t n, int l)
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, dim = (uint32_t)g->engram_dim;
   const uint32_t cols = (uint32_t)((g->engram_ngram - 1) * g->engram_heads);
   const float *rows = f->eg_rows + (uint64_t)e * n * cols * dim;
-  return hy4_engram_rows(rows, hy4_fv(f, L->eg_lookup_norm), cols, dim, n, f->emb, f->st) &&
+  return hy4_engram_layer(f, e, n) && hy4_engram_rows(rows, hy4_fv(f, L->eg_lookup_norm), cols, dim, n, f->emb, f->st) &&
          hy4_mat(f, L->eg_kv, (hc + 1) * D, cols * dim, f->emb, n, f->ekv, false) && /* (both maths: see engram()) */
          hy4_engram_update(f->h, f->ekv, hy4_fv(f, L->eg_kv_b), hy4_fv(f, L->eg_gate), hy4_fv(f, L->eg_hc_scale),
                            hy4_fv(f, L->eg_pre_gamma), hc, D, n, f->st);

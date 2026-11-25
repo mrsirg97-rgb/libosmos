@@ -124,7 +124,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   f->pf.read = read;
   bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
-            hy4_engram_read(f, run, runs, n);
+            hy4_engram_offsets(f, run, runs, n); /* (each Engram layer's rows read as it is queued) */
   ok = ok && launches(f, run, runs, n, kept, read);
   ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess;
   /* one sync, whatever failed: the flags read, and the kernels done before membrane_end lets their experts go */
