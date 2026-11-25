@@ -8,6 +8,8 @@
 #include <hip/hip_runtime.h>
 
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
@@ -15,6 +17,7 @@
 extern "C" {
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
 #include "osmos/model/gguf.h"
 }
 
@@ -113,6 +116,75 @@ int main(int argc, char** argv) {
     std::printf("\n");
     CHECK(hipFree(pool) == hipSuccess);
   }
+  // the int8 lane (q8_group_tok: x rounded to int8 a 32-value block, v_dot4 against the weights' codes) against the
+  // F32 matvec, the same 16 single-token experts of every type the lane takes - its speed, and the two outputs'
+  // relative RMS difference (blocks with valid scales, test_q8_types_gpu's)
+  std::printf("int8 inputs (q8_group_tok) vs F32 (mv_group_tok): 16 single-token experts of 1536 x 1536, cold\n");
+  struct Q8Ty { const char* name; uint32_t id, values, bytes; };
+  const Q8Ty q8types[] = {{"Q2_K", 10, 256, 84},  {"Q3_K", 11, 256, 110},   {"Q4_K", 12, 256, 144},  {"Q5_K", 13, 256, 176},
+                          {"Q6_K", 14, 256, 210}, {"Q4_0", 2, 32, 18},      {"Q5_1", 7, 32, 24},     {"Q8_0", 8, 32, 34},
+                          {"IQ2_XXS", 16, 256, 66}, {"IQ2_XS", 17, 256, 74}, {"IQ2_S", 22, 256, 82}, {"IQ3_XXS", 18, 256, 98},
+                          {"IQ1_S", 19, 256, 50}, {"IQ1_M", 29, 256, 56},   {"IQ4_NL", 20, 32, 18},  {"IQ4_XS", 23, 256, 136},
+                          {"MXFP4", 39, 32, 17},  {"NVFP4", 40, 64, 36},    {"Q2_0", 42, 64, 18}};
+  const auto f16s = [] { return (uint16_t) (0x1C00 | (next() >> 22 & 0x3FF)); };
+  const auto valid = [&](const Q8Ty& t, uint8_t* bb) {  // test_q8_types_gpu's block(): the scales valid
+    uint16_t v;
+    switch (t.id) {
+      case 10: v = f16s(), std::memcpy(bb + 80, &v, 2), v = f16s(), std::memcpy(bb + 82, &v, 2); break;
+      case 11: v = f16s(), std::memcpy(bb + 108, &v, 2); break;
+      case 12: case 13: case 7: v = f16s(), std::memcpy(bb, &v, 2), v = f16s(), std::memcpy(bb + 2, &v, 2); break;
+      case 14: v = f16s(), std::memcpy(bb + 208, &v, 2); break;
+      case 39: bb[0] = (uint8_t) (120 + next() % 8); break;
+      case 40: for (int k = 0; k < 4; k++) bb[k] = (uint8_t) (0x20 + next() % 0x20); break;
+      case 29: {
+        const uint16_t d = f16s();
+        for (int k = 0; k < 4; k++) bb[48 + 2 * k + 1] = (uint8_t) ((bb[48 + 2 * k + 1] & 0x0F) | ((d >> (4 * k)) & 0x0F) << 4);
+        break;
+      }
+      default: v = f16s(), std::memcpy(bb, &v, 2); break;
+    }
+  };
+  int8_t* q = dev<int8_t>((size_t) 256 * C);
+  float* qd = dev<float>((size_t) 256 * C / 32);
+  CHECK(q8_round(x, 256, C, C, q, qd, nullptr));
+  float* y2 = dev<float>((size_t) 256 * R);
+  for (const Q8Ty& ty : q8types) {
+    const uint64_t mb = gguf_bytes(ty.id, (uint64_t) R * C), blocks = mb * E / ty.bytes;
+    std::vector<uint8_t> h(mb * E);
+    for (auto& v : h) v = (uint8_t) (next() >> 13);
+    for (uint64_t b2 = 0; b2 < blocks; b2++) valid(ty, h.data() + b2 * ty.bytes);
+    uint8_t* pool = dev<uint8_t>(h.size());
+    CHECK(hipMemcpy(pool, h.data(), h.size(), hipMemcpyHostToDevice) == hipSuccess);
+    std::vector<std::vector<const void*>> picks(E / K);
+    for (uint32_t c = 0; c < E / K; c++)
+      for (uint32_t m = 0; m < K; m++) picks[c].push_back(pool + (uint64_t) (c * K + m) * mb);
+    const auto set = [&](uint32_t i) {
+      return hipMemcpyAsync(dw, picks[i % picks.size()].data(), K * sizeof(void*), hipMemcpyHostToDevice, nullptr) ==
+             hipSuccess;
+    };
+    const double mv = time_us(iters, [&](uint32_t i) {
+      return set(i) && mv_group_tok(ty.id, dw, dcnt, dxrow, K, 1, R, C, x, C, y, R, nullptr);
+    });
+    const double i8 = time_us(iters, [&](uint32_t i) {
+      return set(i) && q8_group_tok(ty.id, dw, dcnt, dxrow, nullptr, K, 1, R, C, q, qd, y2, R, nullptr);
+    });
+    CHECK(set(0) && mv_group_tok(ty.id, dw, dcnt, dxrow, K, 1, R, C, x, C, y, R, nullptr) &&
+          q8_group_tok(ty.id, dw, dcnt, dxrow, nullptr, K, 1, R, C, q, qd, y2, R, nullptr));
+    CHECK(hipDeviceSynchronize() == hipSuccess);
+    std::vector<float> a((size_t) 256 * R), b2v((size_t) 256 * R);
+    CHECK(hipMemcpy(a.data(), y, a.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    CHECK(hipMemcpy(b2v.data(), y2, b2v.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
+    double e = 0, n2 = 0;
+    for (uint32_t m = 0; m < K; m++)
+      for (uint32_t r = 0; r < R; r++) {
+        const double u = a[(size_t) 16 * m * R + r], v = b2v[(size_t) 16 * m * R + r];
+        e += (u - v) * (u - v), n2 += u * u;
+      }
+    std::printf("  %-8s F32 %7.1f us | int8 %7.1f us (%.2fx) | relative RMS difference %.4f\n", ty.name, mv, i8, mv / i8,
+                std::sqrt(e / n2));
+    CHECK(hipFree(pool) == hipSuccess);
+  }
+  CHECK(hipFree(q) == hipSuccess && hipFree(qd) == hipSuccess && hipFree(y2) == hipSuccess);
   // a prompt step's experts: every one of the 512 with 32 tokens (a 1,024-token step's 16,384 picks), 1536 x 1536, on
   // the matrix cores (mm_group: f16 x, its tiles) - Q3_K, Q4_K, and Q8_0 (its decode near free: the K-quants' cost)
   std::printf("a prompt step's experts: 16,384 (expert, token) pairs of 1536 x 1536 (mm_group), warm\n");

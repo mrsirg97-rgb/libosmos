@@ -31,7 +31,29 @@ struct Codes {
   float d;
   int m8[2];     // Q2_K's: a half's 8 m, against dmin
   float dmin;
+  // the generic types' (kGeneric): a half's float scale, its codes' offset (the value code - off: off x's sum taken
+  // off the dot) and its float minimum (m x's sum added)
+  float dh[2];
+  int off[2];
+  float mh[2];
 };
+
+// the types whose block sum is block_sum's generic form: a half's dh (dot - off sx) + mh sx
+template <quant::Type T>
+constexpr bool kGeneric = T == quant::kQ4_0 || T == quant::kQ5_1 || T == quant::kQ8_0 || T == quant::kQ5_K ||
+                          T == quant::kQ6_K || T == quant::kIQ4_NL || T == quant::kIQ4_XS || T == quant::kMXFP4 ||
+                          T == quant::kNVFP4 || T == quant::kQ2_0;
+
+// 4 bytes of 4-bit codes (one nibble each, at shift sh) through an int8 table, as an int8 word
+__device__ inline int table4(uint32_t w, int sh, const int8_t* tab) {
+  uint32_t r = 0;
+  for (int i = 0; i < 4; i++) r |= (uint32_t) (uint8_t) tab[(w >> (8 * i + sh)) & 0x0F] << (8 * i);
+  return (int) r;
+}
+__device__ inline void plain(Codes& c, float d0, float d1, int off, float m0 = 0.0f, float m1 = 0.0f) {
+  for (int k = 0; k < 4; k++) c.delta[k] = 0;
+  c.dh[0] = d0, c.dh[1] = d1, c.off[0] = c.off[1] = off, c.mh[0] = m0, c.mh[1] = m1;
+}
 
 // 8 unsigned grid bytes signed by 8 sign bits, as two words of int8: (v ^ m) + (m & 1) a byte, m 0xFF where negative
 __device__ inline void signed8(uint64_t grid, uint32_t signs, int& lo, int& hi) {
@@ -128,10 +150,180 @@ template <> __device__ inline void codes<quant::kIQ1_S>(const uint8_t* b, int j,
   c.d = quant::f16(quant::ld16(b));
 }
 
+// Q4_K: the 32's 4-bit codes (sub-block j: qs[32 (j / 2) ..]'s low nibbles for an even j, high for an odd), its
+// 6-bit scale and minimum (ggml's get_scale_min_k4) - Q2_K's form with one scale for both halves: (d sc) dot - (dmin m)
+// x's sum, each as its eighths (8 sc, 8 m)
+template <> __device__ inline void codes<quant::kQ4_K>(const uint8_t* b, int j, Codes& c) {
+  const uint8_t* qs = b + 16 + 32 * (j / 2);
+  const int shift = 4 * (j % 2);
+  for (int t = 0; t < kWords; t++) c.w[t] = (int) ((quant::ld32(qs + 4 * t) >> shift) & 0x0F0F0F0Fu);
+  for (int k = 0; k < 4; k++) c.delta[k] = 0;
+  const uint8_t* sc = b + 4;
+  const int s = j < 4 ? sc[j] & 63 : (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
+  const int m = j < 4 ? sc[j + 4] & 63 : (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+  c.s21[0] = c.s21[1] = 8 * s, c.m8[0] = c.m8[1] = 8 * m;
+  c.d = quant::f16(quant::ld16(b)), c.dmin = quant::f16(quant::ld16(b + 2));
+}
+
+// Q3_K: the 32's 3-bit codes q | (hmask bit) << 2, unsigned (0 .. 7: the value's code + 4), each half its signed 6-bit
+// scale (sc - 32) - the half's sum (codes . x) - 4 (x's sum), exact in integers (decode<kQ3_K>'s values: a code minus 4,
+// or its high bit set none)
+template <> __device__ inline void codes<quant::kQ3_K>(const uint8_t* b, int j, Codes& c) {
+  const int n = j / 4, jj = j % 4, bit = 4 * n + jj;
+  for (int h = 0; h < 2; h++) {
+    const uint8_t* qs = b + 32 + 32 * n + 16 * h;
+    const uint8_t* hm = b + 16 * h;
+    for (int t = 0; t < 4; t++) {
+      const uint32_t q2 = (quant::ld32(qs + 4 * t) >> (2 * jj)) & 0x03030303u;
+      const uint32_t h1 = (quant::ld32(hm + 4 * t) >> bit) & 0x01010101u;
+      c.w[4 * h + t] = (int) (q2 | h1 << 2);
+    }
+    const int g = 8 * n + 2 * jj + h, grp = g / 4, w = g % 4;
+    const uint8_t* sc = b + 96;
+    const int low = ((grp & 1 ? sc[4 + w] : sc[w]) >> (grp & 2 ? 4 : 0)) & 0x0F;
+    c.s21[h] = 8 * ((low | ((sc[8 + w] >> (2 * grp)) & 0x03) << 4) - 32);
+  }
+  for (int k = 0; k < 4; k++) c.delta[k] = 0;
+  c.d = quant::f16(quant::ld16(b + 108));
+}
+
+// the generic types (kGeneric): each a 32-value block j's codes as int8 words and its halves' float scales - the F32
+// decoders' values (quant.h's decode<T>) as dh (code - off) + mh
+
+// Q4_0: d (code - 8), codes 0 .. 15 - values 0 .. 15 the low nibbles of qs's 16 bytes, 16 .. 31 the high
+template <> __device__ inline void codes<quant::kQ4_0>(const uint8_t* b, int, Codes& c) {
+  for (int t = 0; t < 4; t++) {
+    const uint32_t w = quant::ld32(b + 2 + 4 * t);
+    c.w[t] = (int) (w & 0x0F0F0F0Fu), c.w[4 + t] = (int) ((w >> 4) & 0x0F0F0F0Fu);
+  }
+  const float d = quant::f16(quant::ld16(b));
+  plain(c, d, d, 8);
+}
+// IQ4_NL: d kvalues[code], Q4_0's layout - the table's int8 values the codes
+template <> __device__ inline void codes<quant::kIQ4_NL>(const uint8_t* b, int, Codes& c) {
+  for (int t = 0; t < 4; t++) {
+    const uint32_t w = quant::ld32(b + 2 + 4 * t);
+    c.w[t] = table4(w, 0, kIq4nlValues), c.w[4 + t] = table4(w, 4, kIq4nlValues);
+  }
+  const float d = quant::f16(quant::ld16(b));
+  plain(c, d, d, 0);
+}
+// MXFP4: 2^(e - 128) times E2M1 doubled (kMxfp4Values: integers), IQ4_NL's layout after its scale byte
+template <> __device__ inline void codes<quant::kMXFP4>(const uint8_t* b, int, Codes& c) {
+  for (int t = 0; t < 4; t++) {
+    const uint32_t w = (uint32_t) b[1 + 4 * t] | (uint32_t) b[2 + 4 * t] << 8 | (uint32_t) b[3 + 4 * t] << 16 |
+                       (uint32_t) b[4 + 4 * t] << 24;
+    c.w[t] = table4(w, 0, kMxfp4Values), c.w[4 + t] = table4(w, 4, kMxfp4Values);
+  }
+  const float d = ldexpf(1.0f, (int) b[0] - 128);
+  plain(c, d, d, 0);
+}
+// Q8_0: d code, the codes the int8s themselves
+template <> __device__ inline void codes<quant::kQ8_0>(const uint8_t* b, int, Codes& c) {
+  for (int t = 0; t < kWords; t++) c.w[t] = (int) quant::ld32(b + 2 + 4 * t);
+  const float d = quant::f16(quant::ld16(b));
+  plain(c, d, d, 0);
+}
+// Q5_1: d q + m, q the 4 low bits (Q4_0's layout, from byte 8) and value i's fifth bit i of qh (bytes 4 .. 7)
+template <> __device__ inline void codes<quant::kQ5_1>(const uint8_t* b, int, Codes& c) {
+  const uint32_t qh = quant::ld32(b + 4);
+  for (int t = 0; t < 4; t++) {
+    const uint32_t w = quant::ld32(b + 8 + 4 * t);
+    uint32_t h0 = 0, h1 = 0;
+    for (int i = 0; i < 4; i++) h0 |= ((qh >> (4 * t + i)) & 1u) << (8 * i + 4), h1 |= ((qh >> (16 + 4 * t + i)) & 1u) << (8 * i + 4);
+    c.w[t] = (int) ((w & 0x0F0F0F0Fu) | h0), c.w[4 + t] = (int) (((w >> 4) & 0x0F0F0F0Fu) | h1);
+  }
+  const float d = quant::f16(quant::ld16(b)), m = quant::f16(quant::ld16(b + 2));
+  plain(c, d, d, 0, m, m);
+}
+// Q2_0: d (code - 1), 64 values: value i bits 2 (i % 4) of byte 2 + i / 4 - block j its bytes 2 + 8j ..
+template <> __device__ inline void codes<quant::kQ2_0>(const uint8_t* b, int j, Codes& c) {
+  for (int t = 0; t < kWords; t++) {
+    const uint32_t v = b[2 + 8 * j + t];
+    c.w[t] = (int) ((v & 3u) | ((v >> 2) & 3u) << 8 | ((v >> 4) & 3u) << 16 | ((v >> 6) & 3u) << 24);
+  }
+  const float d = quant::f16(quant::ld16(b));
+  plain(c, d, d, 1);
+}
+// NVFP4: 64 values, 4 UE4M3 scales (sub-block s, values 16s ..) then sub-block s's value i < 8 in byte 4 + 8s + i's
+// low nibble, i + 8 its high one; E2M1 doubled times half the scale - block j its sub-blocks 2j and 2j + 1, a half each
+template <> __device__ inline void codes<quant::kNVFP4>(const uint8_t* b, int j, Codes& c) {
+  for (int h = 0; h < 2; h++) {
+    const uint8_t* q = b + 4 + 8 * (2 * j + h);
+    for (int t = 0; t < 2; t++) {
+      const uint32_t w = (uint32_t) q[4 * t] | (uint32_t) q[4 * t + 1] << 8 | (uint32_t) q[4 * t + 2] << 16 |
+                         (uint32_t) q[4 * t + 3] << 24;
+      c.w[4 * h + t] = table4(w, 0, kMxfp4Values), c.w[4 * h + 2 + t] = table4(w, 4, kMxfp4Values);
+    }
+  }
+  plain(c, rnd::ue4m3_value(b[2 * j]) * 0.5f, rnd::ue4m3_value(b[2 * j + 1]) * 0.5f, 0);
+}
+// Q5_K: (d sc) q - (dmin m), group j's 4 low bits qs[32 (j / 2) ..] (low nibbles even j, high odd) and its fifth
+// qh's bit j; scales Q4_K's
+template <> __device__ inline void codes<quant::kQ5_K>(const uint8_t* b, int j, Codes& c) {
+  const uint8_t *qs = b + 48 + 32 * (j / 2), *qh = b + 16;
+  const int shift = 4 * (j % 2);
+  for (int t = 0; t < kWords; t++)
+    c.w[t] = (int) (((quant::ld32(qs + 4 * t) >> shift) & 0x0F0F0F0Fu) | (((quant::ld32(qh + 4 * t) >> j) & 0x01010101u) << 4));
+  const uint8_t* sc = b + 4;
+  const int s = j < 4 ? sc[j] & 63 : (sc[j + 4] & 0x0F) | ((sc[j - 4] >> 6) << 4);
+  const int m = j < 4 ? sc[j + 4] & 63 : (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4);
+  const float d = quant::f16(quant::ld16(b)) * (float) s, dm = quant::f16(quant::ld16(b + 2)) * (float) m;
+  plain(c, d, d, 0, -dm, -dm);
+}
+// Q6_K: (d sc) (q - 32), q 4 bits of ql and 2 of qh; group j (h = j / 4, r = j % 4) its values l: ql[64 h + 32 (r % 2)
+// + l] >> 4 (r / 2), qh[32 h + l] >> 2 r; a half's int8 scale sc[2j + half]
+template <> __device__ inline void codes<quant::kQ6_K>(const uint8_t* b, int j, Codes& c) {
+  const int h = j / 4, r = j % 4;
+  const uint8_t *ql = b + 64 * h + 32 * (r % 2), *qh = b + 128 + 32 * h;
+  for (int t = 0; t < kWords; t++)
+    c.w[t] = (int) (((quant::ld32(ql + 4 * t) >> (4 * (r / 2))) & 0x0F0F0F0Fu) |
+                    (((quant::ld32(qh + 4 * t) >> (2 * r)) & 0x03030303u) << 4));
+  const int8_t* sc = (const int8_t*) (b + 192);
+  const float d = quant::f16(quant::ld16(b + 208));
+  plain(c, d * (float) sc[2 * j], d * (float) sc[2 * j + 1], 32);
+}
+// IQ4_XS: (d (ls - 32)) kvalues[code], group j's 6-bit ls, its codes IQ4_NL's layout in qs[16 j ..] (from byte 8)
+template <> __device__ inline void codes<quant::kIQ4_XS>(const uint8_t* b, int j, Codes& c) {
+  for (int t = 0; t < 4; t++) {
+    const uint32_t w = quant::ld32(b + 8 + 16 * j + 4 * t);
+    c.w[t] = table4(w, 0, kIq4nlValues), c.w[4 + t] = table4(w, 4, kIq4nlValues);
+  }
+  const int ls = ((b[4 + j / 2] >> (4 * (j % 2))) & 0x0F) | ((quant::ld16(b + 2) >> (2 * j)) & 0x03) << 4;
+  const float d = quant::f16(quant::ld16(b)) * (float) (ls - 32);
+  plain(c, d, d, 0);
+}
+
 // the block's sum against x's 8 words, before x's scale: each half's integer dot, then lane_q8_part's, added
 template <quant::Type T>
 __device__ inline float block_sum(const Codes& c, const int* x) {
-  if constexpr (T == quant::kQ2_K) {  // each half: its codes' dot and x's sum (a minimum's)
+  if constexpr (kGeneric<T>) {  // each half: dh (its codes' dot - off x's sum) + mh x's sum
+    float r = 0.0f;
+    for (int h = 0; h < 2; h++) {
+      int s = 0, sx = 0;
+      for (int k = 2 * h; k < 2 * h + 2; k++) {
+        s += dot4(c.w[2 * k + 1], x[2 * k + 1], dot4(c.w[2 * k], x[2 * k], 0));
+        sx += dot4(0x01010101, x[2 * k + 1], dot4(0x01010101, x[2 * k], 0));
+      }
+      const float p = c.dh[h] * (float) (s - c.off[h] * sx) + c.mh[h] * (float) sx;
+      r = h ? r + p : p;
+    }
+    return r;
+  }
+  if constexpr (T == quant::kQ3_K) {  // each half: its codes' dot less 4 x's sum (the codes' + 4), its scale
+    float r = 0.0f;
+    for (int h = 0; h < 2; h++) {
+      int s = 0, sx = 0;
+      for (int k = 2 * h; k < 2 * h + 2; k++) {
+        s += dot4(c.w[2 * k + 1], x[2 * k + 1], dot4(c.w[2 * k], x[2 * k], 0));
+        sx += dot4(0x01010101, x[2 * k + 1], dot4(0x01010101, x[2 * k], 0));
+      }
+      const float p = lane_q8_part(c.d, c.s21[h], s - 4 * sx);
+      r = h ? r + p : p;
+    }
+    return r;
+  }
+  if constexpr (T == quant::kQ2_K || T == quant::kQ4_K) {  // each half: its codes' dot and x's sum (a minimum's)
     float r = 0.0f;
     for (int h = 0; h < 2; h++) {
       int s = 0, sx = 0;
