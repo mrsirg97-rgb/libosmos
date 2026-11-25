@@ -36,9 +36,10 @@ def gpu_mib():
 class Api:
     """an osmos-api on the pack's config (its slots in a fresh folder; drafter off for --plain), started and waited for"""
 
-    def __init__(self, exe, config, port, plain, log):
+    def __init__(self, exe, config, port, plain, log, settings):
         self.dir = tempfile.mkdtemp(prefix="session-bench-")
         cfg = json.load(open(config))
+        cfg.update(settings)  # the pack's, as the installer writes them (layout.py: cfg.update(pack["settings"]))
         cfg["slots"] = dict(cfg.get("slots") or {}, dir=os.path.join(self.dir, "slots"))
         if plain:
             cfg.pop("drafter", None)
@@ -173,16 +174,24 @@ def main():
     ap.add_argument("--twice", action="store_true", help="a second replay: every step's answer the same")
     ap.add_argument("--plain", action="store_true", help="a second replay drafter off: every step's answer the same")
     ap.add_argument("--log", default=None)
+    ap.add_argument("--pack", help="the pack's id: its settings from --packs over the config, as the installer's")
+    ap.add_argument("--packs", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "install", "packs.json"))
     a = ap.parse_args()
     fx = json.load(open(a.fixture))
     steps = fx["steps"][: a.steps] if a.steps else fx["steps"]
     log = a.log or os.path.join(tempfile.gettempdir(), "session_bench.api.log")
-    print(f"session_bench: {fx['source']} - {len(steps)} steps, {a.config}")
+    settings = {}
+    if a.pack:
+        packs = json.load(open(a.packs))["packs"]
+        if a.pack not in packs:
+            sys.exit(f"session_bench: no pack {a.pack!r} in {a.packs}")
+        settings = packs[a.pack]["settings"]
+    print(f"session_bench: {fx['source']} - {len(steps)} steps, {a.config}" + (f" with {a.pack}'s settings {settings}" if a.pack else ""))
     runs = [("replay", False)] + ([("again", False)] if a.twice else []) + ([("plain", True)] if a.plain else [])
     results, ok = {}, True
     for name, plain in runs:
         print(f"{name}:")
-        api = Api(a.api, a.config, a.port, plain, log)
+        api = Api(a.api, a.config, a.port, plain, log, settings)
         mem0, t0 = gpu_mib(), time.monotonic()
         try:
             rows = replay(fx, api, a.max_tokens, steps)
