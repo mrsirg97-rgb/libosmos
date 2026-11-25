@@ -18,6 +18,7 @@
 #include "osmos/mem/hip_slots.h"
 #include "osmos/mem/resident.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/cpu/lane.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/quant.h"
@@ -149,7 +150,7 @@ struct Forward
   Rowread *eg_read; /* Engram's rows, read many at once */
   uint64_t *eg_off; /* a step's rows' places in the Engram file: [sub-batch][Engram layer][token][col] */
   uint64_t eg_at[FWD_MAX_SUBS][WEIGHTS_MAX_LAYERS]; /* where each sub-batch's nth Engram layer's rows start (rows) */
-  bool eg_pending;                                   /* the step's rows begun, not yet waited for */
+  RowStream eg_rs;                                   /* the step's rows read under the GPU's work (osmos/mem/rowstream.h) */
   Engram *hash;
   float *eg_gate[WEIGHTS_MAX_LAYERS]; /* each Engram layer's gate, F32 q k on the device (ops_engram_gate) */
   uint16_t *guess_router[WEIGHTS_MAX_LAYERS]; /* an F32 router's BF16 copy for the guess alone (hip_ds4_guess.c), or NULL */

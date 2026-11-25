@@ -243,8 +243,10 @@ bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err)
   f->eg_fd = fds[t->file];
   f->eg_row_bytes = t->bytes / t->dims[1];
   const uint64_t rows = (uint64_t)f->max_tokens * g->n_engram * cols;
-  return ((f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
-          hy4_pinned(&f->bufs, &f->eg_stage, rows * f->eg_row_bytes) &&
-          hy4_alloc(&f->bufs, &f->eg_raw, rows * f->eg_row_bytes) && hy4_alloc(&f->bufs, &f->eg_rows, rows * g->engram_dim * F)) ||
-         osmos_fail(err, "out of memory (the Engram rows' buffers)");
+  const bool ok = (f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
+                  hy4_pinned(&f->bufs, &f->eg_stage, rows * f->eg_row_bytes) &&
+                  hy4_alloc(&f->bufs, &f->eg_raw, rows * f->eg_row_bytes) &&
+                  hy4_alloc(&f->bufs, &f->eg_rows, rows * g->engram_dim * F);
+  f->eg_rs = (RowStream){f->eg_read, f->eg_fd, f->eg_off, f->eg_stage, f->eg_row_bytes, 0, 0, false};
+  return ok || osmos_fail(err, "out of memory (the Engram rows' buffers)");
 }

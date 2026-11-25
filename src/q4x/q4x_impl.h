@@ -9,6 +9,7 @@
 #include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/npu/npu.h"
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
@@ -104,7 +105,7 @@ struct Q4xForward
      to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
   int32_t tap_layer[Q4X_MAX_TAPS]; /* Q4xOptions' tap_layers, ascending; n_taps of them */
   uint32_t n_taps;
-  bool stream_ngram, ple_pending;
+  bool stream_ngram;
   int ple_fd;
   /* the experts on a membrane (q4x_forward_whole): its memory, the model's files opened O_DIRECT, the device table
      [layer][gate, up, down][expert] of their addresses; mem NULL: the experts their tensors', uploaded whole */
@@ -122,6 +123,7 @@ struct Q4xForward
   Rowread *ple_read;
   uint8_t *ple_stage;
   uint64_t *ple_off;
+  RowStream ple_rs; /* the step's rows read under the GPU's work (osmos/mem/rowstream.h): ple_read, ple_off, ple_stage */
   uint32_t ple_n;
   hipEvent_t ple_copied;
   uint32_t side_spin; /* q4x_forward_side_spin: a delay before the shared expert, on s2 (0: none) */

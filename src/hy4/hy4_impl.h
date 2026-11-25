@@ -13,6 +13,7 @@
 
 #include "osmos/hy4/forward.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/model/engram.h"
 #include "osmos/gpu/overflow.h"
 
@@ -61,6 +62,9 @@ struct Hy4Forward
   Rowread *eg_read;
   uint64_t *eg_off;  /* host: the step's rows' offsets, layer-major */
   uint8_t *eg_stage; /* pinned: the rows read */
+  RowStream eg_rs;   /* the step's rows read under the GPU's work (eg_read, eg_fd, eg_off, eg_stage): an Engram
+                        layer's batch at a time, the next issued as one is waited for */
+  uint32_t eg_n;     /* the step's tokens (each Engram layer's batch n x cols rows) */
   void *eg_raw;      /* device: the rows as stored */
   float *eg_rows;    /* device: the rows decoded ([layer][token][cols][dim]) */
   /* a step's buffers */

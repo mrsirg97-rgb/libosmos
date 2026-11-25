@@ -156,15 +156,14 @@ bool q4x_ple_issue(Q4xForward *f, uint32_t n)
   const GgufTensor *tab = f->w->ple_table;
   const uint64_t rb = tab->bytes / tab->dims[1];
   const uint32_t rows = n * (uint32_t)f->w->geo.ple_heads;
-  if (f->ple_pending)
-    (void)rowread_wait(f->ple_read), f->ple_pending = false;
-  if (hipEventSynchronize(f->ple_copied) != hipSuccess)
+  if (!rowstream_wait(&f->ple_rs) || hipEventSynchronize(f->ple_copied) != hipSuccess) /* (a failed step's batch first) */
     return false;
   for (uint32_t i = 0; i < rows; i++)
     f->ple_off[i] = tab->offset + (uint64_t)f->b.pin_rows[i] * rb;
-  if (!rowread_start(f->ple_read, f->ple_fd, f->ple_off, rows, (uint32_t)rb, f->ple_stage))
+  f->ple_rs.read = f->ple_read, f->ple_rs.fd = f->ple_fd, f->ple_rs.off = f->ple_off, f->ple_rs.stage = f->ple_stage;
+  if (!rowstream_issue(&f->ple_rs, 0, rows, rb))
     return false;
-  f->ple_pending = true, f->ple_n = rows;
+  f->ple_n = rows;
   return true;
 }
 
@@ -178,10 +177,9 @@ static bool ple_table_rows(Q4xForward *f, uint32_t n)
   const uint32_t heads = (uint32_t)f->w->geo.ple_heads;
   if (!f->stream_ngram)
     return q4x_rows(TY(tab), q4x_dev(f, tab), rb, (uint32_t)tab->dims[0], b->ple_rows, n * heads, b->emb, NULL);
-  if (f->ple_pending)
+  if (f->ple_rs.pending) /* (the step's first part: its rows waited for and copied in whole) */
   {
-    f->ple_pending = false;
-    if (!rowread_wait(f->ple_read) ||
+    if (!rowstream_wait(&f->ple_rs) ||
         hipMemcpyAsync(b->ple_sbuf, f->ple_stage, (uint64_t)f->ple_n * rb, hipMemcpyHostToDevice, NULL) != hipSuccess ||
         hipEventRecord(f->ple_copied, NULL) != hipSuccess)
       return false;
