@@ -113,6 +113,40 @@ int main(int argc, char** argv) {
     std::printf("\n");
     CHECK(hipFree(pool) == hipSuccess);
   }
+  // a prompt step's experts: every one of the 512 with 32 tokens (a 1,024-token step's 16,384 picks), 1536 x 1536, on
+  // the matrix cores (mm_group: f16 x, its tiles) - Q3_K, Q4_K, and Q8_0 (its decode near free: the K-quants' cost)
+  std::printf("a prompt step's experts: 16,384 (expert, token) pairs of 1536 x 1536 (mm_group), warm\n");
+  for (uint32_t PT : {16u, 32u, 64u, 128u}) {
+    const uint32_t PE = 16384 / PT;
+    std::printf(" %u experts x %u tokens\n", PE, PT);
+    void* px16 = dev<uint16_t>((size_t) PE * PT * C);
+    float* pxf = floats((size_t) PE * PT * C, 1.0f);
+    for (uint32_t r0 = 0; r0 < PE * PT; r0 += MM_MAX_TOKENS)  // (mm_x16's rows at most MM_MAX_TOKENS a call: tiles whole)
+      CHECK(mm_x16(pxf + (size_t) r0 * C, C, MM_MAX_TOKENS, C, (uint16_t*) px16 + (size_t) r0 * C, ovf, nullptr));
+    float* py = dev<float>((size_t) PE * PT * R);
+    const void** pw = dev<const void*>(PE);
+    int32_t* pc = dev<int32_t>(PE);
+    uint32_t *pxo = dev<uint32_t>(PE), *pyo = dev<uint32_t>(PE);
+    std::vector<int32_t> c32(PE, (int32_t) PT);
+    std::vector<uint32_t> xo2(PE), yo2(PE);
+    for (uint32_t m = 0; m < PE; m++) xo2[m] = m * PT * C, yo2[m] = m * PT * R;  // (PT a multiple of 16: tiles whole)
+    CHECK(hipMemcpy(pc, c32.data(), PE * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(pxo, xo2.data(), PE * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(pyo, yo2.data(), PE * 4, hipMemcpyHostToDevice) == hipSuccess);
+    for (const Ty& ty : {Ty{"Q3_K", 11}, Ty{"Q4_K", 12}, Ty{"Q8_0", 8}}) {
+      const uint64_t mb = gguf_bytes(ty.type, (uint64_t) R * C);
+      uint8_t* pool = noise(mb * PE);
+      std::vector<const void*> ptr(PE);
+      for (uint32_t m = 0; m < PE; m++) ptr[m] = pool + (uint64_t) m * mb;
+      CHECK(hipMemcpy(pw, ptr.data(), PE * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+      const double us = time_us(iters / 20 + 5, [&](uint32_t) {
+        return mm_group(ty.type, pw, pc, PE, PT, R, C, px16, pxo, C, py, pyo, R, nullptr);
+      });
+      const double tf = 2.0 * PE * PT * R * C / (us * 1e6);
+      std::printf("  %s: %8.1f us (%5.2f TFLOP/s, %5.1f GB/s of weights)\n", ty.name, us, tf, (double) mb * PE / 1e3 / us);
+      CHECK(hipFree(pool) == hipSuccess);
+    }
+  }
   // MLA's absorptions: a head's own Q8_0 matrix on its own row of x, every head at once (k_b: 512 x 128, v_b: 128 x
   // 512), 64 heads a call, rotated through 43 layers' sets
   std::printf("MLA's absorptions: 64 heads' Q8_0 matrices a call (one token), cold\n");
