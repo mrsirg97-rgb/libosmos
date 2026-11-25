@@ -76,6 +76,7 @@ typedef struct AttnCoreDesc
   AttnGate gate;            /* sigmoid(gate) times the output */
   AttnBlock block;
   uint32_t ratio;           /* picks' blocks of keys (0: no picks; ATTN_BLOCK_HEADS alone) */
+  uint32_t unit;            /* a unit's keys, a multiple of ATTN_TILE (0: ATTN_UNIT); a family's, fixed with its bits */
   uint32_t max_tokens;      /* a step's queries at most */
   uint32_t max_keys;        /* a query's keys at most (positions: the context; lists: their stride) */
 } AttnCoreDesc;

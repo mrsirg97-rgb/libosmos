@@ -236,6 +236,14 @@ value's, no sink, no bias; its output also as the out matrix's f16 (Q4xX16, the 
 
 `q4x_attn` is also osmos1.7b's and q35's prompt kernel: Qwen moves first, `q4x_attn` stays for them until C2.
 
+**C1 decided (the operator, 2026-11-24):** Qwen's unit 128 (the desc's `unit`; Inkling's stays 256) and its units
+merged max-first, `q4x_attn`'s merge - bit-identical to today (10 of 10 cases byte for byte), so Qwen moves with its
+hashes as they are. Measured first: at 256 three accuracy cases were 0.2 - 1.0% from `q4x_attn`'s and decode +72%; at
+128 with the running fold the error was `q4x_attn`'s to every digit but an ulp apart in 6 of 10 cases (the merge);
+max-first, byte for byte. Every Qwen step a block a (token, KV head, unit), then the merge - in pieces of 8,192 pairs
+(q4x_attn's scratch, borrowed). A family's tiles are its list's entries (picked blocks, then the tail): every block
+picked tiles exactly as dense.
+
 ## Proofs and checks
 
 - **Per kernel change:** a byte comparison against the old kernel on seeded inputs (`fa_bits`-style, every format,

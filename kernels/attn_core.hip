@@ -4,7 +4,7 @@
 
 #include <cstdlib>
 
-#include "attn_core_kernel.h"
+#include "attn_core_heads.h"
 
 using namespace attn;
 
@@ -77,18 +77,82 @@ bool launch(const AttnCore& c, const AttnStep& s, const KV* k, const KV* v, hipS
   return false;
 }
 
+// a heads block's desc (Qwen's): its refusal, or nullptr
+const char* heads_bad(const AttnCoreDesc& d) {
+  const uint32_t G = d.kv_heads && !(d.heads % d.kv_heads) ? d.heads / d.kv_heads : 0;
+  return d.dk != 256 || d.dv != 256 ? "dk / dv: a heads block's head 256 (C1: Qwen's)"
+         : !G ? "kv_heads: not a group of heads"
+         : G > (uint32_t) kFaTile ? "group: a heads block's query heads a KV head 16 at most (a tile's rows)"
+         : d.k_rows != ATTN_ROWS_Q8_0 || d.v_rows != ATTN_ROWS_Q8_0 ? "k_rows / v_rows: a heads block's Q8_0 (C1)"
+         : d.term != ATTN_TERM_NONE ? "term: a heads block's none"
+         : d.sink ? "sink: a heads block's none (C1)"
+         : d.gate == ATTN_GATE_HEAD ? "gate: a value's or none (C1)"
+         : d.window ? "window: a heads block's none (C1)"
+         : d.ratio && kFaTile % d.ratio ? "ratio: picks' blocks a divisor of a tile's 16 keys"
+         : d.unit % ATTN_TILE ? "unit: a whole number of tiles"
+                                        : nullptr;
+}
+
+// a heads block's step (Qwen's: q4x_attn's scheme, its bits): a block a (token, KV head, unit) - its partial - then
+// the units merged max-first; a step in pieces of at most kHeadsPairs (token, unit) pairs (the scratch's)
+constexpr uint32_t kHeadsPairs = 8192, kHeadsStepTokens = 64;  // (q4x_attn's kPieceChunks, kStepTokens)
+bool heads_launch(const AttnCore& c, const AttnStep& s, hipStream_t stream) {
+  const AttnCoreDesc& d = c.d;
+  const AttnKeys& k = s.keys;
+  const uint32_t U = d.unit ? d.unit : kFaUnit;
+  // a step's token's most entries: its position's, or with picks at most its blocks' and a tail short of a block
+  const uint64_t dense = (uint64_t) s.pos0 + s.n_tok, picked = (uint64_t) d.ratio * k.stride + d.ratio - 1;
+  const uint64_t longest = k.sel && picked < dense ? picked : dense;
+  const uint32_t most = (uint32_t) ((longest - 1) / U + 1), fit = kHeadsPairs / most;
+  const uint32_t piece = fit < 1 ? 1 : fit < kHeadsStepTokens ? fit : kHeadsStepTokens;
+  for (uint32_t t0 = 0; t0 < s.n_tok; t0 += piece) {
+    const uint32_t n = s.n_tok - t0 < piece ? s.n_tok - t0 : piece, p0 = s.pos0 + t0;
+    const uint64_t pd = (uint64_t) p0 + n, pl = k.sel && picked < pd ? picked : pd;
+    const uint32_t units = (uint32_t) ((pl - 1) / U + 1);
+    const HeadsArgs a = {d.heads, d.kv_heads, d.ratio, k.stride, U, d.scaling, k.key0, p0, s.x16_row0 + t0, d.heads * d.dv};
+    const uint64_t qa = (uint64_t) t0 * d.heads * d.dk, oa = (uint64_t) t0 * d.heads * d.dv;
+    const int32_t *sel = k.sel ? k.sel + (uint64_t) t0 * k.stride : nullptr, *np = k.npick ? k.npick + t0 : nullptr;
+    heads_kernel<256, true><<<dim3(n, d.kv_heads, units), kHeadsWaves * 32, 0, stream>>>(
+        a, s.q + qa, nullptr, n, (const uint8_t*) k.k, (const uint8_t*) k.v, sel, np, nullptr, nullptr, nullptr, 0,
+        c.part);
+    heads_merge_kernel<256><<<n * d.heads, 256, 0, stream>>>(c.part, n, a, sel, np, s.gate ? s.gate + oa : nullptr,
+                                                              s.out + oa, (_Float16*) s.x16, s.overflow);
+    if (hipGetLastError() != hipSuccess) return false;
+  }
+  return true;
+}
+
 }  // namespace
 
 extern "C" uint64_t attn_core_scratch(const AttnCoreDesc* d) {
-  return d ? ((uint64_t) d->max_keys / kFaUnit + 2) * kFaTile * d->heads * (kFaHead + 2) * sizeof(float) : 0;
+  if (!d) return 0;
+  const uint32_t U = d->unit ? d->unit : kFaUnit;
+  if (d->block == ATTN_BLOCK_HEADS) {  // a piece's (token, unit) pairs: kHeadsPairs, or one token's every unit
+    const uint64_t units = ((uint64_t) d->max_keys + U - 1) / U;
+    return (units > kHeadsPairs ? units : kHeadsPairs) * d->heads * (d->dv + 2) * sizeof(float);
+  }
+  return ((uint64_t) d->max_keys / U + 2) * kFaTile * d->heads * (kFaHead + 2) * sizeof(float);
 }
 
 extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint64_t scratch_bytes,
                                       char err[OSMOS_ERR]) {
   if (!d) return refuse(err, "no desc"), nullptr;
+  if (d->block == ATTN_BLOCK_HEADS) {
+    const char* bad = heads_bad(*d);
+    if (!bad && !d->max_tokens) bad = "max_tokens: 0";
+    if (!bad && !d->max_keys) bad = "max_keys: 0";
+    if (!bad && (!scratch || scratch_bytes < attn_core_scratch(d))) bad = "max_keys: past the scratch given";
+    if (bad) return refuse(err, bad), nullptr;
+    AttnCore* c = (AttnCore*) std::calloc(1, sizeof *c);
+    if (!c) return refuse(err, "out of memory"), nullptr;
+    c->d = *d, c->part = (float*) scratch;
+    return c;
+  }
   const uint32_t G = d->kv_heads && !(d->heads % d->kv_heads) ? d->heads / d->kv_heads : 0;
   const bool group_made = G == 1 || G == 2 || G == 3 || G == 4 || G == 6 || G == 8;  // (the launches' instances)
-  const char* bad = d->dk != ATTN_HEAD || d->dv != ATTN_HEAD ? "dk / dv: a head of ATTN_HEAD alone"
+  const char* bad = d->ratio ? "ratio: picks a heads block's alone (a tile's rows one token's)"
+                    : d->unit && d->unit != ATTN_UNIT ? "unit: Inkling's ATTN_UNIT (its bits)"
+                    : d->dk != ATTN_HEAD || d->dv != ATTN_HEAD ? "dk / dv: a head of ATTN_HEAD alone"
                     : !d->heads || !d->kv_heads || d->heads % d->kv_heads ? "kv_heads: not a group of heads"
                     : !group_made ? "group: query heads a KV head 1, 2, 3, 4, 6 or 8"
                     : kv_of(*d) == Kv::NONE ? "k_rows / v_rows: a pairing not made (F32, f16, Q8, Q8 keys and Q5 values)"
@@ -98,8 +162,7 @@ extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint
                     : d->window % ATTN_TILE ? "window: a whole number of tiles"
                     : !d->sink ? "sink: a sink logit alone (B2: Inkling's)"
                     : d->gate == ATTN_GATE_HEAD ? "gate: a value's or none (B2: Inkling's)"
-                    : d->block != ATTN_BLOCK_TOKENS ? "block: ATTN_BLOCK_TOKENS alone (C1 builds a token's heads)"
-                    : d->ratio ? "ratio: no picks (C1 builds them)"
+                    : d->block != ATTN_BLOCK_TOKENS ? "block: not a block made"
                     : !d->max_tokens ? "max_tokens: 0"
                     : !d->max_keys ? "max_keys: 0"
                     : !scratch || scratch_bytes < attn_core_scratch(d) ? "max_keys: past the scratch given"
@@ -114,9 +177,17 @@ extern "C" AttnCore* attn_core_create(const AttnCoreDesc* d, void* scratch, uint
 extern "C" void attn_core_destroy(AttnCore* c) { std::free(c); }
 
 extern "C" bool attn_core_run(const AttnCore* c, const AttnStep* s, void* stream) {
-  if (!c || !s || !s->q || !s->out || !s->keys.k || !s->keys.v || !s->rel || !s->rel_proj || !s->sink) return false;
+  if (!c || !s || !s->q || !s->out || !s->keys.k || !s->keys.v) return false;
   const AttnCoreDesc& d = c->d;
   const AttnKeys& k = s->keys;
+  if (d.block == ATTN_BLOCK_HEADS) {  // positions from key0 (the cache's rows), or picks of them
+    if (!s->n_tok || s->n_tok > d.max_tokens || s->pos0 + s->n_tok > k.key0 + k.n_keys || s->pos0 < k.key0 ||
+        k.n_keys > d.max_keys || k.key0 % ATTN_TILE || k.lists || (k.sel != nullptr) != (k.npick != nullptr) ||
+        (k.sel && (!d.ratio || !k.stride)) || (s->x16 && !s->overflow))
+      return false;
+    return heads_launch(*c, *s, (hipStream_t) stream);
+  }
+  if (!s->rel || !s->rel_proj || !s->sink) return false;
   if (!s->n_tok || s->n_tok > d.max_tokens || k.n_keys > d.max_keys || s->n_tok > k.n_keys || k.key0 % ATTN_TILE ||
       k.lists || k.sel || k.npick || s->x16_row0 || s->pos0 != k.key0 + k.n_keys - s->n_tok)  // (B2: positions, the step's tokens its keys' last)
     return false;
