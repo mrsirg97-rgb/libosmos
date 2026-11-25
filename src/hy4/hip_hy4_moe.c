@@ -192,18 +192,20 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
            mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y) && hy4_part_done(f, 20, &t);
   }
   uint32_t entries = 0, slots = 0;
+  double t = f->pf.on > 1 ? hy4_now() : 0;
   if (!route(f, l, n, &entries, &slots))
     return false;
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **rw = f->rw;
-  return mm_x16_rows(rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
+  return hy4_part_done(f, 17, &t) && mm_x16_rows(rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_gate->type, rw, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_g, f->ry, ffe, f->st) &&
+         hy4_part_done(f, 18, &t) &&
          mm_experts(L->exp_up->type, rw + ecap, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_u, f->ry,
-                    ffe, f->st) &&
+                    ffe, f->st) && hy4_part_done(f, 19, &t) &&
          ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
          mm_x16_rows(f->eg_h, ffe, f->rhidx, slots, ffe, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_down->type, rw + 2 * ecap, f->h_rcnt, f->rcnt, entries, lat, ffe, f->xe16, f->rxd, f->eg_y,
-                    f->ryd, lat, f->st);
+                    f->ryd, lat, f->st) && hy4_part_done(f, 20, &t);
 }
 
 bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)

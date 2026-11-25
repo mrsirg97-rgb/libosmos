@@ -17,7 +17,7 @@
 #include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
-#define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
+#define HY4_ROW_THREADS 64  /* the Engram rows' readers (rowread's threads): a cold prompt step's ~50,000 random rows SSD-bound - 64 deep (8: 305 ms a 1,024-token step on wiki, 153 on code; 32: 124 / 92; 64: 71 on code) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
 #define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a
@@ -228,7 +228,8 @@ static inline bool hy4_part_done(Hy4Forward *f, int k, double *t)
 {
   if (f->pf.on < 2)
     return true;
-  if (f->pf.read)  /* (a prompt's step: not timed in parts - its unsynced work would land in a later part) */
+  if (f->pf.read != (f->pf.on > 2))  /* the steps timed: a decode's (2), a prompt's (3) - never both, so no
+                                         unsynced part of the other kind lands in a timed one */
     return true;
   const bool ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
   const double now = hy4_now();

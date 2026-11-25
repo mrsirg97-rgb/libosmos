@@ -50,7 +50,8 @@ void hy4_forward_destroy(Hy4Forward *f)
                                          "  router picks", "  route, gather", "  experts gate", "  experts up",
                                          "  swiglu, down", "  routed up", "  shared down, post", "  gather sum"};
     for (int k = 0; k < 24; k++)
-      fprintf(stderr, "  %-14s %7.2f ms a decode step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.dsteps);
+      fprintf(stderr, "  %-14s %7.2f ms a %s step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.dsteps,
+              f->pf.on > 2 ? "prompt" : "decode");
     static const char *const dpart[4] = {"draft: embed, fusion", "draft: 5 layers", "draft: corrections x5",
                                          "draft: head + pick x5"};
     for (int k = 0; f->pf.drafts && k < 4; k++)
@@ -150,7 +151,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   f->kring = (o->max_tokens + (uint32_t)g->ix_pool + HY4_MAX_BACK + (uint32_t)g->ix_pool - 1) / (uint32_t)g->ix_pool *
              (uint32_t)g->ix_pool;
   f->eg_fd = -1;
-  f->pf.on = getenv("HY4_PROFILE") ? (atoi(getenv("HY4_PROFILE")) > 1 ? 2 : 1) : 0;
+  f->pf.on = getenv("HY4_PROFILE") ? (atoi(getenv("HY4_PROFILE")) > 2 ? 3 : atoi(getenv("HY4_PROFILE")) > 1 ? 2 : 1) : 0;
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     f->dfly_slot[l] = -1;
   int hmax = 0;
