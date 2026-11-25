@@ -379,13 +379,16 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
   const uint64_t erow = emb->bytes / emb->dims[1];
   for (uint32_t j = 0; j < R; j++)
     d->pin_ids[j] = j ? MASK_TOKEN : y, d->pin_pos[j] = anchor + (int32_t)j;
+  double pt = f->pf.on > 1 ? hy4_now() : 0;
+  f->pf.drafts += f->pf.on > 1;
   bool ok = hipMemcpyAsync(d->ids, d->pin_ids, R * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hipMemcpyAsync(d->pos, d->pin_pos, R * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             q4x_rows(emb->type, hy4_dev(f, emb), erow, D, d->ids, R, d->h, f->st);
   /* the fusion on the anchor's row: h0 += (gate W) [enorm(e0); hnorm(target hidden)] */
   ok = ok && ops_rms(d->h, D, D, d->enorm, eps, 1, d->cat, 2 * D, f->st) &&
        ops_rms(s->dhid + (uint64_t)i * D, D, D, d->hnorm, eps, 1, d->cat + D, 2 * D, f->st) &&
-       mat(f, d->ehtype, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st);
+       mat(f, d->ehtype, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st) &&
+       hy4_draft_part(f, 24, &pt);
   for (int li = 0; ok && li < HY4_DFLY_LAYERS; li++)
   {
     const Layer *L = &d->layer[li];
@@ -412,7 +415,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          ops_swiglu(d->ga, d->up, d->ff, INFINITY, NULL, R, d->act, f->st) &&
          mat(f, d->wtype, L->ffn_down, D, d->ff, d->act, R, d->y) && ops_add(d->h, d->y, (uint64_t)R * D, f->st);
   }
-  ok = ok && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
+  ok = ok && hy4_draft_part(f, 25, &pt) && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
   /* the chain: draft j from row j's hidden corrected by the token before it (the anchor's, then each draft's) */
   for (uint32_t j = 1; ok && j < R; j++)
   {
@@ -424,11 +427,11 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          mat(f, d->wtype, d->corr_up, d->corr_ff, 2 * D, d->cat, 1, d->up) &&
          ops_swiglu(d->ga, d->up, d->corr_ff, INFINITY, NULL, 1, d->act, f->st) &&
          mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
-         ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) &&
+         ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) && hy4_draft_part(f, 26, &pt) &&
          (d->head4 ? mat(f, QTYPE_Q4_0, d->head4, V, D, d->c, 1, d->logits)
           : d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
                    : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
-         hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st);
+         hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st) && hy4_draft_part(f, 27, &pt);
   }
   ok = ok && hipMemcpyAsync(d->pin_pick, d->pick, most * 4, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipMemcpyAsync(d->pin_prob, d->prob, most * F, hipMemcpyDeviceToHost, f->st) == hipSuccess &&

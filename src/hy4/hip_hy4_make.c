@@ -51,6 +51,10 @@ void hy4_forward_destroy(Hy4Forward *f)
                                          "  swiglu, down", "  routed up", "  shared down, post", "  gather sum"};
     for (int k = 0; k < 24; k++)
       fprintf(stderr, "  %-14s %7.2f ms a decode step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.dsteps);
+    static const char *const dpart[4] = {"draft: embed, fusion", "draft: 5 layers", "draft: corrections x5",
+                                         "draft: head + pick x5"};
+    for (int k = 0; f->pf.drafts && k < 4; k++)
+      fprintf(stderr, "  %-22s %7.2f ms a draft\n", dpart[k], 1e3 * f->pf.part_s[24 + k] / (double)f->pf.drafts);
   }
   experts_destroy(&f->ex); /* its readers stopped, then its memory */
   for (int i = 0; f->xfds && i < f->w->model->n_files; i++)
