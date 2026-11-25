@@ -126,9 +126,10 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
             hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hy4_engram_read(f, run, runs, n);
   ok = ok && launches(f, run, runs, n, kept, read);
-  ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
-       hipStreamSynchronize(f->st) == hipSuccess;
-  hipStreamSynchronize(f->st);
+  ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess;
+  /* one sync, whatever failed: the flags read, and the kernels done before membrane_end lets their experts go */
+  const bool drained = hipStreamSynchronize(f->st) == hipSuccess;
+  ok = ok && drained;
   if (f->pf.on)
     f->pf.steps++, f->pf.dsteps += !read, f->pf.tokens += n, f->pf.step_s += hy4_now() - pf0;
   if (f->ex.mem)
