@@ -34,6 +34,22 @@ void hy4_forward_destroy(Hy4Forward *f)
   hy4_dfly_free(f);
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     attn_core_destroy(f->mla[l]);
+  if (f->pf.on && f->pf.steps)
+    fprintf(stderr,
+            "hy4 profile: %llu steps, %llu tokens; a step %.2f ms; the Engram read %.3f ms a step (preads %.3f, copy and "
+            "decode %.3f), %.1f rows and %.1f KB a step\n",
+            (unsigned long long)f->pf.steps, (unsigned long long)f->pf.tokens, 1e3 * f->pf.step_s / (double)f->pf.steps,
+            1e3 * (f->pf.rowread_s + f->pf.copy_s) / (double)f->pf.steps, 1e3 * f->pf.rowread_s / (double)f->pf.steps,
+            1e3 * f->pf.copy_s / (double)f->pf.steps, (double)f->pf.rows / (double)f->pf.steps,
+            (double)f->pf.bytes / 1024.0 / (double)f->pf.steps);
+  if (f->pf.on > 1 && f->pf.steps)
+  {
+    static const char *const part[15] = {"engram update", "iHC attn", "attention", "iHC ffn", "experts", "dense ffn",
+                                         "embed", "head", "  proj in", "  q_b", "  kv, q absorb", "  indexer",
+                                         "  mla attn", "  v absorb", "  proj out"};
+    for (int k = 0; k < 15; k++)
+      fprintf(stderr, "  %-14s %7.2f ms a step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.steps);
+  }
   experts_destroy(&f->ex); /* its readers stopped, then its memory */
   for (int i = 0; f->xfds && i < f->w->model->n_files; i++)
     if (f->xfds[i] >= 0)
@@ -128,6 +144,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   f->kring = (o->max_tokens + (uint32_t)g->ix_pool + HY4_MAX_BACK + (uint32_t)g->ix_pool - 1) / (uint32_t)g->ix_pool *
              (uint32_t)g->ix_pool;
   f->eg_fd = -1;
+  f->pf.on = getenv("HY4_PROFILE") ? (atoi(getenv("HY4_PROFILE")) > 1 ? 2 : 1) : 0;
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     f->dfly_slot[l] = -1;
   int hmax = 0;

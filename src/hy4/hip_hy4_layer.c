@@ -175,8 +175,20 @@ static bool dfly_snap(Hy4Forward *f, Hy4Seq *s, int l, uint32_t off, uint32_t le
                         hipMemcpyDeviceToDevice, f->st) == hipSuccess;
 }
 
+/* HY4_PROFILE=2: the part just queued, to a sync, into its sum */
+static bool part_done(Hy4Forward *f, int k, double *t)
+{
+  if (f->pf.on < 2)
+    return true;
+  const bool ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const double now = hy4_now();
+  f->pf.part_s[k] += now - *t, *t = now;
+  return ok;
+}
+
 static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read)
 {
+  double t = f->pf.on > 1 ? hy4_now() : 0;
   const Hy4Geometry *g = &f->w->geo;
   const Hy4Layer *L = &f->w->layer[l];
   const bool sw = g->sliding[l];
@@ -196,10 +208,12 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
                   : hy4_mat_pair(f, L->q_a, ql, qr, L->kv_a, row, kva, f->xn, D, n, read, &on_xn) &&
                         hy4_mat_pair(f, L->gate, H * vd, gt, sw ? NULL : L->ix_k, ID, ixk, f->xn, D, n, read, &on_xn) &&
                         (sw || hy4_mat(f, L->ix_proj, IH, D, f->xn, n, ixw, read));
+  ok = ok && part_done(f, 8, &t);
   ok = ok && ops_rms(qr, ql, ql, hy4_fv(f, L->q_a_norm), g->rms_eps, n, f->qres, ql, f->st) &&
        hy4_mat_pair(f, L->q_b, H * qk, f->q, sw ? NULL : L->ix_q_b, IH * ID, f->ixq, f->qres, ql, n, read, &on_qres);
   if (ok && !sw)
     ok = hy4_ix_query(f->ixq, ixw, IH, ID, rd, f->freqs_sparse, f->pos, n, f->st);
+  ok = ok && part_done(f, 9, &t);
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const uint64_t o = run[r].off;
@@ -211,23 +225,25 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
                             H * qk, qk, m, f->qa + o * H * row, H * row, row) &&
                      hy4_mla_qrope(f->q + o * H * qk, H, qk, row, rd, freqs, f->pos + o, m, f->qa + o * H * row, f->st)
                 : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
-                            f->qa + o * H * row, f->table, f->st)) &&
-         (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw, read)) && dfly_snap(f, s, l, (uint32_t)o, m) &&
+                            f->qa + o * H * row, f->table, f->st)) && part_done(f, 10, &t) &&
+         (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw, read)) && part_done(f, 11, &t) &&
+         dfly_snap(f, s, l, (uint32_t)o, m) &&
          attn_core_run(f->mla[l],
                        &(AttnStep){.q = f->qa + o * H * row, .n_tok = m, .pos = f->pos + o, .sink = hy4_fv(f, L->sinks),
                                    .out = f->olat + o * H * lat, .read = read,
                                    .keys = {.k = s->cache[l], .v = s->cache[l], .sel = sw ? NULL : f->sel + o * top,
                                             .npick = sw ? NULL : f->n_sel + o, .stride = sw ? 0 : top}},
-                       f->st);
+                       f->st) && part_done(f, 12, &t);
   }
   ok = ok && (read ? heads_mm(f, f->vb_tab + (uint64_t)l * HY4_MAX_HEADS, H, vd, lat, f->olat, H * lat, n, f->ao,
                               H * vd, f->vb_xo, f->vb_yo) &&
                          hy4_gate_mul(f->ao, gt, (uint64_t)n * H * vd, f->st)
                     : hy4_mla_out(f->olat, hy4_dev(f, L->v_b), gt, H, lat, vd, n, f->ao, f->table, f->st));
+  ok = ok && part_done(f, 13, &t);
   return ok &&
          hy4_mat(f, L->out, D, H * vd, f->ao, n, f->out, read) &&
          ops_rms(f->out, D, D, hy4_fv(f, L->post_attn_norm), g->rms_eps, n, f->y, D, f->st) &&
-         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st);
+         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st) && part_done(f, 14, &t);
 }
 
 /* the dense layer's FFN: gate and up, SwiGLU, down, the post norm into the streams */
@@ -252,11 +268,14 @@ bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int 
   const Hy4Geometry *g = &f->w->geo;
   const Hy4Layer *L = &f->w->layer[l];
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc;
-  return (!g->engram[l] || engram(f, n, l)) &&
+  double t = f->pf.on > 1 ? hy4_now() : 0;
+  return (!g->engram[l] || engram(f, n, l)) && part_done(f, 0, &t) &&
          hy4_hc_pre(f->h, f->fn_attn[l], hy4_fv(f, L->hc_attn_scale), hy4_fv(f, L->hc_attn_base), 2 * hc, hc, D,
                     g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->attn_norm), n, f->xn, f->post, f->hcs, f->st) &&
-         attention(f, run, runs, n, l, read) &&
+         part_done(f, 1, &t) && attention(f, run, runs, n, l, read) && part_done(f, 2, &t) &&
          hy4_hc_pre(f->h, f->fn_ffn[l], hy4_fv(f, L->hc_ffn_scale), hy4_fv(f, L->hc_ffn_base), 2 * hc, hc, D,
                     g->rms_eps, g->hc_eps, g->hc_magnitude, hy4_fv(f, L->ffn_norm), n, f->xn, f->post, f->hcs, f->st) &&
-         (l < g->n_dense ? dense(f, n, l, read) : hy4_moe(f, n, l, read)); /* (each ends in the streams' update) */
+         part_done(f, 3, &t) &&
+         (l < g->n_dense ? dense(f, n, l, read) && part_done(f, 5, &t)
+                         : hy4_moe(f, n, l, read) && part_done(f, 4, &t)); /* (each ends in the streams' update) */
 }

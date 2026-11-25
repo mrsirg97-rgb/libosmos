@@ -32,7 +32,12 @@ bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
               t->offset + (f->eg_first[e] + (uint64_t)rows[e * cols + c]) * f->eg_row_bytes;
     }
   const uint64_t count = (uint64_t)L * n * cols;
-  return rowread(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)count, (uint32_t)f->eg_row_bytes, f->eg_stage) &&
-         hipMemcpy(f->eg_raw, f->eg_stage, count * f->eg_row_bytes, hipMemcpyHostToDevice) == hipSuccess &&
-         quant_dequant(t->type, f->eg_raw, count * (uint64_t)g->engram_dim, f->eg_rows, f->st);
+  const double t0 = f->pf.on ? hy4_now() : 0;
+  bool ok = rowread(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)count, (uint32_t)f->eg_row_bytes, f->eg_stage);
+  const double t1 = f->pf.on ? hy4_now() : 0;
+  ok = ok && hipMemcpy(f->eg_raw, f->eg_stage, count * f->eg_row_bytes, hipMemcpyHostToDevice) == hipSuccess &&
+       quant_dequant(t->type, f->eg_raw, count * (uint64_t)g->engram_dim, f->eg_rows, f->st);
+  if (f->pf.on)
+    f->pf.rowread_s += t1 - t0, f->pf.copy_s += hy4_now() - t1, f->pf.rows += count, f->pf.bytes += count * f->eg_row_bytes;
+  return ok;
 }

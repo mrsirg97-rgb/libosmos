@@ -9,6 +9,7 @@
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "osmos/hy4/forward.h"
 #include "osmos/mem/rowread.h"
@@ -91,6 +92,18 @@ struct Hy4Forward
   Experts ex;
   int *xfds;
   bool whole;
+  /* HY4_PROFILE set: a step's wall time and its Engram read's parts, summed - printed at destroy; HY4_PROFILE=2 also
+     a layer's parts, each timed to a stream sync (the syncs' own cost in them) */
+  struct
+  {
+    int on;
+    double part_s[16]; /* hy4_layer's: Engram's update, iHC before attention, attention, iHC before the FFN, experts,
+                         the dense FFN; then the embedding and the head (launches'); then attention's own parts
+                         (its projections in, q_b, the kv rows and q's absorption, the indexer, the MLA attention, the
+                         values' absorption, the projection out) */
+    uint64_t steps, tokens, rows, bytes;
+    double step_s, rowread_s, copy_s; /* the whole step; the rows' preads; their copy to the GPU and decode */
+  } pf;
   const void **exp_tab, **h_tab;        /* (h_tab: its host copy, a read's) */
   const void *(*h_ex)[POOL_PARTS];      /* a step's runs' experts' addresses (n_experts of them) */
   uint64_t fixed_bytes, pinned_bytes;
@@ -198,3 +211,11 @@ bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err);
 bool hy4_freqs(Hy4Forward *f, float base, uint32_t dim, float **out);
 bool hy4_joints_make(Hy4Forward *f, uint32_t *most);
 bool hy4_upload(Hy4Forward *f, char *err);
+
+/* a monotonic clock in seconds (HY4_PROFILE's) */
+static inline double hy4_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
