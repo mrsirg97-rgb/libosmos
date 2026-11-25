@@ -157,6 +157,15 @@ struct Forward
   bool no_guess;                              /* ForwardOptions': nothing guessed, no router copy made */
   float *freqs_win, *freqs_comp;
   Scratch b;
+  /* DS4_PROFILE=2: a step's parts each timed to a device sync (the lane's and the GPU's work both), summed by the
+     step's kind (0: a small step - a decode or a verify; 1: a prompt's) - printed at destroy */
+  struct
+  {
+    bool on;
+    int kind;
+    uint64_t steps[2], tokens[2];
+    double s[2][12], step_s[2];
+  } pf;
   AttnCore *latent; /* the attention (the core's latent: the window's FP8 ring, the selected FP4 rows) */
   OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed */
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
@@ -393,4 +402,22 @@ bool fwd_guess_routers(Forward *f, const Weights *w, char *err);
 bool fwd_oa_tables(Forward *f, char *err);
 /* hip_ds4_make.c's, for the experts' pool (hip_ds4_resident.c): the step buffers' sub-views, made again */
 bool fwd_subs(Forward *f);
+/* DS4_PROFILE: the part just queued, to a device sync, into its sum (its kind's) */
+#include <time.h>
+static inline double fwd_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+static inline bool fwd_part(Forward *f, int k, double *t)
+{
+  if (!f->pf.on)
+    return true;
+  const bool ok = hipDeviceSynchronize() == hipSuccess;
+  const double now = fwd_now();
+  f->pf.s[f->pf.kind][k] += now - *t, *t = now;
+  return ok;
+}
+
 #endif

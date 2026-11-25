@@ -80,8 +80,10 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
       memcpy(f->tap_bs + at, f->bs + j0, m * sizeof *f->tap_bs);
     }
   }
+  double pt = f->pf.on ? fwd_now() : 0;
   if (g->engram[l] && !fwd_engram(f, l, (*nth)++, err))
     return false;
+  (void)fwd_part(f, 1, &pt);
   fwd_probe(f, "h_in", l, p, b->h, n * hc * D, false);
   /* the mixes and the norm one launch (ops_hc_mix_pre_rms); a probe may stand the oracle's in for x: its x16 the
      attention's own then. the mixes' sums written already when the last layer's end did (layer_out) */
@@ -93,12 +95,14 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
                                b->x, f->probe ? NULL : b->x16, f->probe ? NULL : b->overflow, NULL, NULL, NULL);
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the attention's mixes)");
+  (void)fwd_part(f, 2, &pt);
   fwd_probe(f, "a_pre", l, p, b->a_pre, n * hc, false);
   fwd_probe(f, "a_post", l, p, b->a_post, n * hc, false);
   fwd_probe(f, "a_comb", l, p, b->a_comb, n * hc * hc, false);
   fwd_probe(f, "attn_x", l, p, b->x, n * D, false);
   if (!fwd_attention(f, l, err))
     return false;
+  (void)fwd_part(f, 3, &pt);
   /* the FFN's input's x16 beside it for the shared expert (shared(): its rows the step's when one sub-batch is all of
      them; not with a probe, which may stand the oracle's in) */
   f->xf_x16 = f->n_sub == 1 && !f->probe;
@@ -112,6 +116,7 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
                           f->xf_q8 ? f->lane_xq : NULL, f->xf_q8 ? f->lane_xqd : NULL, NULL);
   if (!ok)
     return osmos_fail(err, "a GPU call failed (the FFN's mixes)");
+  (void)fwd_part(f, 4, &pt);
   fwd_probe(f, "h_mid", l, p, b->mid, n * hc * D, false);
   fwd_probe(f, "f_pre", l, p, b->f_pre, n * hc, false);
   fwd_probe(f, "f_post", l, p, b->f_post, n * hc, false);
@@ -124,7 +129,15 @@ static bool layer_in(Forward *f, int l, const float *pre, int *nth, char *err)
    layer's attention mixes' sums (ops_hc_post_dot: its layer_in's ops_hc_dot, one launch fewer) when nothing comes
    between: one sub-batch (b.hcp is the Forward's), no probe (it may stand h in), no Engram next (it changes h), not
    the decoder's compaction (it changes the tokens) */
+static bool layer_out_(Forward *f, int l, char *err);
 static bool layer_out(Forward *f, int l, char *err)
+{
+  double pt = f->pf.on ? fwd_now() : 0;
+  const bool ok = layer_out_(f, l, err);
+  (void)fwd_part(f, 6, &pt);
+  return ok;
+}
+static bool layer_out_(Forward *f, int l, char *err)
 {
   Scratch *b = &f->b;
   const uint32_t hc = f->g->hc, D = f->g->n_embd, n = f->n;
@@ -145,7 +158,10 @@ static bool layer_experts(Forward *f, int l, uint32_t rows, char *err)
   if (!rows)
     return true;
   f->n = rows, f->at = f->sub[0].at, f->b.xf = f->xf0, f->b.moe = f->moe0;
-  return fwd_moe(f, l, err);
+  double pt = f->pf.on ? fwd_now() : 0;
+  const bool ok = fwd_moe(f, l, err);
+  (void)fwd_part(f, 5, &pt);
+  return ok;
 }
 
 /* sub-batch k's state into the Forward (and its Scratch), to run its next layer; and back */
@@ -270,6 +286,9 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return false;
   f->vocab_rows = 0; /* (its head's, when it runs one) */
   f->step_n = n;
+  f->pf.kind = n > MV_MAX_TOKENS;
+  const double pf0 = f->pf.on ? fwd_now() : 0;
+  double pt = pf0;
   memset(f->slot, 0xff, n * sizeof *f->slot); /* (no row kept until a head computes it) */
   if (!place(f, seqs, tokens, n, placed, err) || !fwd_engram_issue(f, err)) /* (placed: past its checks) */
     return false;
@@ -281,6 +300,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     ok = begin(f, err);
     leave(f, k);
   }
+  (void)fwd_part(f, 0, &pt);
   /* layer by layer, every sub-batch through it before the next: each up to the experts' input, its rows one after
      another; the experts once for them all; then each sub-batch's end of the layer. (a sub-batch's attention reads
      the earlier ones' keys of the layer, which its experts do not touch) */
@@ -317,6 +337,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     ok = fwd_head(f, err);
     leave(f, k);
   }
+  pt = f->pf.on ? fwd_now() : 0; /* (the head's own: synced next, with the step's end) */
   if (!ok)
     return fail_held(f);
   /* the step's one wait: the last layer's experts are read, the pinned buffers free for the next step */
@@ -325,6 +346,9 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return osmos_fail(err, "a GPU call failed (the step)"), fail_held(f);
   if (f->cpu && !cpu_lane_wait(f->cpu))
     return osmos_fail(err, "the CPU lane's experts failed"), fail_held(f);
+  if (f->pf.on)
+    f->pf.s[f->pf.kind][7] += fwd_now() - pt, f->pf.steps[f->pf.kind]++, f->pf.tokens[f->pf.kind] += n,
+        f->pf.step_s[f->pf.kind] += fwd_now() - pf0;
   membrane_end(f->mem);
   if (f->pin->overflow) /* the flag cleared here and after a failed step (fail_held), not every step: a launch a step */
     return overflow_reset(&f->ovf, NULL),

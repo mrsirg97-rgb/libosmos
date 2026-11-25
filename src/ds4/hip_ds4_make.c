@@ -191,6 +191,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
           (uint32_t)w->geo.cand_blocks) /* a context this long passes the candidate blocks: their bits a token */
     f->cand_words = ((f->score_stride + w->geo.cand_block - 1) / w->geo.cand_block + 31) / 32;
   f->eg_fd = -1;
+  f->pf.on = getenv("DS4_PROFILE") != NULL;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = f->dfds[i] = -1;
   /* a drafter's plan before any GPU memory: its index read, its target layers the model's (a drafter refused here,
@@ -275,6 +276,18 @@ void forward_destroy(Forward *f)
 {
   if (!f)
     return;
+  static const char *const part[8] = {"embed", "engram", "attn mixes", "attention", "ffn mixes", "experts",
+                                      "layer out", "head + settle"};
+  for (int k = 0; f->pf.on && k < 2; k++)
+  {
+    if (!f->pf.steps[k])
+      continue;
+    fprintf(stderr, "ds4 profile (%s steps): %llu steps, %llu tokens, %.2f ms a step\n", k ? "prompt" : "small",
+            (unsigned long long)f->pf.steps[k], (unsigned long long)f->pf.tokens[k],
+            1e3 * f->pf.step_s[k] / (double)f->pf.steps[k]);
+    for (int p = 0; p < 8; p++)
+      fprintf(stderr, "  %-14s %8.2f ms a step\n", part[p], 1e3 * f->pf.s[k][p] / (double)f->pf.steps[k]);
+  }
   (void)hipDeviceSynchronize(); /* a failed step's kernels done: what is freed or unlocked, the GPU is past */
   fwd_drafter_destroy(f->drafter); /* first: it borrows the forward (its taps, its head) */
   attn_core_destroy(f->latent);
