@@ -2,76 +2,16 @@
 // ink2_fa16, ink2_fa8, ink2_fa85 - prompts, a step at depth, split decodes and verifies, its f16 out), its bits a
 // token's own (a prompt in one step and in three, a decode and its prompt row), and what it refuses, named. seeded
 // inputs; every comparison's own mutation checked first
-#include <hip/hip_runtime.h>
-
-#include <cmath>
-#include <cstdio>
-#include <cstdlib>
-#include <cstring>
-#include <string>
-#include <vector>
+#include "attn_core_test.h"
 
 extern "C" {
 #include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/ink2_ops.h"
 }
 
-#define HIP_OK(x)                                                                \
-  do {                                                                           \
-    if ((x) != hipSuccess) {                                                     \
-      std::fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x);               \
-      std::exit(1);                                                              \
-    }                                                                            \
-  } while (0)
-
-static int g_fail = 0, g_pass = 0;
-static void check(bool ok, const std::string& what) {
-  if (ok)
-    g_pass++;
-  else
-    g_fail++, std::printf("  FAIL %s\n", what.c_str());
-}
-
-template <class T>
-static T* dev(size_t n) {
-  T* p;
-  HIP_OK(hipMalloc((void**) &p, n * sizeof(T) + 256));
-  HIP_OK(hipMemset(p, 0, n * sizeof(T) + 256));
-  return p;
-}
-static float* up(const std::vector<float>& v) {
-  float* d = dev<float>(v.size());
-  HIP_OK(hipMemcpy(d, v.data(), v.size() * 4, hipMemcpyHostToDevice));
-  return d;
-}
-static std::vector<uint8_t> down(const void* p, size_t bytes) {
-  std::vector<uint8_t> b(bytes);
-  HIP_OK(hipDeviceSynchronize());
-  HIP_OK(hipMemcpy(b.data(), p, bytes, hipMemcpyDeviceToHost));
-  return b;
-}
-static bool same(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
-  return a.size() == b.size() && !std::memcmp(a.data(), b.data(), a.size());
-}
-
 // Inkling-2-Mini's attention: 24 heads over 8 KV heads (GQA 3), dim 128, 16 relative states over 1,024 positions
 constexpr uint32_t H = 24, KV = 8, D = 128, R = 16, E = 1024;
 constexpr float kScale = 0.08838834764831845f;  // 128^-0.5
-
-// the inputs' own generator (an LCG, Box-Muller): the same values on any library, so the hashes below hold
-static uint32_t g_rng = 1017;
-static float uni() { return g_rng = g_rng * 1664525u + 1013904223u, ((float) (g_rng >> 8) + 0.5f) / 16777216.0f; }
-static std::vector<float> rnd(size_t n, float s) {
-  std::vector<float> v(n);
-  for (auto& x : v) x = s * std::sqrt(-2.0f * std::log(uni())) * std::cos(6.2831853f * uni());
-  return v;
-}
-// a buffer's FNV-1a (64-bit)
-static uint64_t fnv(const std::vector<uint8_t>& b) {
-  uint64_t h = 1469598103934665603ull;
-  for (uint8_t c : b) h = (h ^ c) * 1099511628211ull;
-  return h;
-}
 
 enum Kind { KIND_F32, KIND_F16, KIND_KV8, KIND_KV85 };
 static const char* kKind[] = {"F32", "f16", "Q8", "Q8 / Q5"};
