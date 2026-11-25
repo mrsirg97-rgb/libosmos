@@ -34,7 +34,7 @@ static bool launches(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, V = (uint32_t)g->n_vocab;
   double t0 = f->pf.on > 1 ? hy4_now() : 0;
   bool ok = embed(f, n);
-  if (ok && f->pf.on > 1)
+  if (ok && f->pf.on > 1 && !read)
     ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess, f->pf.part_s[6] += hy4_now() - t0;
   for (int l = 0; ok && l < g->n_layers; l++)
   {
@@ -65,7 +65,7 @@ static bool launches(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n
   t0 = f->pf.on > 1 ? hy4_now() : 0;
   ok = ok && (!kept || (f->head8 ? hy4_mat_raw(f, QTYPE_Q8_0, f->head8, V, D, f->xn, kept, f->logits, read)
                                  : hy4_mat(f, f->w->output, V, D, f->xn, kept, f->logits, read)));
-  if (ok && f->pf.on > 1)
+  if (ok && f->pf.on > 1 && !read)
     ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess, f->pf.part_s[7] += hy4_now() - t0;
   return ok;
 }
@@ -121,6 +121,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
     }
   memcpy(f->pin_tok, tokens, (size_t)n * 4);
   const double pf0 = f->pf.on ? hy4_now() : 0;
+  f->pf.read = read;
   bool ok = hipMemcpyAsync(f->tok, f->pin_tok, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hy4_engram_read(f, run, runs, n);
@@ -129,7 +130,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
        hipStreamSynchronize(f->st) == hipSuccess;
   hipStreamSynchronize(f->st);
   if (f->pf.on)
-    f->pf.steps++, f->pf.tokens += n, f->pf.step_s += hy4_now() - pf0;
+    f->pf.steps++, f->pf.dsteps += !read, f->pf.tokens += n, f->pf.step_s += hy4_now() - pf0;
   if (f->ex.mem)
     membrane_end(f->ex.mem); /* the step's holds ended (its experts' kernels done) */
   const int32_t over = ok ? f->pin_flags[0] : 0, fault = ok ? f->pin_flags[1] : 0;

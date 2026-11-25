@@ -181,14 +181,15 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
     const uint32_t chunk = n < MV_MAX_TOKENS ? n : MV_MAX_TOKENS;
     const void *const *tab = f->exp_tab + (uint64_t)(l - g->n_dense) * 3 * E; /* (every expert resident) */
+    double t = f->pf.on > 1 ? hy4_now() : 0;
     return (f->whole ? hy4_route(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
                                  f->fault, f->st)
                      : decode_tables(f, l, n, chunk)) &&
-           ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
-           mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) &&
-           mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) &&
+           ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) && hy4_part_done(f, 17, &t) &&
+           mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) && hy4_part_done(f, 18, &t) &&
+           mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) && hy4_part_done(f, 19, &t) &&
            ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
-           mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y);
+           mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y) && hy4_part_done(f, 20, &t);
   }
   uint32_t entries = 0, slots = 0;
   if (!route(f, l, n, &entries, &slots))
@@ -217,18 +218,21 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   float *logit = joint ? f->jo_ffn + J->off[0] : f->logit_r, *rin = joint ? f->jo_ffn + J->off[1] : f->rin;
   float *ga = joint ? f->jo_ffn + J->off[2] : f->ga, *up = joint ? f->jo_ffn + J->off[3] : f->up;
   bool on_xn = false;
+  double t = f->pf.on > 1 ? hy4_now() : 0;
   const bool on_x = joint ? hy4_joint(f, J, D, f->xn, f->jo_ffn)
                           : hy4_mat(f, L->router, E, D, f->xn, n, logit, read) &&
                                 hy4_mat_pair(f, L->routed_down, lat, rin, L->sh_gate, sh, ga, f->xn, D, n, read, &on_xn) &&
                                 hy4_mat_pair(f, L->sh_up, sh, up, NULL, 0, NULL, f->xn, D, n, read, &on_xn);
-  return on_x &&
+  return on_x && hy4_part_done(f, 15, &t) &&
          ops_router_scored(logit, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
-                           f->wtok, f->st) &&
-         routed(f, l, n, read, rin) && ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) &&
-         hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) &&
+                           f->wtok, f->st) && hy4_part_done(f, 16, &t) &&
+         routed(f, l, n, read, rin) && (t = f->pf.on > 1 ? hy4_now() : 0, true) &&
+         ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) && hy4_part_done(f, 23, &t) &&
+         hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) && hy4_part_done(f, 21, &t) &&
          ops_swiglu(ga, up, sh, INFINITY, NULL, n, f->act, f->st) &&
          hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) &&
          ops_add(f->out, f->sh, (uint64_t)n * D, f->st) &&
          ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st) &&
-         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st); /* the routed and shared sum, its post norm, into the streams */
+         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st) && /* the routed and shared sum, its post norm, into the streams */
+         hy4_part_done(f, 22, &t);
 }

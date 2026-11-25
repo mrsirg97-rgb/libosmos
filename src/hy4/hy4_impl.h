@@ -97,7 +97,9 @@ struct Hy4Forward
   struct
   {
     int on;
-    double part_s[16]; /* hy4_layer's: Engram's update, iHC before attention, attention, iHC before the FFN, experts,
+    bool read;        /* the step a prompt's (its parts not timed) */
+    uint64_t dsteps;  /* the decode steps (the parts' divisor) */
+    double part_s[24]; /* hy4_layer's: Engram's update, iHC before attention, attention, iHC before the FFN, experts,
                          the dense FFN; then the embedding and the head (launches'); then attention's own parts
                          (its projections in, q_b, the kv rows and q's absorption, the indexer, the MLA attention, the
                          values' absorption, the projection out) */
@@ -218,4 +220,17 @@ static inline double hy4_now(void)
   struct timespec t;
   clock_gettime(CLOCK_MONOTONIC, &t);
   return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+/* HY4_PROFILE=2: the part just queued, to a sync, into its sum */
+static inline bool hy4_part_done(Hy4Forward *f, int k, double *t)
+{
+  if (f->pf.on < 2)
+    return true;
+  if (f->pf.read)  /* (a prompt's step: not timed in parts - its unsynced work would land in a later part) */
+    return true;
+  const bool ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const double now = hy4_now();
+  f->pf.part_s[k] += now - *t, *t = now;
+  return ok;
 }

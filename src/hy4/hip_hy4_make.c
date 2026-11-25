@@ -42,13 +42,15 @@ void hy4_forward_destroy(Hy4Forward *f)
             1e3 * (f->pf.rowread_s + f->pf.copy_s) / (double)f->pf.steps, 1e3 * f->pf.rowread_s / (double)f->pf.steps,
             1e3 * f->pf.copy_s / (double)f->pf.steps, (double)f->pf.rows / (double)f->pf.steps,
             (double)f->pf.bytes / 1024.0 / (double)f->pf.steps);
-  if (f->pf.on > 1 && f->pf.steps)
+  if (f->pf.on > 1 && f->pf.dsteps)
   {
-    static const char *const part[15] = {"engram update", "iHC attn", "attention", "iHC ffn", "experts", "dense ffn",
+    static const char *const part[24] = {"engram update", "iHC attn", "attention", "iHC ffn", "experts", "dense ffn",
                                          "embed", "head", "  proj in", "  q_b", "  kv, q absorb", "  indexer",
-                                         "  mla attn", "  v absorb", "  proj out"};
-    for (int k = 0; k < 15; k++)
-      fprintf(stderr, "  %-14s %7.2f ms a step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.steps);
+                                         "  mla attn", "  v absorb", "  proj out", "  x: router, down, shared in",
+                                         "  router picks", "  route, gather", "  experts gate", "  experts up",
+                                         "  swiglu, down", "  routed up", "  shared down, post", "  gather sum"};
+    for (int k = 0; k < 24; k++)
+      fprintf(stderr, "  %-14s %7.2f ms a decode step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.dsteps);
   }
   experts_destroy(&f->ex); /* its readers stopped, then its memory */
   for (int i = 0; f->xfds && i < f->w->model->n_files; i++)
