@@ -203,6 +203,37 @@ destroys them.
 **Decided (the operator, 2026-11-24): yes to all three** - Inkling's units for every family, f16 operands with F32
 sums everywhere (the F32 paths included, by KL), the drafters on the core last. B1 next.
 
+### C1: Qwen (design)
+
+Qwen3.8-Flash-Next: 24 query heads over 2 KV heads (12 a KV head), heads of 256, 12 full-attention layers of 48, QSA's
+top 2,048 keys (picked blocks, then the tail); today every step on `q4x_attn` (prompts and decodes alike), its gate a
+value's, no sink, no bias; its output also as the out matrix's f16 (Q4xX16, the side).
+
+- **Rows: a token's query heads.** The matrix cores are not blind to a key a weight zeroes (`q4x_attn.hip`: a masked
+  key's v moves the last bit; Inkling's kernel zeroes its diagonal tile's values row by row for the same reason). A
+  tile's rows can share its keys only when they read the same keys - and QSA's picks are a token's own. So Qwen's block
+  is one token and one KV head, its rows the token's 12 query heads (16 with padding) - `q4x_attn`'s layout - where
+  Inkling's are 16 tokens of a head. The skeleton takes the row map as a parameter; the units, tiles and fold are the
+  same, so the contract is.
+- **Its keys: whole tiles.** A token's list is its picked blocks (ascending) then its tail (ascending to itself): the
+  core walks the absolute 16-key tiles those cover, skips the rest, and cuts units at absolute multiples of 256 -
+  every block picked reads exactly the dense tiles, so all-picked == dense bit for bit (today's property, kept).
+  A block of the index's ratio is whole tiles (the ratio a multiple of 16: refused at create otherwise).
+- **A head of 256.** Q's fragments and O's accumulators double (~256 registers before the softmax). A wave pair a row
+  tile: each the tile's scores (one WMMA chain over all 256 dims, in order - the contract's), each half of O's columns
+  (`q4x_attn`'s split). Measured against keeping Q in LDS before it is chosen.
+- **Rows: Q8_0** (ggml's blocks: an f16 d, then 32 int8s), decoded to f16 as Inkling's Q8 records are (q d, rounded).
+- **No sink** (the fold from nothing: gm -inf, gl 0), **no term**, **the gate a value's**, **the side x16 at any
+  step** (today's split decode's alone: Qwen's every step).
+- **Proof (its bits change once, by decision):** against exact math (an F64 host attention on the same inputs), the
+  core's error no larger than `q4x_attn`'s on every case - no tolerance picked by hand; then KL against today's run on
+  the real weights (q4x_kld: wiki and an agent trace), the hashes re-based, drafted == plain and the serve tests.
+  Properties: prompt == decode, all-picked == dense, a token's bits its own whatever its batch.
+- **Speed: no slower than `q4x_attn`** (Qwen's prompt 954 tok/s and decode 50.0 / 44.3 at performance, 0.17.0's
+  README) - or it does not move.
+
+`q4x_attn` is also osmos1.7b's and q35's prompt kernel: Qwen moves first, `q4x_attn` stays for them until C2.
+
 ## Proofs and checks
 
 - **Per kernel change:** a byte comparison against the old kernel on seeded inputs (`fa_bits`-style, every format,
