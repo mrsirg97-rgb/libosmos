@@ -103,6 +103,30 @@ int main(int argc, char** argv) {
                 gb / mm);
     CHECK(hipFree(pool) == hipSuccess);
   }
+  // MLA's absorptions: a head's own Q8_0 matrix on its own row of x, every head at once (k_b: 512 x 128, v_b: 128 x
+  // 512), 64 heads a call, rotated through 43 layers' sets
+  std::printf("MLA's absorptions: 64 heads' Q8_0 matrices a call (one token), cold\n");
+  for (auto [rows, cols, what] : {std::tuple<uint32_t, uint32_t, const char*>{512, 128, "k_b (latent x nope)"},
+                                  {128, 512, "v_b (v_dim x latent)"}}) {
+    const uint32_t H = 64, L = 43;
+    const uint64_t mb = gguf_bytes(8, (uint64_t) rows * cols);
+    uint8_t* pool = noise(mb * H * L);
+    float *xa = floats((size_t) H * cols, 1.0f), *ya = dev<float>((size_t) H * rows);
+    const void** hw = dev<const void*>(H * L);
+    int32_t *hc = dev<int32_t>(H), *hx = dev<int32_t>(H);
+    std::vector<const void*> ptr(H * L);
+    std::vector<int32_t> one(H, 1), xr(H);
+    for (uint32_t i = 0; i < H * L; i++) ptr[i] = pool + (uint64_t) i * mb;
+    for (uint32_t h = 0; h < H; h++) xr[h] = (int32_t) h;
+    CHECK(hipMemcpy(hw, ptr.data(), ptr.size() * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(hc, one.data(), H * 4, hipMemcpyHostToDevice) == hipSuccess);
+    CHECK(hipMemcpy(hx, xr.data(), H * 4, hipMemcpyHostToDevice) == hipSuccess);
+    const double us = time_us(iters, [&](uint32_t i) {
+      return mv_group_tok(8, hw + (uint64_t) (i % L) * H, hc, hx, H, 1, rows, cols, xa, cols, ya, rows, nullptr);
+    });
+    std::printf("  %4u x %4u %s: %6.1f us (%5.1f GB/s)\n", rows, cols, what, us, (double) mb * H / 1e3 / us);
+    CHECK(hipFree(pool) == hipSuccess);
+  }
   // the dense matvecs, Q8_0, one token: short rows (3072 x 1536) and long (1536 x 3072), rotated through 64 copies
   std::printf("a dense Q8_0 matvec, one token, cold\n");
   for (auto [rows, cols, what] : {std::tuple<uint32_t, uint32_t, const char*>{3072, 1536, "routed_up / shared down"},
