@@ -8,14 +8,20 @@ own dialect, it does not loop, the same answer twice (--twice: a second replay),
 second replay with the drafter off), the GPU's memory where it started.
 
     python tools/serve/session_bench.py --fixture rig-resume-oneshot.json --config ~/Models/osmos/<pack>/osmos.json \\
-        [--api bin/osmos-api] [--max-tokens 192] [--steps 0] [--twice] [--plain]
+        [--api bin/osmos-api] [--max-tokens 192] [--steps 0] [--twice] [--plain] [--answers OUT.json] [--against BASE.json]
 
 the fixture: tools/serve/rig_session.py's (a rig session, sanitized). each step greedy (temperature 0), at most
---max-tokens; a fresh slot folder a run (nothing from an earlier one). exit 0: every step answered and parsed."""
+--max-tokens; a fresh slot folder a run (nothing from an earlier one). --answers: each run's answers saved (a
+baseline); --against: the replay's answers each step the baseline's (a change meant to keep the bits - a kernel moved
+- needs only the drafted replay against a baseline that was drafted == plain; a change of bits, drafted and --plain,
+its answers the new baseline). exit 0: every step answered and parsed, and the same as asked.
+
+SIGTERM or SIGINT: the server stopped and its folder removed, as at the end."""
 import argparse
 import json
 import os
 import shutil
+import signal
 import statistics
 import subprocess
 import sys
@@ -47,11 +53,13 @@ class Api:
         json.dump(cfg, open(self.cfg, "w"))
         self.port, self.log = port, open(log, "w")
         self.p = subprocess.Popen([exe, "--config", self.cfg, "--port", str(port)], stdout=self.log, stderr=self.log)
+
+    def wait_ready(self, log):
         for _ in range(3600):
             if self.p.poll() is not None:
                 sys.exit(f"session_bench: osmos-api exited (see {log})")
             try:
-                m = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{port}/v1/models", timeout=5).read())
+                m = json.loads(urllib.request.urlopen(f"http://127.0.0.1:{self.port}/v1/models", timeout=5).read())
                 if any(x.get("osmos", {}).get("ready") for x in m.get("data", [])):  # (a model's own readiness)
                     return
             except OSError:
@@ -91,11 +99,12 @@ class Api:
         return out, first, time.monotonic() - t0, usage or {}, timings or {}, loop
 
     def stop(self):
-        self.p.terminate()
-        try:
-            self.p.wait(60)
-        except subprocess.TimeoutExpired:
-            self.p.kill()
+        if self.p.poll() is None:
+            self.p.terminate()
+            try:
+                self.p.wait(60)
+            except subprocess.TimeoutExpired:
+                self.p.kill()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -174,6 +183,8 @@ def main():
     ap.add_argument("--twice", action="store_true", help="a second replay: every step's answer the same")
     ap.add_argument("--plain", action="store_true", help="a second replay drafter off: every step's answer the same")
     ap.add_argument("--log", default=None)
+    ap.add_argument("--answers", help="each run's answers saved here (JSON: run -> step -> answer)")
+    ap.add_argument("--against", help="a saved --answers: the replay's every step its replay's answer")
     ap.add_argument("--pack", help="the pack's id: its settings from --packs over the config, as the installer's")
     ap.add_argument("--packs", default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "install", "packs.json"))
     a = ap.parse_args()
@@ -188,15 +199,21 @@ def main():
         settings = packs[a.pack]["settings"]
     print(f"session_bench: {fx['source']} - {len(steps)} steps, {a.config}" + (f" with {a.pack}'s settings {settings}" if a.pack else ""))
     runs = [("replay", False)] + ([("again", False)] if a.twice else []) + ([("plain", True)] if a.plain else [])
+    base = json.load(open(a.against)) if a.against else None
+    def stop_on(sig, _):  # (a background job's SIGINT is ignored: SIGTERM too) - finally stops the server
+        raise KeyboardInterrupt(f"signal {sig}")
+    signal.signal(signal.SIGTERM, stop_on)
+    signal.signal(signal.SIGINT, stop_on)
     results, ok = {}, True
     for name, plain in runs:
         print(f"{name}:")
         api = Api(a.api, a.config, a.port, plain, log, settings)
-        mem0, t0 = gpu_mib(), time.monotonic()
         try:
+            api.wait_ready(log)
+            mem0, t0 = gpu_mib(), time.monotonic()
             rows = replay(fx, api, a.max_tokens, steps)
-        finally:
             mem1 = gpu_mib()
+        finally:
             api.stop()
         report(rows, time.monotonic() - t0, mem0, mem1)
         results[name] = rows
@@ -206,7 +223,20 @@ def main():
             same = sum(x["answer"] == y["answer"] for x, y in zip(results["replay"], results[name]))
             print(f"  {name}: {same} of {len(steps)} steps the same answer as the replay's")
             ok &= same == len(steps)
-    print("every step answered and parsed" + ("" if ok else " - NOT ALL (see above)"))
+    if base is not None:
+        was = base.get("replay", [])
+        diff = [r["step"] for r, w in zip(results["replay"], was) if r["answer"] != w]
+        n = min(len(was), len(steps))
+        print(f"  against {a.against}: {n - len(diff)} of {n} steps the baseline's answer"
+              + (f" (differ: steps {diff[:20]}{' ..' if len(diff) > 20 else ''})" if diff else "")
+              + ("" if len(was) == len(steps) else f" - the baseline {len(was)} steps, this {len(steps)}"))
+        ok &= not diff and len(was) == len(steps)
+    if a.answers:
+        json.dump({"fixture": fx["source"], "config": a.config, "pack": a.pack,
+                   **{k: [r["answer"] for r in v] for k, v in results.items()}}, open(a.answers, "w"), indent=0)
+        print(f"  answers saved: {a.answers}")
+    print("every step answered and parsed" + (" and as asked" if a.against or a.twice or a.plain else "")
+          + ("" if ok else " - NOT ALL (see above)"))
     return 0 if ok else 1
 
 
