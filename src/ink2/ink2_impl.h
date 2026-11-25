@@ -1,5 +1,6 @@
 /* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h) */
 #pragma once
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/mm.h" /* (MM_TILE: the experts' table sizes below) */
 #include "osmos/mem/ledger_hip.h"
@@ -160,7 +161,7 @@ struct Ink2Forward
   OverflowFlag ovf;  /* the step flag's reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
-  float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
+  AttnCore *attn[2]; /* a sliding layer's attention, a full layer's (attn_core: their scratch ed, borrowed) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
   uint32_t *m_at, *m_by, *m_run; /* the read's routing (moe_route): its scratch, sorted rows' pairs, runs */
   uint64_t *m_key;

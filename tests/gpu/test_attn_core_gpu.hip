@@ -8,7 +8,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <random>
 #include <string>
 #include <vector>
 
@@ -59,12 +58,19 @@ static bool same(const std::vector<uint8_t>& a, const std::vector<uint8_t>& b) {
 constexpr uint32_t H = 24, KV = 8, D = 128, R = 16, E = 1024;
 constexpr float kScale = 0.08838834764831845f;  // 128^-0.5
 
-static std::mt19937 g_rng(1017);
+// the inputs' own generator (an LCG, Box-Muller): the same values on any library, so the hashes below hold
+static uint32_t g_rng = 1017;
+static float uni() { return g_rng = g_rng * 1664525u + 1013904223u, ((float) (g_rng >> 8) + 0.5f) / 16777216.0f; }
 static std::vector<float> rnd(size_t n, float s) {
-  std::normal_distribution<float> nd(0.0f, 1.0f);
   std::vector<float> v(n);
-  for (auto& x : v) x = s * nd(g_rng);
+  for (auto& x : v) x = s * std::sqrt(-2.0f * std::log(uni())) * std::cos(6.2831853f * uni());
   return v;
+}
+// a buffer's FNV-1a (64-bit)
+static uint64_t fnv(const std::vector<uint8_t>& b) {
+  uint64_t h = 1469598103934665603ull;
+  for (uint8_t c : b) h = (h ^ c) * 1099511628211ull;
+  return h;
 }
 
 enum Kind { KIND_F32, KIND_F16, KIND_KV8, KIND_KV85 };
@@ -113,34 +119,66 @@ static AttnCoreDesc desc(Kind kind, uint32_t window, uint32_t max_tokens, uint32
   return d;
 }
 
-// Inkling's kernel on the inputs (the oracle): its out, and its x16 when asked (a split decode's)
-static std::vector<uint8_t> ink2(Kind kind, uint32_t window, const Inputs& in, uint32_t t0, uint32_t n, bool x16,
-                                 std::vector<uint8_t>* x16_out) {
-  float* out = dev<float>((size_t) n * H * D);
-  float* scratch = dev<float>(ink2_fa_scratch(H, in.K) / 4 + 1);
-  void* xb = x16 ? (void*) dev<uint16_t>((size_t) 16 * H * D + 4096) : nullptr;
-  int32_t* of = dev<int32_t>(1);
-  const Ink2Attn a = {H, KV, D, R, E, window, kScale, xb, x16 ? of : nullptr};
-  const uint32_t keys = in.K - in.T + t0 + n;  // the step's last token's key and those before it
-  const uint64_t q = (uint64_t) t0 * H * D, r = (uint64_t) t0 * H * R, s = (uint64_t) t0 * H;
-  bool ok;
-  if (kind == KIND_F32)
-    ok = ink2_fa(&a, in.q + q, in.rel + r, in.sink + s, in.gate + q, n, in.k, in.v, keys, in.key0, in.rp, out, scratch, nullptr);
-  else if (kind == KIND_F16)
-    ok = ink2_fa16(&a, in.q + q, in.rel + r, in.sink + s, in.gate + q, n, (const uint16_t*) in.kc, (const uint16_t*) in.vc,
-                   keys, in.key0, in.rp, out, scratch, nullptr);
-  else if (kind == KIND_KV8)
-    ok = ink2_fa8(&a, in.q + q, in.rel + r, in.sink + s, in.gate + q, n, (const uint8_t*) in.kc, (const uint8_t*) in.vc,
-                  keys, in.key0, in.rp, out, scratch, nullptr);
-  else
-    ok = ink2_fa85(&a, in.q + q, in.rel + r, in.sink + s, in.gate + q, n, (const uint8_t*) in.kc, (const uint8_t*) in.vc,
-                   keys, in.key0, in.rp, out, scratch, nullptr);
-  HIP_OK(ok ? hipSuccess : hipErrorUnknown);
-  std::vector<uint8_t> o = down(out, (size_t) n * H * D * 4);
-  if (x16_out) *x16_out = down(xb, (size_t) 16 * H * D * 2);
-  (void) hipFree(out), (void) hipFree(scratch), (void) hipFree(xb), (void) hipFree(of);
-  return o;
-}
+// Inkling's attention as ink2_fa / fa16 / fa8 / fa85 gave it (0.17.1, before the core replaced them): each case's
+// out and, a split decode's, its x16 - FNV-1a of the bytes, inkling()'s cases in order (3 runs the same)
+static const uint64_t kInkling[][2] = {
+    {0xb4f55cecc7e9a3edull, 0x0000000000000000ull},
+    {0x4afa7d723b6e5c04ull, 0x0000000000000000ull},
+    {0x7672b9debad162b4ull, 0x0000000000000000ull},
+    {0x3f5bf2757813ed7cull, 0x0000000000000000ull},
+    {0x118a4851ddc653ecull, 0x0000000000000000ull},
+    {0x437db30d223db904ull, 0xf53fbc6588a12102ull},
+    {0x4b6c1b28d873a71dull, 0x13ec877edc3844e0ull},
+    {0x03725f0044028cd9ull, 0x0000000000000000ull},
+    {0xe9520821bfefcba5ull, 0x0000000000000000ull},
+    {0xcc192295e2df1428ull, 0x0000000000000000ull},
+    {0x8c44924b499dd747ull, 0x0000000000000000ull},
+    {0xb328dabd9094cd66ull, 0x0000000000000000ull},
+    {0x97ba70812cd1e6c6ull, 0xaeca49ef8e670abaull},
+    {0x2a91fa249e556a91ull, 0x912820f9e77353d6ull},
+    {0x788836d28e296d71ull, 0x0000000000000000ull},
+    {0x77bf6a8dab75401bull, 0x0000000000000000ull},
+    {0xfbdea7b54d56fa2bull, 0x0000000000000000ull},
+    {0xcc285d1e62a67aceull, 0x0000000000000000ull},
+    {0x663cdeacd08d0fefull, 0x0000000000000000ull},
+    {0xadc22722de9748ddull, 0x48a74f7afc4dbc36ull},
+    {0x732e660a998bce55ull, 0x664fa1ac0f2dc156ull},
+    {0x521dfa426f7a47caull, 0x0000000000000000ull},
+    {0xc04a10048886a8d7ull, 0x0000000000000000ull},
+    {0x37631b37322d6494ull, 0x0000000000000000ull},
+    {0xda44325c8428114aull, 0x0000000000000000ull},
+    {0x0989bce6f6c6d8deull, 0x0000000000000000ull},
+    {0x4b7079e3fb8ff293ull, 0xe9dc4e16145600bdull},
+    {0x69a03c8f48cb571cull, 0x02c1dc0717ded199ull},
+    {0xbafbd63178f25c19ull, 0x0000000000000000ull},
+    {0xa57a5d5137f860b9ull, 0x0000000000000000ull},
+    {0xfbbc52b664d54c84ull, 0x0000000000000000ull},
+    {0xe33bae9c3b644494ull, 0x0000000000000000ull},
+    {0x423b241d792d11a2ull, 0x0000000000000000ull},
+    {0x68fe72075f1e6513ull, 0x5fbbba3c59737e78ull},
+    {0x2389938332d6da09ull, 0x42a8caec2481df2cull},
+    {0x5cc8b2cb14b3c26bull, 0x0000000000000000ull},
+    {0x5718823da47c038eull, 0x0000000000000000ull},
+    {0xb793e9fdf133c2f9ull, 0x0000000000000000ull},
+    {0x096bfde01a10c79full, 0x0000000000000000ull},
+    {0x9d51a0d319d27d2bull, 0x0000000000000000ull},
+    {0xcae49ff1ffe8687bull, 0x037ee734fc88b825ull},
+    {0x89f2795d13ac7839ull, 0x3d682353b406e3e7ull},
+    {0xcfe756c4c0674209ull, 0x0000000000000000ull},
+    {0x47b5a976a501dd8bull, 0x0000000000000000ull},
+    {0xfa83d3d461c0d687ull, 0x0000000000000000ull},
+    {0x250a89f86e193e42ull, 0x0000000000000000ull},
+    {0x5b0b35f2fe85dd25ull, 0x0000000000000000ull},
+    {0x0b4f787e7572da77ull, 0xb86a8378aafab6f7ull},
+    {0x248d306b1a3b4f91ull, 0x08b2bac3d2fc6421ull},
+    {0x0df519bec4bda3fcull, 0x0000000000000000ull},
+    {0x00d755d3e4f5f4e7ull, 0x0000000000000000ull},
+    {0x95e6bba1ee554aa3ull, 0x0000000000000000ull},
+    {0x7e2f6efc8b3b9a12ull, 0x0000000000000000ull},
+    {0xf1894cce8e30986cull, 0x0000000000000000ull},
+    {0x8f282ebf2415ca33ull, 0x7d25cd1a2cc3c9eaull},
+    {0xdeef618eedfc0b58ull, 0xf9bccb0453f0a603ull},
+};
 
 // the core on the same: tokens t0 .. t0 + n - 1 of the sequence, its keys up to the last of them; nothing (an empty
 // vector) when the core is not made or refuses the step
@@ -177,36 +215,42 @@ static void free_inputs(Inputs& in) {
   if (in.kc != in.k) (void) hipFree((void*) in.kc), (void) hipFree((void*) in.vc);
 }
 
-// the comparison itself: a bit flipped in a copy must be caught (else every "same" below proves nothing)
+// the comparisons themselves: a bit flipped in a copy must be caught, its hash too (else every check below proves
+// nothing)
 static void mutation() {
   std::vector<uint8_t> a(4096, 0x3c), b = a;
   check(same(a, b), "mutation: equal buffers compare the same");
   b[2049] ^= 0x01;
   check(!same(a, b), "mutation: one flipped bit caught");
+  check(fnv(a) != fnv(b), "mutation: one flipped bit's hash differs");
 }
 
-// Inkling's every format, window, length: the core's out (and a split decode's x16) byte for byte its kernel's
+// Inkling's every format, window, length: the core's out (and a split decode's x16) byte for byte ink2_fa*'s, by
+// their hashes (kInkling)
 static void inkling() {
   struct Case { uint32_t T, K, key0; };
   const Case cases[] = {{37, 37, 0}, {1000, 1000, 0}, {2968, 2968, 0}, {512, 3008, 0}, {512, 1536, 1024},
                         {1, 1504, 0}, {3, 1507, 0}, {4, 1504, 0}, {16, 1520, 0}};
+  size_t n = 0;
   for (int kind = 0; kind < 4; kind++)
     for (uint32_t window : {0u, 1024u})
       for (const Case& c : cases) {
         if ((c.K - c.T) % ATTN_TILE) continue;  // (a step from a whole tile: the engine's)
         Inputs in = make((Kind) kind, c.T, c.K, c.key0);
         const bool split = c.T <= 16;
-        std::vector<uint8_t> xr, xc;
+        std::vector<uint8_t> xc;
         std::string why;
-        const std::vector<uint8_t> want = ink2((Kind) kind, window, in, 0, c.T, split, split ? &xr : nullptr);
         const std::vector<uint8_t> got = core((Kind) kind, window, in, 0, c.T, split, split ? &xc : nullptr, &why);
         char name[160];
         std::snprintf(name, sizeof name, "inkling %s window %u: %u tokens of %u keys from %u%s", kKind[kind], window, c.T,
                       c.K, c.key0, got.empty() ? (" (" + why + ")").c_str() : "");
-        check(!got.empty() && same(want, got), name);
-        if (split) check(!got.empty() && same(xr, xc), std::string(name) + ": its x16");
+        const bool known = n < sizeof kInkling / sizeof *kInkling;
+        check(known && !got.empty() && fnv(got) == kInkling[n][0], name);
+        if (split) check(known && !got.empty() && fnv(xc) == kInkling[n][1], std::string(name) + ": its x16");
+        n++;
         free_inputs(in);
       }
+  check(n == sizeof kInkling / sizeof *kInkling, "inkling: every case's hash met");
 }
 
 // a token's bits its own: a 600-token prompt in one step and in three (200 each); its last 4 tokens decoded one at a

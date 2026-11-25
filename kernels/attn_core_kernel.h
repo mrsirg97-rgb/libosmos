@@ -196,7 +196,7 @@ __global__ __launch_bounds__(W * 32) void fa_kernel(AttnArgs a, const float* q, 
   // a tile's K and V into registers (keys past the last zero): F32 a value a thread at a time; f16 (a cache's) 8
   // halves a 16-byte load - the same values either way
   constexpr bool kQ8 = sizeof(KV) == 1, kHalf = sizeof(KV) <= 2;  // (kHalf: 8 f16s a load - a Q8 record's too)
-  constexpr bool kV5 = std::is_same<KV, Kv85>::value;             // (the values Q5 records: ink2_fa85)
+  constexpr bool kV5 = std::is_same<KV, Kv85>::value;             // (the values Q5 records)
   constexpr uint32_t kVRec = kV5 ? ATTN_KV5_RECORD : ATTN_KV8_RECORD;
   constexpr int kVec = 8, kVecs = kStage * kFaHead / kVec, kVItems = (kVecs + kNth - 1) / kNth;
   float kr[kHalf ? 1 : kItems], vr[kHalf ? 1 : kItems];

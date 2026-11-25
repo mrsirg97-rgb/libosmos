@@ -16,7 +16,7 @@
 extern "C" {
 #endif
 
-#define ATTN_UNIT 256 /* a unit's keys (Inkling's INK2_FA_UNIT) */
+#define ATTN_UNIT 256 /* a unit's keys (Inkling's, every family's) */
 #define ATTN_TILE 16  /* a tile's keys (WMMA's) */
 #define ATTN_HEAD 128 /* a head's dims the core takes (B2: Inkling's; C: 256, MLA's) */
 #define ATTN_GROUP_MAX 8 /* query heads a KV head at most (a prompt block's waves) */

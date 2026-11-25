@@ -14,7 +14,7 @@
 //   DUMP=path     a record a scored row: kl F32, nll F32, top I32, ref_top I32 (-1 without REF) - kld's, so
 //                 tools/bench/kld_compare.py pairs runs
 //   MASK=path     0 / 1 a token (as ids): row r scored only when token r + 1 is 1 (an agent trace's assistant tokens)
-//   ATTN=fa       the attention on WMMA (ink2_fa: f16 in) - long prompts; default ink2_attn (F32: the reference's)
+//   ATTN=fa       the attention on WMMA (the attention core: f16 in) - long prompts; default ink2_attn (F32: the reference's)
 //   MAT=mm        the matrices on WMMA where mm has their type (mm.h: f16 in), the rest the matvec's - the engine's
 //                 kernels (its bits with ATTN=fa); default every matrix the matvec's (F32 in)
 //   HESS=dir      GPTQ's sums: each dense matrix's input's X^T X added into dir/<name>.f64 (float64, [dim][dim]:
@@ -34,6 +34,8 @@
 #include <cstring>
 #include <string>
 #include <vector>
+
+#include "attn_core_call.h"
 
 extern "C" {
 #include "osmos/gpu/ink2_ops.h"
@@ -310,7 +312,8 @@ int main(int argc, char** argv) {
       const Ink2Attn at = {H, KV, D, R, full ? (uint32_t) G.rel_extent : (uint32_t) G.window,
                            full ? 0u : (uint32_t) G.window, 1.0f / std::sqrt((float) D)};
       static const bool fa = std::getenv("ATTN") && !std::strcmp(std::getenv("ATTN"), "fa");
-      CHECK(fa ? ink2_fa(&at, q, rel, sink, gate, T, kc, vc, T, 0, rp, att, nullptr, nullptr)
+      CHECK(fa ? attn_core_call(H, KV, D, R, at.extent, at.window, at.scaling, ATTN_ROWS_F32, ATTN_ROWS_F32, q, rel, sink,
+                                gate, T, kc, vc, T, 0, rp, att)
                : ink2_attn(&at, q, rel, sink, gate, T, kc, vc, T, rp, att, nullptr));
       CHECK(hipDeviceSynchronize() == hipSuccess);
       hipFree(qw), hipFree(rw), hipFree(rp);

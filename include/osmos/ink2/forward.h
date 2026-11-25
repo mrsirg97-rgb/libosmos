@@ -30,7 +30,7 @@ typedef struct Ink2Options
                             step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
   uint32_t logit_rows;   /* the logits' rows a step keeps at most, slots in the order computed (a prompt's last row,
                             a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
-  bool values_q8;        /* a full layer's cached values Q8 records (ink2_fa8), not Q5 (ink2_fa85): a value's bytes
+  bool values_q8;        /* a full layer's cached values Q8 records (ATTN_ROWS_KV8), not Q5 (ATTN_ROWS_KV5): a value's bytes
                             its key's - for a model with the room (osmos-serve's --kv-q8) */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
@@ -88,7 +88,7 @@ Ink2Forward
   Inkling-2-Small's forward with a cache: tools/bench/ink2_run's math (transformers' modeling_inkling2.py, held to its
   oracle) a step's tokens at a time - every weight but the routed experts resident (the attention's, the router's, the
   convs', the embedding and head), the experts a membrane's units (osmos/mem/membrane.h) read from the model's
-  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention ink2_fa's, the
+  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention the attention core's, the
   matrices mm's where it has their type (WMMA, f16 in: the experts and the quantized dense) and the matvec's for the
   rest (F32, BF16) - at every step size, so a token's bits are the same however its sequence's tokens are split into
   steps, and ink2_run's (ATTN=fa MAT=mm) for the same tokens. a step's activation past f16's range refuses it.

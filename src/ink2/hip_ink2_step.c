@@ -145,17 +145,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     }
     /* the keys: a full layer's every row to its position, a sliding layer's window (its last window - 1 and these) */
     /* a decode's split attention: its fold writes the out matrix's f16 too (an mm one's) */
-    const bool att16 = n <= INK2_FA_TILE && L->out->dims[0] == (uint64_t)H * D &&
+    const bool att16 = n <= ATTN_TILE && L->out->dims[0] == (uint64_t)H * D &&
                        ink2_mm_takes(f, ink2_type(L->out), (uint32_t)L->out->dims[1], H * D);
-    const Ink2Attn at = {H,
-                         KV,
-                         D,
-                         R,
-                         full ? (uint32_t)g->rel_extent : (uint32_t)g->window,
-                         full ? 0u : (uint32_t)g->window,
-                         1.0f / sqrtf((float)D),
-                         att16 ? f->x16 : NULL,
-                         att16 ? f->overflow : NULL};
     Ink2Tail *tk = &s->kw[slot], *tv = &s->vw[slot];
     uint32_t n_keys = pos + n;
     if (full)
@@ -163,9 +154,9 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     else
     {
       GPU(ink2_tail_room(tk, n) && ink2_tail_room(tv, n));
-      /* the window's keys from a position a multiple of INK2_FA_TILE: a query's tiles the same in every step */
+      /* the window's keys from a position a multiple of ATTN_TILE: a query's tiles the same in every step */
       const uint32_t want = tk->held < (uint32_t)g->window - 1 ? tk->held : (uint32_t)g->window - 1;
-      n_keys = want + (pos - want) % INK2_FA_TILE + n;
+      n_keys = want + (pos - want) % ATTN_TILE + n;
     }
     /* the convs, clips, v's norm and the caches' rows in one launch (ink2_attn_prep); a conv tail past its room
        takes its rows after (ink2_tail_put) */
@@ -186,15 +177,11 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
     /* key 0's position: a full layer's 0, a window's its first's (a tile's start); a decode's units split */
     const uint32_t pos0 = full ? 0 : pos + n - n_keys;
     ink2_pf(f, PF_IN);
-    /* a full layer's cache: keys Q8 records, values Q5 (ink2_fa85) or Q8 (ink2_fa8: Ink2Options' values_q8); a
-       window's f16 */
-    const bool attended =
-        full && f->v8 ? ink2_fa8(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
-                                 f->fa_part, f->st)
-        : full ? ink2_fa85(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
-                         f->fa_part, f->st)
-             : ink2_fa16(&at, f->q, f->rel, f->sink, f->gate, n, keys, vals, n_keys, pos0, d->rel_proj, f->att,
-                         f->fa_part, f->st);
+    /* the layer kind's core (its rows: a full layer's Q8 keys, Q5 or Q8 values - Ink2Options' values_q8; a window's
+       f16): the step's queries at pos, its keys from pos0 */
+    const AttnStep step = {f->q, n, pos, {keys, vals, pos0, n_keys, NULL, NULL, 0}, f->rel, d->rel_proj, f->sink, f->gate,
+                           f->att, att16 ? f->x16 : NULL, att16 ? f->overflow : NULL};
+    const bool attended = attn_core_run(f->attn[full], &step, f->st);
     GPU(attended);
     ink2_pf(f, full ? PF_FULL : PF_ATTN);
     GPU(ink2_mat2(f, L->out, d->out, f->o, NULL, NULL, NULL, f->att, n, att16));

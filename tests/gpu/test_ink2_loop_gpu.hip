@@ -172,7 +172,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   ink2_seq_destroy(hs);
   ink2_forward_destroy(hf);
 
-  // a full layer's values Q8 (values_q8, ink2_fa8): the logits within the same bounds, its uneven steps' last row
+  // a full layer's values Q8 (values_q8: Q8 records on the attention core): the logits within the same bounds, its uneven steps' last row
   // the one step's bits (a decode's split units over Q8 values)
   Ink2Forward* qf = forward(w, n, true, true);
   Ink2Seq* qs = ink2_seq_create(qf, err);

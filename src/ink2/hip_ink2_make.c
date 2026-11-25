@@ -53,6 +53,29 @@ bool ink2_mm_takes(const Ink2Forward *f, uint32_t type, uint32_t rows, uint32_t 
   return (mm_known(type) || (type == QTYPE_BF16 && f->bf16_mm)) && mm_fits(type, rows, cols);
 }
 
+/* a layer kind's attention (full: the cache's Q8 keys, Q5 or Q8 values, every key; else f16 rows, the window) -
+   Inkling's: its relative bias (a sliding layer's out to its window), its sink, its gate a value's */
+static AttnCoreDesc attn_desc(const Ink2Forward *f, bool full)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  const uint32_t window = (uint32_t)g->window, D = (uint32_t)g->head_dim;
+  return (AttnCoreDesc){(uint32_t)g->n_heads,
+                        (uint32_t)g->n_kv_heads,
+                        D,
+                        D,
+                        full ? ATTN_ROWS_KV8 : ATTN_ROWS_F16,
+                        full ? (f->v8 ? ATTN_ROWS_KV8 : ATTN_ROWS_KV5) : ATTN_ROWS_F16,
+                        full ? 0u : window,
+                        1.0f / sqrtf((float)D),
+                        ATTN_TERM_REL,
+                        (uint32_t)g->d_rel,
+                        full ? (uint32_t)g->rel_extent : window,
+                        true,
+                        ATTN_GATE_VALUE,
+                        f->max_tokens,
+                        full ? f->max_ctx : window + f->max_tokens + ATTN_TILE}; /* (a window's keys: tile-aligned) */
+}
+
 static bool buffers(Ink2Forward *f)
 {
   const Ink2Geometry *g = &f->w->geo;
@@ -66,7 +89,9 @@ static bool buffers(Ink2Forward *f)
   f->head_rows = ink2_mm_takes(f, head, (uint32_t)VR, (uint32_t)C) ? MM_TILE * mm_col_tiles(head, MM_MAX_TOKENS) : MV_MAX_TOKENS;
   /* the experts' down rows and a decode's split attention share one buffer: the attention's partials are dead before
      the layer's MoE writes the down rows, and those are summed before the next layer's attention */
-  const uint64_t fa_bytes = ink2_fa_scratch((uint32_t)H, f->max_ctx), down_bytes = T * K * C * 4,
+  const AttnCoreDesc full = attn_desc(f, true), win = attn_desc(f, false);
+  const uint64_t fa_full = attn_core_scratch(&full), fa_win = attn_core_scratch(&win),
+                 fa_bytes = fa_full > fa_win ? fa_full : fa_win, down_bytes = T * K * C * 4,
                  ed_bytes = fa_bytes > down_bytes ? fa_bytes : down_bytes;
   struct
   {
@@ -111,7 +136,10 @@ static bool buffers(Ink2Forward *f)
         return false;
   }
   f->x16_rows = (uint32_t)((T + MM_TILE - 1) / MM_TILE * MM_TILE);
-  f->fa_part = (float *)f->ed; /* (the down rows' buffer: ed_bytes) */
+  char why[OSMOS_ERR] = "";
+  for (int k = 0; k < 2; k++) /* (the down rows' buffer, ed_bytes: the cores' scratch) */
+    if (!(f->attn[k] = attn_core_create(k ? &full : &win, f->ed, ed_bytes, why)))
+      return fprintf(stderr, "ink2: %s\n", why), false;
   f->ovf = (OverflowFlag){f->overflow, 4, false};
   if (!overflow_reset(&f->ovf, NULL))
     return false;
@@ -197,6 +225,7 @@ void ink2_forward_destroy(Ink2Forward *f)
             ms.wait_ns[1] * 1e-9);
   }
   hipDeviceSynchronize();
+  attn_core_destroy(f->attn[0]), attn_core_destroy(f->attn[1]);
   membrane_destroy(f->mem);
   host_slots_destroy(f->slots), host_slots_destroy(f->stream);
   for (int i = 0; f->fds && i < f->w->model->n_files; i++)
