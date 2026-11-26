@@ -17,6 +17,8 @@
 #include <cstring>
 #include <vector>
 
+#include <sys/mman.h>
+
 extern "C" {
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/q8.h"
@@ -65,7 +67,14 @@ static uint64_t row_bytes(uint32_t type, uint32_t cols) {
 static uint8_t* pool(uint32_t type, uint32_t n_exp, uint32_t rows, uint32_t cols, uint64_t* each) {
   *each = row_bytes(type, cols) * rows;
   const uint64_t all = *each * n_exp;
-  uint8_t* p = dev<uint8_t>(all);
+  // HOST=1: the pool in mapped host memory registered with HIP (the engine's streamed experts' slots), not hipMalloc's
+  uint8_t* p = nullptr;
+  if (std::getenv("HOST") && std::atoi(std::getenv("HOST"))) {
+    void* m = mmap(nullptr, all, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+    CHECK(m != MAP_FAILED && hipHostRegister(m, all, hipHostRegisterMapped) == hipSuccess);
+    p = (uint8_t*) m;
+  } else
+    p = dev<uint8_t>(all);
   std::vector<uint8_t> h(all);
   for (auto& b : h) b = (uint8_t) (next() >> 24);
   // (scales of zero would leave every sum 0: random bytes keep them random; a NaN scale moves no integer dot)
