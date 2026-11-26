@@ -278,9 +278,18 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
   {
     int32_t *rows = (int32_t *)xg;
-    for (uint32_t j = 0; j < rt.runs; j++)
-      tg[j] = f->m_ex[j][0], tu[j] = f->m_ex[j][1], td[j] = f->m_ex[j][2], cnt[j] = (int32_t)rt.count[j],
-      rows[j] = (int32_t)rt.start[j];
+    /* the entries by count, the most first (each count's in run order): q8_experts' h_cnt runs - a launch a count at
+       its own width, its grid its entries alone (exact's two launches summed a shared expert at the step's width,
+       each over every entry: Small's 7-8 token verify ~11% of its experts). an entry its run's rows, as before: each
+       row's sum the same, in the same place */
+    uint32_t j = 0;
+    for (uint32_t c = n; c >= 1; c--)
+      for (uint32_t r = 0; r < rt.runs; r++)
+        if (rt.count[r] == c)
+          tg[j] = f->m_ex[r][0], tu[j] = f->m_ex[r][1], td[j] = f->m_ex[r][2], cnt[j] = (int32_t)c,
+          rows[j] = (int32_t)rt.start[r], j++;
+    if (j != rt.runs)
+      return osmos_fail(err, "an expert's picks past the step's tokens");
     for (uint32_t q = 0; q < P; q++)
       gidx[q] = (int32_t)(rt.by[q] / K);
     const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
@@ -292,7 +301,7 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
     const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
     const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = L->exp_gate->type, .up_type = L->exp_up->type,
                           .down_type = L->exp_down->type, .wg = dg, .wu = du, .wd = dd, .cnt = dcnt, .xrow = drows,
-                          .xin = dgidx, .n = rt.runs, .max_cnt = n, .d = C, .ff = F, .x = f->xn, .x_rows = n,
+                          .xin = dgidx, .n = rt.runs, .max_cnt = n, .h_cnt = cnt, .d = C, .ff = F, .x = f->xn, .x_rows = n,
                           .xq = f->q_x, .xqd = f->q_xd, .sg = dsg, .su = dsu, .gcap = g->gate_softcap,
                           .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h, .hqd = f->q_hd, .y = f->ed};
     const double x0 = f->pf.on ? ink2_pf_now() : 0;
