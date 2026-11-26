@@ -192,6 +192,96 @@ void ink2_forward_reading(Ink2Forward *f, bool on)
 
 bool ink2_forward_int8(const Ink2Forward *f) { return f && !f->no_int8 && q8_enabled(); }
 
+/* a decode's or a verify's experts on int8 (q8_experts), in two launches: the runs whose experts are in memory first,
+   then - their reads waited for while the first launch runs - the cold ones' (0.18.1: a miss's read under the
+   resident experts' sums, not before them; Small's decode waited ~22% of its step on its misses). each launch's
+   entries by count, the most first (q8_experts' h_cnt runs: a launch a count at its own width over its entries
+   alone), an entry a run's rows from its start. a row's sum its own in either launch: the same bits. the tables
+   compact (the step's picks and runs, not a prompt's most): the picks' arrays - each sorted row's token and scales,
+   each pair's row and weight - then each launch's entries, their own place in the pinned and on the GPU (the first's
+   copy may not have run when the second's is written). `cb`: the cached build region, at its start (below every table
+   moe_route wrote there: its rows from P + E entries' arrays on) */
+static bool moe_q8(Ink2Forward *f, int l, uint32_t n, const MoeRoute *rt, const float *hw, uint8_t *cb, char *err)
+{
+  const Ink2Geometry *g = &f->w->geo;
+  const Ink2Layer *L = &f->w->layer[l];
+  const Ink2Dev *d = &f->L[l];
+  const uint32_t C = (uint32_t)g->n_embd, E = (uint32_t)g->n_experts, K = (uint32_t)g->n_used,
+                 F = (uint32_t)g->ff_exp, P = n * K, R = rt->runs;
+  const uint64_t pick_bytes = ((uint64_t)P * 5 * 4 + 7) / 8 * 8, set_bytes = (uint64_t)R * (3 * sizeof(void *) + 2 * 4);
+  int32_t *gidx = (int32_t *)cb, *row = gidx + P;
+  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
+  for (uint32_t q = 0; q < P; q++)
+    gidx[q] = (int32_t)(rt->by[q] / K), row[q] = (int32_t)rt->row[q];
+  for (uint32_t j = 0; j < R; j++)
+  {
+    const uint32_t e = rt->expert[j];
+    for (uint32_t q = rt->start[j]; q < rt->start[j] + rt->count[j]; q++)
+    {
+      const uint32_t m = rt->by[q];
+      sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
+    }
+  }
+  /* which runs' experts are in memory now (the rest reading: held, their reads under way) */
+  bool *cold = f->m_cold;
+  uint32_t n_cold = 0;
+  for (uint32_t j = 0; j < R; j++)
+    n_cold += cold[j] = !membrane_in_memory(f->mem, (uint32_t)l * E + rt->expert[j]);
+  uint8_t *dv = f->m_dev, *hp = f->m_host;
+  const int32_t *dgidx = (const int32_t *)dv, *drow = dgidx + P;
+  const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
+  f->m_a = da, f->m_row = drow;
+  const double x0 = f->pf.on ? ink2_pf_now() : 0;
+  double waited = 0;
+  for (int s = 0; s < 2; s++) /* s 0: the runs in memory, 1: the cold ones */
+  {
+    if (s == 1)
+      for (uint32_t j = 0; j < R; j++) /* the cold ones' reads (the first launch's sums under way) */
+        if (cold[j])
+        {
+          const double wt = f->pf.on ? ink2_pf_now() : 0;
+          if (!membrane_wait(f->mem, (uint32_t)l * E + rt->expert[j], f->m_ex[j], err))
+            return false;
+          if (f->pf.on)
+            waited += ink2_pf_now() - wt;
+        }
+    uint8_t *eb = cb + pick_bytes + (uint64_t)s * set_bytes;
+    const void **tg = (const void **)eb, **tu = tg + R, **td = tu + R;
+    int32_t *cnt = (int32_t *)(td + R), *rows = cnt + R;
+    uint32_t m = 0;
+    for (uint32_t c = n; c >= 1; c--)
+      for (uint32_t j = 0; j < R; j++)
+        if (rt->count[j] == c && cold[j] == (s == 1))
+        {
+          if (s == 0 && !membrane_wait(f->mem, (uint32_t)l * E + rt->expert[j], f->m_ex[j], err))
+            return false; /* (in memory: its addresses, no wait) */
+          tg[m] = f->m_ex[j][0], tu[m] = f->m_ex[j][1], td[m] = f->m_ex[j][2], cnt[m] = (int32_t)c,
+          rows[m] = (int32_t)rt->start[j], m++;
+        }
+    if (m != (s ? n_cold : R - n_cold))
+      return osmos_fail(err, "an expert's picks past the step's tokens");
+    if (!m)
+      continue;
+    /* the copy: the picks' arrays with the first launch, each launch's entries its own place */
+    const bool first = s == 0 || n_cold == R; /* the first launch: x rounded, the picks' arrays sent with it */
+    const uint64_t at = first ? 0 : pick_bytes + set_bytes, bytes = pick_bytes + (s + 1) * set_bytes - at;
+    memcpy(hp + at, cb + at, bytes);
+    const uint8_t *de = dv + pick_bytes + (uint64_t)s * set_bytes;
+    const void **dg = (const void **)de, **du = dg + R, **dd = du + R;
+    const int32_t *dcnt = (const int32_t *)(dd + R), *drows = dcnt + R;
+    const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = L->exp_gate->type, .up_type = L->exp_up->type,
+                          .down_type = L->exp_down->type, .wg = dg, .wu = du, .wd = dd, .cnt = dcnt, .xrow = drows,
+                          .xin = dgidx, .n = m, .max_cnt = n, .h_cnt = cnt, .d = C, .ff = F, .x = first ? f->xn : NULL,
+                          .x_rows = n, .xq = f->q_x, .xqd = f->q_xd, .sg = dsg, .su = dsu, .gcap = g->gate_softcap,
+                          .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h, .hqd = f->q_hd, .y = f->ed};
+    if (hipMemcpyAsync(dv + at, hp + at, bytes, hipMemcpyHostToDevice, f->st) != hipSuccess || !q8_experts(&q8, f->st))
+      return osmos_fail(err, "a GPU call failed (the experts on int8)");
+  }
+  if (f->pf.on)
+    hipDeviceSynchronize(), f->pf.step[PF_WAIT] += waited, f->pf.step[PF_XK] += ink2_pf_now() - x0 - waited;
+  return true;
+}
+
 bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
 {
   if (f->whole)
@@ -254,6 +344,10 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       const uint32_t unit = (uint32_t)(l + 1) * E + (uint32_t)f->hgpick[m];
       membrane_ahead(f->mem, unit);
     }
+  /* a decode's or a verify's experts on int8 (q8_experts): moe_q8, its own waits */
+  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(L->exp_gate->type) &&
+      q8_takes(L->exp_up->type) && q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
+    return moe_q8(f, l, n, &rt, hw, h, err);
   /* each run's expert in memory (its parts' addresses), its rows' scales; the entries by count (moe_entries: group's
      runs of the same column tiles contiguous, each count's in build order) */
   for (uint32_t j = 0; j < rt.runs; j++)
@@ -269,51 +363,6 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       const uint32_t m = rt.by[q];
       sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
-  }
-  /* a decode's or a verify's experts on int8 (q8_experts): an entry a run (an expert's picks at most n <=
-     MV_MAX_TOKENS: one), its rows from the run's start, each sorted row's token by[q] / K - in the region's places
-     (tg, tu, td, cnt; xg the rows, gidx the tokens), one copy; Inkling's activation on each row's scales (sg, su),
-     the weights and down's scale at the sum (a). a prompt's on the matrix cores (f16, below): the two apart */
-  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(L->exp_gate->type) && q8_takes(L->exp_up->type) &&
-      q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
-  {
-    int32_t *rows = (int32_t *)xg;
-    /* the entries by count, the most first (each count's in run order): q8_experts' h_cnt runs - a launch a count at
-       its own width, its grid its entries alone (exact's two launches summed a shared expert at the step's width,
-       each over every entry: Small's 7-8 token verify ~11% of its experts). an entry its run's rows, as before: each
-       row's sum the same, in the same place */
-    uint32_t j = 0;
-    for (uint32_t c = n; c >= 1; c--)
-      for (uint32_t r = 0; r < rt.runs; r++)
-        if (rt.count[r] == c)
-          tg[j] = f->m_ex[r][0], tu[j] = f->m_ex[r][1], td[j] = f->m_ex[r][2], cnt[j] = (int32_t)c,
-          rows[j] = (int32_t)rt.start[r], j++;
-    if (j != rt.runs)
-      return osmos_fail(err, "an expert's picks past the step's tokens");
-    for (uint32_t q = 0; q < P; q++)
-      gidx[q] = (int32_t)(rt.by[q] / K);
-    const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
-    uint8_t *dv = f->m_dev;
-    const void **dg = (const void **)dv, **du = dg + ecap, **dd = du + ecap;
-    const int32_t *dcnt = (const int32_t *)(dd + ecap);
-    const int32_t *drows = (const int32_t *)(dcnt + ecap);
-    const int32_t *dgidx = (const int32_t *)((const uint32_t *)drows + 4 * ecap), *drow = dgidx + 2 * scap;
-    const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
-    const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = L->exp_gate->type, .up_type = L->exp_up->type,
-                          .down_type = L->exp_down->type, .wg = dg, .wu = du, .wd = dd, .cnt = dcnt, .xrow = drows,
-                          .xin = dgidx, .n = rt.runs, .max_cnt = n, .h_cnt = cnt, .d = C, .ff = F, .x = f->xn, .x_rows = n,
-                          .xq = f->q_x, .xqd = f->q_xd, .sg = dsg, .su = dsu, .gcap = g->gate_softcap,
-                          .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h, .hqd = f->q_hd, .y = f->ed};
-    const double x0 = f->pf.on ? ink2_pf_now() : 0;
-    memcpy(f->m_host, h, bytes);
-    const bool ok = hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, f->st) == hipSuccess &&
-                    q8_experts(&q8, f->st);
-    f->m_a = da, f->m_row = drow;
-    if (!ok)
-      return osmos_fail(err, "a GPU call failed (the experts on int8)");
-    if (f->pf.on)
-      hipDeviceSynchronize(), f->pf.step[PF_XK] += ink2_pf_now() - x0;
-    return true;
   }
   uint32_t ne = 0;
   if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))
