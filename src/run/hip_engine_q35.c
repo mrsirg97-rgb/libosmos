@@ -151,4 +151,5 @@ const OsmosFamily osmos_q35 = {
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     true, /* a prompt's read the matmul's math, a decode's mv_fp4's: two maths (q35_step_read)  */
     s_mark_bytes, s_mark_save, s_mark_load,
+    NULL, /* (its reads apart always) */
 };

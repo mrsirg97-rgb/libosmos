@@ -7,11 +7,13 @@
 #include <algorithm>
 
 #include "q4x_ref.h"
+#include "q8_off.h"
 #include "state_stream.h"
 
 extern "C" {
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/model/fnv.h"
+#include "osmos/gpu/q8.h"
 #include "osmos/run/engine.h"
 }
 
@@ -132,8 +134,29 @@ int main() {
   CHECK(!oseq_seed(a, 0, 1, err) && oseq_draft(a, ids[0], 0.1f, 0.1f, drafts, conf, err) < 0);
   oseq_destroy(a), oseq_destroy(b);
 
+  // a prompt read in pieces - a small one (4: a decode's size) among them - the bits of it read whole on the f16
+  // path: a prompt's read never the int8 decode, so a conversation's next turn reread from its prompt's point is a
+  // fresh read's bits. and the engine reads apart exactly while that decode is on (the server rereads a turn then)
+  {
+    CHECK(osmos_reads_apart(e) == q8_enabled());
+    OsmosSeq* pr = oseq_create(e, err);
+    std::vector<OsmosSeq*> sp(kA + 4, pr);
+    CHECK(pr && osmos_read(e, sp.data(), ids.data(), kA, err) && osmos_read(e, sp.data(), &ids[kA], 4, err));
+    const std::vector<float> pieces = rows(e, 0, 4, V);
+    oseq_destroy(pr);
+    const Q8Off off;
+    OsmosSeq* whole = oseq_create(e, err);
+    std::vector<OsmosSeq*> sw(kA + 4, whole);
+    CHECK(whole && osmos_read(e, sw.data(), ids.data(), kA + 4, err));
+    CHECK(std::memcmp(pieces.data(), rows(e, kA, 4, V).data(), pieces.size() * 4) == 0);
+    oseq_destroy(whole);
+    std::printf("  a prompt read in pieces (a 4-token one among them) the bits of it read whole; reads apart: %s\n",
+                osmos_reads_apart(e) ? "yes (the int8 decode on)" : "no");
+  }
+
   // rollback: a step's tokens dropped, then on - the bits of never having run them. the reference: the tokens run
-  // straight, in steps of their own split (a token's bits its own however a sequence is split)
+  // straight, the prompt then the 4 as a step of their own (a decode-sized step's path: int8's, its rows any split's
+  // of at most MV_MAX_TOKENS)
   {
     const int32_t* wrong = &ids[kSaved];  // tokens to drop: any others
     OsmosSeq* r = oseq_create(e, err);
@@ -141,8 +164,8 @@ int main() {
     CHECK(r && ref && oseq_reach(r) == 0 && oseq_rollback(r, 0) && !oseq_rollback(r, 1));
     std::vector<OsmosSeq*> sr(kA, r), sref(kA + 4, ref);
     CHECK(osmos_batch(e, sr.data(), ids.data(), kA, err) && oseq_reach(r) == OSMOS_MAX_BLOCK);
-    CHECK(osmos_batch(e, sref.data(), ids.data(), kA + 4, err));
-    const std::vector<float> want = rows(e, kA, 4, V);  // positions kA .. kA + 3
+    CHECK(osmos_batch(e, sref.data(), ids.data(), kA, err) && osmos_batch(e, sref.data(), &ids[kA], 4, err));
+    const std::vector<float> want = rows(e, 0, 4, V);  // positions kA .. kA + 3
     // a 5-token step dropped whole, then the right 4 as one step
     CHECK(osmos_batch(e, sr.data(), wrong, 5, err) && oseq_rollback(r, 5) && oseq_position(r) == (int32_t) kA);
     CHECK(osmos_batch(e, sr.data(), &ids[kA], 4, err) && rows(e, 0, 4, V) == want);
@@ -159,8 +182,15 @@ int main() {
     CHECK(oseq_rollback(r, 3) && osmos_batch(e, sr.data(), &ids[kA + 3], 1, err) &&
           rows(e, 0, 1, V) == std::vector<float>(want.begin() + 3 * (size_t) V, want.end()));
     // a step longer than the ring (OSMOS_MAX_BLOCK + 1 tokens: a whole round of drafts and its y), all but its first
-    // dropped - the reach's whole, the oldest state the step itself wrote - then the right ones on
+    // dropped - the reach's whole, the oldest state the step itself wrote - then the right ones on. its step past a
+    // decode's takes the prompt's path: held on the f16 path (OSMOS_Q8=0), there against its one step of kA + 4
     {
+      const Q8Off off;
+      OsmosSeq* f16 = oseq_create(e, err);
+      std::vector<OsmosSeq*> sf(kA + 4, f16);
+      CHECK(f16 && osmos_batch(e, sf.data(), ids.data(), kA + 4, err));
+      const std::vector<float> want16 = rows(e, kA, 4, V);
+      oseq_destroy(f16);
       OsmosSeq* d = oseq_create(e, err);
       CHECK(d);
       std::vector<OsmosSeq*> sd(kA, d);
@@ -170,7 +200,7 @@ int main() {
       CHECK(osmos_batch(e, sd.data(), long_step.data(), OSMOS_MAX_BLOCK + 1, err) && oseq_reach(d) == OSMOS_MAX_BLOCK);
       CHECK(oseq_rollback(d, OSMOS_MAX_BLOCK) && oseq_position(d) == (int32_t) kA + 1);
       CHECK(osmos_batch(e, sd.data(), &ids[kA + 1], 3, err) &&
-            rows(e, 0, 3, V) == std::vector<float>(want.begin() + (size_t) V, want.end()));
+            rows(e, 0, 3, V) == std::vector<float>(want16.begin() + (size_t) V, want16.end()));
       oseq_destroy(d);
     }
     // past the reach: refused, nothing moved. the reach: the states kept behind - a rollback of r leaves r fewer, a

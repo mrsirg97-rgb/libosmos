@@ -248,6 +248,7 @@ bool ink2_whole_tables(Ink2Forward *f, char *err)
   if (!(f->whole = membrane_whole(f->mem)))
     return true;
   const uint64_t L = (uint64_t)g->n_layers, E = (uint64_t)g->n_experts, P = (uint64_t)f->max_tokens * g->n_used;
+  const uint64_t DK = (uint64_t)MV_MAX_TOKENS * g->n_used; /* a decode's picks at most (the int8 experts' tables) */
   Q4xExpertBounds bd;
   q4x_expert_bounds((uint32_t)P, (uint32_t)E, &bd);
   const void **tab = malloc(L * 3 * E * sizeof *tab);
@@ -273,6 +274,8 @@ bool ink2_whole_tables(Ink2Forward *f, char *err)
       {(void **)&f->t_xd, bd.entries * 4}, {(void **)&f->t_yd, bd.entries * 4}, {(void **)&f->t_gidx, bd.slots * 4},
       {(void **)&f->t_hidx, bd.slots * 4}, {(void **)&f->t_where, P * 4}, {(void **)&f->t_off, 3 * E * 4},
       {(void **)&f->t_sg, P * 4}, {(void **)&f->t_su, P * 4}, {(void **)&f->t_a, P * 4},
+      {(void **)&f->q_gidx, DK * 4}, {(void **)&f->q_sidx, DK * 4}, {(void **)&f->q_cnt, DK * 4},
+      {(void **)&f->q_xrow, DK * 4}, {(void **)&f->q_wsel, DK * 4}, {(void **)&f->q_wptr, 3 * DK * sizeof(void *)},
   };
   for (size_t i = 0; ok && i < sizeof b / sizeof *b; i++)
     ok = ink2_dalloc(f, b[i].p, b[i].bytes);

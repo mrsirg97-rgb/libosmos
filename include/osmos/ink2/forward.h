@@ -36,6 +36,8 @@ typedef struct Ink2Options
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
   bool profile;          /* a step's sections timed, each after a synchronize (its bits the same), their totals said
                             at its destroy (stderr) - a measurement's build */
+  bool no_int8;          /* the routed experts' int8 decode off (OsmosOptions' no_int8: a pack's "int8": false) - their f16 / F32 path at
+                            every step */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);
@@ -62,6 +64,8 @@ uint64_t ink2_seq_mark_bytes(const Ink2Seq *s);
 bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
 bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
+void ink2_forward_reading(Ink2Forward *f, bool on);
+bool ink2_forward_int8(const Ink2Forward *f);
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                char err[OSMOS_ERR]);
 const float *ink2_logits(const Ink2Forward *f);

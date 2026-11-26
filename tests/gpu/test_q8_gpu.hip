@@ -273,10 +273,11 @@ int main() {
         hipMemcpyFromSymbol(g_1s, HIP_SYMBOL(kIq1sGrid), sizeof g_1s) == hipSuccess &&
         hipMemcpyFromSymbol(g_3xxs, HIP_SYMBOL(kIq3xxsGrid), sizeof g_3xxs) == hipSuccess &&
         hipMemcpyFromSymbol(g_signs, HIP_SYMBOL(kKsigns), sizeof g_signs) == hipSuccess);
-  // refusals: a type without the contract (Q5_K), cols not whole blocks, no matrices, too many tokens
+  // refusals: a type without the contract (MXFP8: E4M3 codes, no int8 form), cols not whole blocks, no matrices,
+  // too many tokens
   const void* const* nw = nullptr;
   CHECK(!q8_round(nullptr, 1, 33, 33, nullptr, nullptr, nullptr) && !q8_round(nullptr, 0, 256, 256, nullptr, nullptr, nullptr));
-  CHECK(!q8_group_tok(13, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
+  CHECK(!q8_group_tok(43, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, 1, 1, kQK + 32, nullptr, nullptr, nullptr, 1, nullptr));
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 0, 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));
   CHECK(!q8_group_tok(kIQ2_XXS, nw, nullptr, nullptr, nullptr, 1, kTok + 1, 1, kQK, nullptr, nullptr, nullptr, 1, nullptr));

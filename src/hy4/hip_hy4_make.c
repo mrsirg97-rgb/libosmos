@@ -21,6 +21,7 @@
 #include "osmos/model/expert_units.h"
 #include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
+#include "osmos/gpu/q8.h"
 #include "hy4_impl.h"
 #include "osmos/err.h"
 #include "osmos/err_hip.h"
@@ -152,6 +153,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
              (uint32_t)g->ix_pool;
   f->eg_fd = -1;
   f->pf.on = getenv("HY4_PROFILE") ? (atoi(getenv("HY4_PROFILE")) > 2 ? 3 : atoi(getenv("HY4_PROFILE")) > 1 ? 2 : 1) : 0;
+  f->q8 = !o->no_int8; /* a decode's experts over int8 inputs (the pack's; OSMOS_Q8=0 at any step: F32) */
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     f->dfly_slot[l] = -1;
   int hmax = 0;
@@ -175,6 +177,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->up, n * g->n_ff * F}, {&f->act, n * g->n_ff * F}, {&f->logit_r, n * g->n_experts * F}, {&f->wtok, n * K * F},
       {&f->rin, n * L * F}, {&f->xg, (n * K + MV_MAX_TOKENS) * L * F}, {&f->eg_g, n * K * ffe * F},
       {&f->eg_u, n * K * ffe * F}, {&f->eg_h, (n * K + MV_MAX_TOKENS) * ffe * F}, {&f->eg_y, n * K * L * F}, {&f->wsel, n * K * F}, {&f->rsum, n * L * F},
+      {&f->xq, n * L}, {&f->xqd, n * (L / 32) * F}, {&f->hq, (n * K + MV_MAX_TOKENS) * ffe},
+      {&f->hqd, (n * K + MV_MAX_TOKENS) * (ffe / 32) * F},
       {&f->sh, n * D * F}, {&f->idx, n * K * 4}, {&f->gidx, n * K * 4}, {&f->sidx, n * K * 4},
       {&f->cnt, entries * 4}, {&f->xrow, entries * 4}, {&f->wptr, 3 * entries * sizeof(void *)},
       {&f->tok, n * 4}, {&f->pos, n * 4}, {&f->hx, lr * hc * D * F}, {&f->logits, lr * g->n_vocab * F},

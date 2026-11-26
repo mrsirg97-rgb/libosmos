@@ -4,7 +4,7 @@
 
 #include "api.h"
 
-#define CONFIG_ARGS_MAX 56 /* config_argv's every flag and its NULL (49 with all: room past it) */
+#define CONFIG_ARGS_MAX 56 /* config_argv's every flag and its NULL (50 with all: room past it) */
 
 /* a pack's osmos.json (the installer's: tools/install/layout.py) - what the engine is started with */
 typedef struct Config
@@ -21,6 +21,7 @@ typedef struct Config
                              next user turn; a pack's own choice, its training's) */
   bool stream_ngram; /* osmos-serve's --stream-ngram */
   bool kv_q8;        /* osmos-serve's --kv-q8 (Inkling's full layers' cached values Q8, not Q5) */
+  bool no_int8;      /* osmos-serve's --no-int8 ("int8": false: the routed experts' int8 decode off) */
   bool profile;      /* osmos-serve's --profile (a measurement's build: a step's sections timed, said at its end) */
   char rope_stages[256]; /* osmos-serve's --rope-stages (osmos1.7b's YaRN stages, "from:factor,..."): "" none */
   double temperature, top_p; /* the pack's sampling, a request's unset (its release's); temperature 0 greedy (the

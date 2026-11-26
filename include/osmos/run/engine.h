@@ -61,6 +61,8 @@ typedef struct OsmosOptions
                            Inkling's - the others refuse it) */
   const char *rope_stages; /* osmos1.7b's YaRN stages, "from:factor,..." (osmos-serve's --rope-stages; the others
                               refuse it; NULL the model's) */
+  bool no_int8; /* the routed experts' int8 decode off (osmos-serve's --no-int8: a pack's "int8": false, where it
+                   measured slower): each family's f16 / F32 path at every step. OSMOS_Q8=0 the engine-wide switch */
 } OsmosOptions;
 
 /* the NPU's default shares: each model's best measured */

@@ -119,7 +119,8 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
                              NULL,
                              o->npu,
                              o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_DS,
-                             o->drafter};
+                             o->drafter,
+                             o->no_int8};
   if (!(e->f = forward_create_with(m->w, &fo, err)))
     return e_destroy(e), NULL;
   e->d = forward_drafter(e->f); /* (borrowed: the forward's) */
@@ -200,4 +201,5 @@ const OsmosFamily osmos_ds4 = {
     s_reach,      s_position, s_state_bytes, s_save_to, s_load_from, s_seed,        s_draft,  NULL, /* its drafts one sequence at a time */
     true, /* a prompt's read: the large steps' math at any size (forward_reading) */
     NULL,   NULL, NULL, /* a mark its whole state */
+    NULL, /* (its reads apart always) */
 };

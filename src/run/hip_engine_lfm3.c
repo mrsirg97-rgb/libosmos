@@ -163,4 +163,5 @@ const OsmosFamily osmos_lfm3 = {
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     true, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (lfm3_step_read)  */
     NULL, NULL, NULL, /* no marks: the whole state */
+    NULL, /* (its reads apart always) */
 };

@@ -163,7 +163,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
       return osmos_fail(err, "%s", ierr), e_destroy(e), NULL;
   }
   const Ink2Options io = {o->max_ctx, osmos_step_tokens(o, INK2_STEP_TOKENS), 0, e->picks, e->mtp, o->budget,
-                          INK2_LOGIT_ROWS, o->kv_q8, ledger, o->profile};
+                          INK2_LOGIT_ROWS, o->kv_q8, ledger, o->profile, o->no_int8};
   if (!(e->f = ink2_forward_create(m->w, &io, err)))
     return e_destroy(e), NULL;
   return e;
@@ -179,13 +179,15 @@ static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs
                    char err[OSMOS_ERR])
 {
   _Static_assert(INK2_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
-  (void)read; /* (one math for every step) */
   Eng *e = p;
+  ink2_forward_reading(e->f, read); /* (apart's: a prompt's read never int8, at any size) */
   uint32_t n = 0;
   for (uint32_t r = 0; r < runs; r++)
     n += len[r];
   const double t0 = e->rp.on ? now_s() : 0;
-  if (!ink2_step(e->f, (Ink2Seq *const *)run, len, runs, tokens, err))
+  const bool ok = ink2_step(e->f, (Ink2Seq *const *)run, len, runs, tokens, err);
+  ink2_forward_reading(e->f, false);
+  if (!ok)
     return false;
   if (e->rp.on) /* (ink2_step synchronizes: its time the step's) */
   {
@@ -196,6 +198,8 @@ static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs
 }
 
 static void e_kept(const void *p, KeptView *k) { ink2_kept_view(((const Eng *)p)->f, k); }
+
+static bool e_apart(const void *p) { return ink2_forward_int8(((const Eng *)p)->f); }
 
 static uint32_t e_block(const void *p)
 {
@@ -263,6 +267,7 @@ const OsmosFamily osmos_ink2 = {
     m_open,     m_close,       e_create,  e_destroy,   e_identity, e_stats,
     e_step,     e_kept,      e_block,   s_create,    s_destroy, s_reset,  s_prompt, s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
-    false, /* a prompt's read its batch: one math for every step */
+    false, /* f16 alone: one math for every step */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the conv tails and windows (ink2_seq_mark_save) */
+    e_apart,  /* the int8 decode on: a decode's experts int8, a prompt's read f16 at any size - apart */
 };

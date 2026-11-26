@@ -10,6 +10,7 @@
 #include <hip/hip_runtime_api.h>
 #include "osmos/model/tensor.h"
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -64,7 +65,7 @@ static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
 
 /* the routed experts behind the membrane: the MoE layers' units (expert_units), the warm set an expert of every layer
    at a time, sized to the budget (experts_plan: 0 every one), read in (experts_create); every one resident: their
-   addresses' device table for the decode's GPU tables (hy4_route) */
+   addresses' device table for the decode's GPU tables (route_tok) */
 bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err)
 {
   const Hy4Weights *w = f->w;

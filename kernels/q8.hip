@@ -1,75 +1,121 @@
-// q8.h's kernels behind include/osmos/gpu/q8.h
-#include "q8.h"
+// q8.h's matvec and rounding behind include/osmos/gpu/q8.h (the driver: q8_experts.hip)
+#include <cstdlib>
+
+#include "q8_launch.h"
 
 extern "C" {
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/q8.h"
+#include "osmos/model/qtype.h"
 }
 
 static_assert(LANE_Q8_VALUES == q8::kWave, "q8_round: a lane a value of a block");
 static_assert(MV_MAX_TOKENS == 8, "q8_group_tok instantiates 1 .. 8 tokens");
 
+namespace q8 {
+
+// rows of x to int8 a block at a time: a wave a block (lane i its value i), the block's max magnitude by the wave's
+// tree, each lane's code, four lanes' bytes a word; d the block's scale
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void round_kernel(const float* __restrict__ x, uint32_t rows,
+                                                                       uint32_t cols, uint32_t xs,
+                                                                       int8_t* __restrict__ q, float* __restrict__ d) {
+  const uint32_t nblk = cols / LANE_Q8_VALUES, blk = blockIdx.x * kWavesPerBlock + threadIdx.x / kWave;
+  const int lane = threadIdx.x % kWave;
+  if (blk >= rows * nblk) return;  // the whole wave
+  const uint32_t r = blk / nblk, s = blk % nblk;
+  const float v = x[(uint64_t) r * xs + (uint64_t) s * LANE_Q8_VALUES + lane];
+  float a = fabsf(v);
+  for (int o = kWave / 2; o > 0; o >>= 1) a = fmaxf(a, __shfl_xor(a, o, kWave));
+  q[(uint64_t) r * cols + (uint64_t) s * LANE_Q8_VALUES + lane] = (int8_t) lane_q8_round(v, lane_q8_inv(a));
+  if (lane == 0) d[(uint64_t) r * nblk + s] = lane_q8_scale(a);
+}
+
+}  // namespace q8
+
 namespace {
 
-// q8_gate_up's arguments, carried through the dispatch
-struct GateUp {
-  const void* const *wg, *const *wu;
-  const int32_t *cnt, *xrow, *xin, *win;
-  uint32_t n, rows, cols;
-  const int8_t* q;
-  const float *d, *scale;
-  float lim;
-  float* h;
-  uint32_t hs;
-};
-
-template <quant::Type T, int NT, int L>
+template <quant::Type T, int NT, int L, int E>
 bool launch(const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n, uint32_t rows, uint32_t cols,
             const int8_t* q, const float* d, float* y, uint32_t ys, hipStream_t s) {
   const uint32_t per_block = q8::kWavesPerBlock * (q8::kWave / L);
-  q8::group_tok_kernel<T, NT, L><<<dim3((rows + per_block - 1) / per_block, n), q8::kWave * q8::kWavesPerBlock, 0,
-                                   s>>>((const uint8_t* const*) w, cnt, xrow, xin, rows, cols, q, d, y, ys);
+  q8::group_tok_kernel<T, NT, L, E><<<dim3((rows + per_block - 1) / per_block, n), q8::kWave * q8::kWavesPerBlock, 0,
+                                      s>>>((const uint8_t* const*) w, cnt, xrow, xin, rows, cols, q, d, y, ys);
   return hipGetLastError() == hipSuccess;
 }
 
-template <quant::Type T, int NT>
+template <quant::Type T, int NT, int E>
 bool by_lanes(const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n, uint32_t rows, uint32_t cols,
               const int8_t* q, const float* d, float* y, uint32_t ys, hipStream_t s) {
-  if (LANE_Q8_LANES(cols) == 32) return launch<T, NT, 32>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
-  return launch<T, NT, 16>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+  if (LANE_Q8_LANES(cols) == 32) return launch<T, NT, 32, E>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+  return launch<T, NT, 16, E>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
 }
 
+// at most max_cnt rows a matrix: one launch at max_cnt (every matrix's rows 1 .. max_cnt), or exact - a table in any
+// order, counts 0 among them: the count-1 matrices a launch at 1 (a decode's or a verify's: nearly all), then the
+// rest a launch at max_cnt (few: an expert two tokens picked, three) - not a launch a count, each a grid of every
+// matrix that the others' leave empty (Mini's 7-token verify: 10% of its experts' time). a token's sums its own at any
+// width: the same bits either way
 template <quant::Type T>
 bool by_tokens(const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n, uint32_t max_cnt,
-               uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y, uint32_t ys, hipStream_t s) {
+               uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y, uint32_t ys, bool exact,
+               hipStream_t s) {
+  if (cols % quant::Block<T>::values) return false;  // whole blocks of the type (Qwen's down: 640 of IQ4_NL)
+  bool ok = true;
+  if (exact) {
+    ok = by_lanes<T, 1, q8::kSelExact>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+    switch (max_cnt) {
+#define TOK(nt) \
+  case nt: return ok && by_lanes<T, nt, q8::kSelTwo>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+      TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+#undef TOK
+      default: return ok;
+    }
+  }
   switch (max_cnt) {
 #define TOK(nt) \
-  case nt: return by_lanes<T, nt>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+  case nt: return by_lanes<T, nt, q8::kSelAll>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
     TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
 #undef TOK
     default: return false;
   }
 }
 
-template <quant::Type T, int NT, int L>
-bool launch_gate_up(const GateUp& g, hipStream_t s) {
+template <quant::Type T, int NT, int L, int E, int ACT>
+bool launch_gate_up(const q8::GateUp& g, hipStream_t s) {
   const uint32_t per_block = q8::kWavesPerBlock * (q8::kWave / L);
-  q8::gate_up_kernel<T, NT, L><<<dim3((g.rows + per_block - 1) / per_block, g.n), q8::kWave * q8::kWavesPerBlock, 0,
-                                 s>>>((const uint8_t* const*) g.wg, (const uint8_t* const*) g.wu, g.cnt, g.xrow, g.xin, g.win, g.rows,
-                                      g.cols, g.q, g.d, g.scale, g.lim, g.h, g.hs);
+  q8::gate_up_kernel<T, NT, L, E, ACT><<<dim3((g.rows + per_block - 1) / per_block, g.n),
+                                         q8::kWave * q8::kWavesPerBlock, 0, s>>>(
+      (const uint8_t* const*) g.wg, (const uint8_t* const*) g.wu, g.cnt, g.xrow, g.xin, g.rows, g.cols, g.q, g.d,
+      g.args, g.h, g.hs);
   return hipGetLastError() == hipSuccess;
 }
 
-template <quant::Type T, int NT>
-bool gate_up_lanes(const GateUp& g, hipStream_t s) {
-  return LANE_Q8_LANES(g.cols) == 32 ? launch_gate_up<T, NT, 32>(g, s) : launch_gate_up<T, NT, 16>(g, s);
+template <quant::Type T, int NT, int E>
+bool gate_up_lanes(const q8::GateUp& g, hipStream_t s) {
+  if (g.act == q8::kActInk2)
+    return LANE_Q8_LANES(g.cols) == 32 ? launch_gate_up<T, NT, 32, E, q8::kActInk2>(g, s)
+                                       : launch_gate_up<T, NT, 16, E, q8::kActInk2>(g, s);
+  return LANE_Q8_LANES(g.cols) == 32 ? launch_gate_up<T, NT, 32, E, q8::kActLane>(g, s)
+                                     : launch_gate_up<T, NT, 16, E, q8::kActLane>(g, s);
 }
 
 template <quant::Type T>
-bool gate_up_tokens(const GateUp& g, uint32_t max_cnt, hipStream_t s) {
+bool gate_up_tokens(const q8::GateUp& g, uint32_t max_cnt, bool exact, hipStream_t s) {
+  if (g.cols % quant::Block<T>::values) return false;
+  bool ok = true;
+  if (exact) {
+    ok = gate_up_lanes<T, 1, q8::kSelExact>(g, s);
+    switch (max_cnt) {
+#define TOK(nt) \
+  case nt: return ok && gate_up_lanes<T, nt, q8::kSelTwo>(g, s);
+      TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+#undef TOK
+      default: return ok;
+    }
+  }
   switch (max_cnt) {
 #define TOK(nt) \
-  case nt: return gate_up_lanes<T, nt>(g, s);
+  case nt: return gate_up_lanes<T, nt, q8::kSelAll>(g, s);
     TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
 #undef TOK
     default: return false;
@@ -77,6 +123,33 @@ bool gate_up_tokens(const GateUp& g, uint32_t max_cnt, hipStream_t s) {
 }
 
 }  // namespace
+
+bool q8::group(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin,
+               uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y,
+               uint32_t ys, bool exact, hipStream_t s) {
+  if (!n || n > MV_MAX_GROUP || !rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !cols || cols % LANE_Q8_VALUES)
+    return false;
+  switch (type) {
+#define CASE(t) \
+  case quant::t: return by_tokens<quant::t>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, exact, s);
+    Q8_TYPES(CASE)
+#undef CASE
+    default: return false;
+  }
+}
+
+bool q8::gate_up(uint32_t type, const GateUp& g, uint32_t max_cnt, bool exact, hipStream_t s) {
+  if (!g.n || g.n > MV_MAX_GROUP || !g.rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !g.cols || g.cols % LANE_Q8_VALUES ||
+      g.hs < g.rows || (g.act == kActInk2 && (!g.args.sg || !g.args.su)))
+    return false;
+  switch (type) {
+#define CASE(t) \
+  case quant::t: return gate_up_tokens<quant::t>(g, max_cnt, exact, s);
+    Q8_TYPES(CASE)
+#undef CASE
+    default: return false;
+  }
+}
 
 extern "C" bool q8_round(const float* x, uint32_t rows, uint32_t cols, uint32_t xs, int8_t* q, float* d,
                          void* stream) {
@@ -87,35 +160,20 @@ extern "C" bool q8_round(const float* x, uint32_t rows, uint32_t cols, uint32_t 
   return hipGetLastError() == hipSuccess;
 }
 
+// the table's QTYPE_Q8 rows (qtype.h) - test_qtype_gpu holds them to Q8_TYPES' kernels
+#define Q8_ROW(name, id, values, bytes, paths) || (type == (id) && ((paths) & QTYPE_Q8))
+extern "C" bool q8_takes(uint32_t type) { return false QTYPES(Q8_ROW); }
+#undef Q8_ROW
+
+extern "C" bool q8_enabled(void) {
+  const char* v = getenv("OSMOS_Q8");
+  return !v || atoi(v) != 0;
+}
+
 extern "C" bool q8_group_tok(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow,
-                             const int32_t* xin, uint32_t n,
-                             uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y,
-                             uint32_t ys, void* stream) {
-  if (!n || n > MV_MAX_GROUP || !rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !cols || cols % quant::kQK)
-    return false;
-  const hipStream_t s = (hipStream_t) stream;
-  switch (type) {
-    case quant::kIQ2_XXS: return by_tokens<quant::kIQ2_XXS>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ2_XS: return by_tokens<quant::kIQ2_XS>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ1_M: return by_tokens<quant::kIQ1_M>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ1_S: return by_tokens<quant::kIQ1_S>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ2_S: return by_tokens<quant::kIQ2_S>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ3_XXS: return by_tokens<quant::kIQ3_XXS>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ2_K: return by_tokens<quant::kQ2_K>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ3_K: return by_tokens<quant::kQ3_K>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ4_K: return by_tokens<quant::kQ4_K>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ4_0: return by_tokens<quant::kQ4_0>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ5_1: return by_tokens<quant::kQ5_1>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ8_0: return by_tokens<quant::kQ8_0>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ5_K: return by_tokens<quant::kQ5_K>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ6_K: return by_tokens<quant::kQ6_K>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ4_NL: return by_tokens<quant::kIQ4_NL>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kIQ4_XS: return by_tokens<quant::kIQ4_XS>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kMXFP4: return by_tokens<quant::kMXFP4>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kNVFP4: return by_tokens<quant::kNVFP4>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    case quant::kQ2_0: return by_tokens<quant::kQ2_0>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
-    default: return false;
-  }
+                             const int32_t* xin, uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols,
+                             const int8_t* q, const float* d, float* y, uint32_t ys, void* stream) {
+  return q8::group(type, w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, false, (hipStream_t) stream);
 }
 
 extern "C" bool q8_gate_up(uint32_t type, const void* const* wg, const void* const* wu, const int32_t* cnt,
@@ -123,31 +181,7 @@ extern "C" bool q8_gate_up(uint32_t type, const void* const* wg, const void* con
                            uint32_t max_cnt, uint32_t rows, uint32_t cols,
                            const int8_t* q, const float* d, const float* scale, float lim, float* h, uint32_t hs,
                            void* stream) {
-  if (!n || n > MV_MAX_GROUP || !rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !cols || cols % quant::kQK || !scale ||
-      hs < rows)
-    return false;
-  const GateUp g = {wg, wu, cnt, xrow, xin, win, n, rows, cols, q, d, scale, lim, h, hs};
-  const hipStream_t s = (hipStream_t) stream;
-  switch (type) {
-    case quant::kIQ2_XXS: return gate_up_tokens<quant::kIQ2_XXS>(g, max_cnt, s);
-    case quant::kIQ2_XS: return gate_up_tokens<quant::kIQ2_XS>(g, max_cnt, s);
-    case quant::kIQ1_M: return gate_up_tokens<quant::kIQ1_M>(g, max_cnt, s);
-    case quant::kIQ1_S: return gate_up_tokens<quant::kIQ1_S>(g, max_cnt, s);
-    case quant::kIQ2_S: return gate_up_tokens<quant::kIQ2_S>(g, max_cnt, s);
-    case quant::kIQ3_XXS: return gate_up_tokens<quant::kIQ3_XXS>(g, max_cnt, s);
-    case quant::kQ2_K: return gate_up_tokens<quant::kQ2_K>(g, max_cnt, s);
-    case quant::kQ3_K: return gate_up_tokens<quant::kQ3_K>(g, max_cnt, s);
-    case quant::kQ4_K: return gate_up_tokens<quant::kQ4_K>(g, max_cnt, s);
-    case quant::kQ4_0: return gate_up_tokens<quant::kQ4_0>(g, max_cnt, s);
-    case quant::kQ5_1: return gate_up_tokens<quant::kQ5_1>(g, max_cnt, s);
-    case quant::kQ8_0: return gate_up_tokens<quant::kQ8_0>(g, max_cnt, s);
-    case quant::kQ5_K: return gate_up_tokens<quant::kQ5_K>(g, max_cnt, s);
-    case quant::kQ6_K: return gate_up_tokens<quant::kQ6_K>(g, max_cnt, s);
-    case quant::kIQ4_NL: return gate_up_tokens<quant::kIQ4_NL>(g, max_cnt, s);
-    case quant::kIQ4_XS: return gate_up_tokens<quant::kIQ4_XS>(g, max_cnt, s);
-    case quant::kMXFP4: return gate_up_tokens<quant::kMXFP4>(g, max_cnt, s);
-    case quant::kNVFP4: return gate_up_tokens<quant::kNVFP4>(g, max_cnt, s);
-    case quant::kQ2_0: return gate_up_tokens<quant::kQ2_0>(g, max_cnt, s);
-    default: return false;
-  }
+  const q8::GateUp g = {wg, wu, cnt, xrow, xin, n, rows, cols, q, d, q8::kActLane,
+                        {scale, win, lim, nullptr, nullptr, 0.0f, 0.0f}, h, hs};
+  return q8::gate_up(type, g, max_cnt, false, (hipStream_t) stream);
 }

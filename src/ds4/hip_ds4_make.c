@@ -151,7 +151,7 @@ Forward *forward_create_ranked(const Weights *w, int n_layers, uint32_t max_ctx,
                                const uint64_t *picks, char err[OSMOS_ERR])
 {
   const ForwardOptions o = {n_layers, max_ctx, budget, picks, FORWARD_MAX_TOKENS, false, false, 0, 0, 0, NULL,
-                            false, 0, NULL, NULL, 0, NULL};
+                            false, 0, NULL, NULL, 0, NULL, false};
   return forward_create_with(w, &o, err);
 }
 
@@ -192,6 +192,7 @@ Forward *forward_create_with(const Weights *w, const ForwardOptions *o, char err
     f->cand_words = ((f->score_stride + w->geo.cand_block - 1) / w->geo.cand_block + 31) / 32;
   f->eg_fd = -1;
   f->pf.on = getenv("DS4_PROFILE") != NULL;
+  f->no_int8 = o && o->no_int8;
   for (int i = 0; i < FWD_MAX_FILES; i++)
     f->fds[i] = f->dfds[i] = -1;
   /* a drafter's plan before any GPU memory: its index read, its target layers the model's (a drafter refused here,

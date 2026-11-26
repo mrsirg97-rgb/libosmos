@@ -1,6 +1,6 @@
 /* the hy4 latent MoE (hy4_impl.h's hy4_moe): the router, the routed experts in the latent - each expert read once for
    the tokens that picked it, a decode's on the matvec (mv_group_tok), a prompt's on the matrix cores
-   (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (hy4_route), a read's on the host - the shared expert, the combine norm. a token's sums its own in
+   (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (route_tok), a read's on the host - the shared expert, the combine norm. a token's sums its own in
    either: its picks' order and its sum's (slot order) its own */
 #include <math.h>
 #include <stdlib.h>
@@ -9,10 +9,12 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/route.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q8.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
@@ -59,7 +61,7 @@ static bool in_memory(Hy4Forward *f, int l, const MoeRoute *rt, uint32_t picks)
 /* a read's picks grouped by expert on the host (moe_route: ascending; within one, its tokens ascending): each sorted
    row's token and weight, each (token, slot)'s row; mm_group's entries (moe_entries: chunks of MM_MAX_TOKENS, each
    expert's slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column
-   tiles). a decode's tables are the GPU's (hy4_route: no host between the router and the experts) */
+   tiles). a decode's tables are the GPU's (route_tok: no host between the router and the experts) */
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -129,10 +131,10 @@ static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt
   return ok;
 }
 
-/* a decode's tables on the host (some experts not resident: the membrane's addresses), hy4_route's: the picks by
+/* a decode's tables on the host (some experts not resident: the membrane's addresses), route_tok's: the picks by
    expert ascending, an expert's tokens ascending - row r's token and weight, pick m's row; the entries each expert's
    rows in chunks (experts ascending), the count 0 past them to n_tok x k. a pick out of range or twice in a token
-   refused (hy4_route's fault) */
+   refused (route_tok's fault) */
 static bool decode_tables(Hy4Forward *f, int l, uint32_t n, uint32_t chunk)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -182,9 +184,19 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     const uint32_t chunk = n < MV_MAX_TOKENS ? n : MV_MAX_TOKENS;
     const void *const *tab = f->exp_tab + (uint64_t)(l - g->n_dense) * 3 * E; /* (every expert resident) */
     double t = f->pf.on > 1 ? hy4_now() : 0;
-    return (f->whole ? hy4_route(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
-                                 f->fault, f->st)
-                     : decode_tables(f, l, n, chunk)) &&
+    const bool tables = f->whole ? route_tok(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt,
+                                             f->xrow, wg, f->fault, f->st)
+                                 : decode_tables(f, l, n, chunk);
+    if (f->q8 && q8_enabled() && q8_takes(L->exp_gate->type) && q8_takes(L->exp_up->type) && q8_takes(L->exp_down->type))
+    { /* each token's row rounded once (rin), its picks' rows by gidx; the table exact: experts in any count order */
+      const Q8Experts e = {.gate_type = L->exp_gate->type, .up_type = L->exp_up->type, .down_type = L->exp_down->type,
+                           .wg = wg, .wu = wu, .wd = wd, .cnt = f->cnt, .xrow = f->xrow, .xin = f->gidx, .n = nk,
+                           .max_cnt = chunk, .d = lat, .ff = ffe, .x = rin, .x_rows = n, .xq = f->xq, .xqd = f->xqd,
+                           .scale = f->wsel, .lim = g->clamp[l], .ga = f->eg_g, .up = f->eg_u, .h = f->eg_h,
+                           .h_rows = nk, .hq = f->hq, .hqd = f->hqd, .y = f->eg_y};
+      return tables && hy4_part_done(f, 17, &t) && q8_experts(&e, f->st) && hy4_part_done(f, 20, &t);
+    }
+    return tables &&
            ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) && hy4_part_done(f, 17, &t) &&
            mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) && hy4_part_done(f, 18, &t) &&
            mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) && hy4_part_done(f, 19, &t) &&

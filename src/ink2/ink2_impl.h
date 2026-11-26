@@ -136,6 +136,8 @@ struct Ink2Forward
   bool bf16_mm;  /* the model's dense weights BF16 (Mini's): its BF16 matrices mm's (mm_takes), not a side tensor's alone */
   bool router16; /* f->x16 the MoE's input's (rms_for's): the router's, read first */
   bool whole;
+  bool no_int8; /* the experts' int8 decode off (Ink2Options') */
+  bool reading; /* the steps a prompt's read (ink2_forward_reading): the matrix cores at any size, never int8 */
   const void **exp_tab;
   float *scale_tab;
   uint32_t *picks_d;
@@ -144,6 +146,12 @@ struct Ink2Forward
   int32_t *t_cnt, *t_gidx, *t_hidx, *t_where, *t_off;
   uint32_t *t_xg, *t_yg, *t_xd, *t_yd;
   float *t_sg, *t_su, *t_a;
+  /* a decode's int8 experts (q8_experts; q8_enabled, the layer's types q8_takes'): every expert in memory, route_tok's
+     tables (q_gidx .. q_wptr); either way the step's x and the activations rounded (MV_MAX_TOKENS tokens at most) */
+  int32_t *q_gidx, *q_sidx, *q_cnt, *q_xrow;
+  float *q_wsel, *q_xd, *q_hd;
+  const void **q_wptr;
+  int8_t *q_x, *q_h;
   uint32_t t_entries; /* the tables' entries, for t_ptr's three runs of them */
   /* the experts */
   int *fds;

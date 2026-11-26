@@ -14,6 +14,7 @@
 #include "osmos/mem/experts.h"
 #include "osmos/mem/membrane.h"
 #include "osmos/run/fit.h"
+#include "osmos/gpu/mv.h"
 #include "q4x_impl.h"
 #include "osmos/err.h"
 
@@ -277,6 +278,7 @@ bool q4x_buffers(Q4xForward *f, char *err)
   Q4xExpertBounds bd;
   q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
   const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
+  const uint64_t dk = (uint64_t)MV_MAX_TOKENS * k; /* a decode's picks at most (the int8 experts' tables) */
   const uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
   const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * wide * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
@@ -300,6 +302,10 @@ bool q4x_buffers(Q4xForward *f, char *err)
       {&b->hidx, slots * 4, 0},        {&b->eoff, 3ull * g->n_experts * 4, 0},        {&b->where, n * k * 4, 1},       {&b->xg, entries * 4, 0},        {&b->yg, entries * 4, 0},
       {&b->xd, entries * 4, 0},        {&b->yd, entries * 4, 0},        {&b->x16, x16, 0},               {&b->xe16, xe16, 0},
       {&b->overflow, 4, 0},
+      {&b->q_gidx, dk * 4, 0},         {&b->q_sidx, dk * 4, 0},         {&b->q_cnt, dk * 4, 0},          {&b->q_xrow, dk * 4, 0},
+      {&b->q_wsel, dk * F, 0},         {&b->q_wptr, 3 * dk * sizeof(void *), 0},
+      {&b->q_x, MV_MAX_TOKENS * D, 0}, {&b->q_xd, MV_MAX_TOKENS * (D / 32) * F, 0},
+      {&b->q_h, dk * ff, 0},           {&b->q_hd, dk * (ff / 32) * F, 0},
       {&b->x16b, (uint64_t)MM_SILU_MAX_TOKENS * g->hc_rank * 2, 0},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},

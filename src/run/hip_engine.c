@@ -129,6 +129,7 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
                     "the engine's sampling pick") ||
       !engine_named(m->fam, err, (e->impl = m->fam->create(m->impl, o, e->ledger, err)) != NULL))
     return osmos_destroy(e), NULL;
+  e->apart = m->fam->reads_apart || (m->fam->apart && m->fam->apart(e->impl));
   return e;
 }
 
@@ -189,7 +190,7 @@ static bool step(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_
   void *run[OSMOS_MAX_RUNS];
   for (uint32_t r = 0; r < runs; r++)
     run[r] = seqs[first[r]]->impl;
-  if (!engine_named(e->fam, err, e->fam->step(e->impl, run, len, runs, tokens, read && e->fam->reads_apart, err)))
+  if (!engine_named(e->fam, err, e->fam->step(e->impl, run, len, runs, tokens, read && e->apart, err)))
     return false;
   e->last_n = n;
   return true;
@@ -200,7 +201,7 @@ bool osmos_read(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t
   return step(e, seqs, tokens, n, true, err);
 }
 
-bool osmos_reads_apart(const Osmos *e) { return e && e->fam->reads_apart; }
+bool osmos_reads_apart(const Osmos *e) { return e && e->apart; }
 
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR])
 {

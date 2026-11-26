@@ -9,7 +9,7 @@
 #define QTYPE_MV (1u << 2)      /* the GPU's matvec (mv_group) */
 #define QTYPE_MV_TOK (1u << 3)  /* the GPU's matvec, an expert's tokens (mv_group_tok) */
 #define QTYPE_MM (1u << 4)      /* the GPU's prompt matmul (mm_run, mm_run2, mm_group, mm_col_tiles) */
-#define QTYPE_Q8 (1u << 5)      /* the lane's int8 experts on the GPU (q8_group_tok, q8_gate_up) */
+#define QTYPE_Q8 (1u << 5)      /* the int8 experts on the GPU (q8_group_tok, q8_gate_up, q8_mm: q8_takes) */
 #define QTYPE_CPU_MV (1u << 6)  /* the CPU lane's matvec (cpu_mv_rows) */
 #define QTYPE_CPU_Q8 (1u << 7)  /* the CPU lane's int8 experts (cpu/q8.c) */
 #define QTYPE_EMBED (1u << 8)   /* a token's row of the embedding (ops_embed) */
@@ -25,28 +25,28 @@
    and given the id 0x100 | 43, no file's) */
 #define QTYPES(X)                                                                                  \
   X(F32, 0, 1, 4, QTYPE_FILE | QTYPE_MV)                                                           \
-  X(Q4_0, 2, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
-  X(Q5_1, 7, 32, 24, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                \
-  X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
-  X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
-  X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
+  X(Q4_0, 2, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                \
+  X(Q5_1, 7, 32, 24, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                \
+  X(Q8_0, 8, 32, 34, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_EMBED) \
+  X(Q4_K, 12, 256, 144, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_EMBED) \
+  X(Q5_K, 13, 256, 176, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_EMBED) \
   X(Q2_K, 10, 256, 84, QTYPE_IQ)                                                                   \
-  X(Q3_K, 11, 256, 110, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                                                                   \
-  X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_EMBED) \
+  X(Q3_K, 11, 256, 110, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                                                                   \
+  X(Q6_K, 14, 256, 210, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8 | QTYPE_EMBED) \
   X(IQ2_XXS, 16, 256, 66, QTYPE_IQ)                                                                \
   X(IQ2_XS, 17, 256, 74, QTYPE_IQ)                                                                 \
   X(IQ3_XXS, 18, 256, 98, QTYPE_IQ)                                                                \
   X(IQ1_S, 19, 256, 50, QTYPE_IQ)                                                                  \
-  X(IQ4_NL, 20, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                       \
+  X(IQ4_NL, 20, 32, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                       \
   X(IQ2_S, 22, 256, 82, QTYPE_IQ)                                                                  \
-  X(IQ4_XS, 23, 256, 136, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                       \
+  X(IQ4_XS, 23, 256, 136, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                       \
   X(I32, 26, 1, 4, QTYPE_FILE)                                                                     \
   X(I64, 27, 1, 8, QTYPE_FILE)                                                                     \
   X(IQ1_M, 29, 256, 56, QTYPE_IQ)                                                                  \
   X(BF16, 30, 1, 2, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_EMBED)                            \
-  X(MXFP4, 39, 32, 17, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
-  X(NVFP4, 40, 64, 36, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
-  X(Q2_0, 42, 64, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)                           \
+  X(MXFP4, 39, 32, 17, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)            \
+  X(NVFP4, 40, 64, 36, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)            \
+  X(Q2_0, 42, 64, 18, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM | QTYPE_Q8)                           \
   X(MXFP8, 43, 32, 33, QTYPE_FILE | QTYPE_DECODE | QTYPE_MV | QTYPE_MV_TOK | QTYPE_MM)            \
   X(F8_E4M3, 0x12B, 1, 1, QTYPE_FILE | QTYPE_DECODE)
 

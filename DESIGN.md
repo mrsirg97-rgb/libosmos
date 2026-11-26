@@ -7357,3 +7357,40 @@ blocks x 6 layers a 3K prompt). Batching a layer's blocks into one copy and one 
 KL, top-1 and NLL to every digit) did not move the 3K prompt - the bucketing itself is the time. Deferring it to the
 first read that needs one changes what a saved state's `closed` means (its buckets saved, the rollback rule, the
 loader's check); bucketing on the GPU, or on a thread beside it, is 0.18.0's.
+
+### 0.18.0: the routed experts' int8 decode, every family's (2026-11-25, low-power)
+
+The lane's int8 inputs (DeepSeek's since 0.6: each 32-value block of x rounded to int8, a weight's codes against them
+by v_dot4, then the scales in F32) now take every QTYPE_MV_TOK type but MXFP8 - 19, the table's QTYPE_Q8 rows;
+q8_takes reads them; test_q8_types_gpu holds each to exact arithmetic on its F32 decoder - and one driver runs them
+for any family (q8_experts: x rounded, gate + up + the activation fused, h rounded, down; by the host's count runs,
+DeepSeek's, or exact for a table in any order). route_tok (Hy4's router, moved) builds a resident family's tables
+on the GPU; a streamed one's are the host's (the membrane's addresses).
+
+- **At a decode only** (a step of at most MV_MAX_TOKENS, 8: every drafter's verify fits, so drafted == plain). A
+  prompt keeps its own path (the matrix cores, f16): Qwen's and Inkling's prompt == decode now holds on that path
+  alone (their tests: under OSMOS_Q8=0; on int8, a decode's bits deterministic and resident == streamed). A batch
+  of sequences past 8 tokens takes the prompt's path, as Hy4's and DeepSeek's always did.
+- **Measured** (drafted, 256 tokens, low-power; KL: ekld, 4,096 wiki tokens in steps of 4, int8 against f16):
+
+  | pack | int8 | drafted code / prose | KL mean, top-1 | |
+  |---|---|---|---|---|
+  | Small (IQ1_S / IQ2 / IQ3) | on | 12.9 -> 17.0, 13.0 -> 16.4 | 0.0072, 96.9% | NLL 1.10845 -> 1.10839 |
+  | Hy4 (Q3_K) | on | 22.0 -> 26.2, 19.4 -> 23.9 | 0.123, 89.1% | the read path's own: 0.118, 90.5% |
+  | Qwen (IQ2_S / IQ3 / IQ4_NL) | on | 48.2 -> 49.3, 41.7 -> 39.7 | 0.0093, 98.0% | plain +5.6%; resident == streamed bits |
+  | Mini (NVFP4 / MXFP8) | **off** ("int8": false) | 45.2 -> 41.5, 41.4 -> 40.5 | 0.0017, 97.9% | its verify bandwidth-bound |
+  | DeepSeek | on (unchanged) | the same bits | | moved onto the driver |
+
+- **Mini**: its experts touch ~7 distinct experts a verify token (49 of 56 picks at 7 tokens): a bandwidth contest,
+  and NVFP4 decodes cheaply - f16 mm_group streams ~200 GB/s. Two fixes for every family's verify: a 4-bit table's
+  codes looked up in registers (v_perm_b32), not one global load a code (32 a block: NVFP4 / MXFP4 / IQ4_NL / IQ4_XS);
+  exact as two launches (count 1, then 2 or more at the table's most), not one a count - each a grid the others'
+  leave empty. Mini's 7-token layer 1242 -> 1113 us (f16 1088); 1 token 136 -> 130 (f16 186). The same bits.
+- **Not kept: int8 on the prompt's matrix cores** (branch q8mm-park, 63acca8): a bit-exact matmul (each token's sums
+  the matvec's: block_sum split into exact integers + combine, the lanes' order folded pairwise in bit-reversed
+  order; 135 byte checks, a lane-order mutation fails all) ran 4-6 TFLOP/s flat against mm_group's 6.5-24.8 (0.19-
+  0.74x): a 16-token tile re-decodes its weights, and the exact epilogue (a scalar combine and fmaf a 32-value block)
+  costs about the WMMA's own work - parity its ceiling.
+- **Switches:** OSMOS_Q8=0 the engine-wide (read every step); a pack's "int8": false (osmos-serve --no-int8,
+  OsmosOptions' no_int8) where it measured slower. With DeepSeek's CPU half, its experts' types both sides'
+  (lane_q8_types: QTYPE_CPU_Q8).

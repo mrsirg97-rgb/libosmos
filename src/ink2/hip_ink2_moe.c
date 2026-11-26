@@ -10,9 +10,14 @@
 #include <time.h>
 #include <unistd.h>
 #include "ink2_impl.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
+#include "osmos/gpu/route.h"
 #include "osmos/model/tensor.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/gpu/route.h"
+#include "osmos/gpu/q8.h"
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mv.h"
@@ -127,6 +132,30 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
   const float *scales = f->scale_tab + (uint64_t)l * 3 * E;
   uint32_t *picks = f->picks_d + (uint64_t)l * E;
   bool ok = ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16);
+  /* a decode's or a verify's experts on int8 (q8_experts): route_tok's tables (an expert's picks one entry; its fault -
+     a pick out of range or twice, the router's never - the step's overflow flag: refused), the scales by their rows
+     (ink2_moe_scales through route_tok's where), each token's row rounded once, read by token; Inkling's activation
+     on each row's tensor scales; the weights and down's scale at the sum (m_a). a prompt's on the matrix cores (f16,
+     below): the two computed apart */
+  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(t[0]->type) && q8_takes(t[1]->type) && q8_takes(t[2]->type) &&
+      C % 32 == 0 && F % 32 == 0)
+  {
+    const uint32_t chunk = n;
+    const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = t[0]->type, .up_type = t[1]->type, .down_type = t[2]->type,
+                          .wg = f->q_wptr, .wu = f->q_wptr + P, .wd = f->q_wptr + 2 * (uint64_t)P, .cnt = f->q_cnt,
+                          .xrow = f->q_xrow, .xin = f->q_gidx, .n = P, .max_cnt = chunk, .d = C, .ff = F, .x = f->xn,
+                          .x_rows = n, .xq = f->q_x, .xqd = f->q_xd, .sg = f->t_sg, .su = f->t_su,
+                          .gcap = g->gate_softcap, .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h,
+                          .hqd = f->q_hd, .y = f->ed};
+    ok = ok &&
+         ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, f->st) &&
+         route_tok(f->pick, pw, n, K, E, chunk, et.tab[0], f->q_gidx, f->q_sidx, f->q_wsel, f->q_cnt, f->q_xrow,
+                   f->q_wptr, f->overflow, f->st) &&
+         ink2_moe_scales(f->pick, pw, f->q_sidx, scales, E, P, f->t_sg, f->t_su, f->t_a, picks, f->st) &&
+         q8_experts(&q8, f->st);
+    f->m_a = f->t_a, f->m_row = f->q_sidx;
+    return ok || osmos_fail(err, "a GPU call failed (the experts on int8, their tables on the GPU)");
+  }
   if (ok && P <= INK2_MOE_PREP_PICKS) /* a decode's or a verify's: the three in one launch, the same bits */
     ok = ink2_moe_prep(f->logit, d->router_bias, E, K, g->route_scale, n, f->pick, pw, C, F, &et, scales, f->t_sg,
                        f->t_su, f->t_a, picks, f->st);
@@ -154,6 +183,14 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
   f->m_a = f->t_a, f->m_row = f->t_where;
   return ok || osmos_fail(err, "a GPU call failed (the experts, their tables on the GPU)");
 }
+
+void ink2_forward_reading(Ink2Forward *f, bool on)
+{
+  if (f)
+    f->reading = on;
+}
+
+bool ink2_forward_int8(const Ink2Forward *f) { return f && !f->no_int8 && q8_enabled(); }
 
 bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
 {
@@ -232,6 +269,42 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       const uint32_t m = rt.by[q];
       sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
+  }
+  /* a decode's or a verify's experts on int8 (q8_experts): an entry a run (an expert's picks at most n <=
+     MV_MAX_TOKENS: one), its rows from the run's start, each sorted row's token by[q] / K - in the region's places
+     (tg, tu, td, cnt; xg the rows, gidx the tokens), one copy; Inkling's activation on each row's scales (sg, su),
+     the weights and down's scale at the sum (a). a prompt's on the matrix cores (f16, below): the two apart */
+  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(L->exp_gate->type) && q8_takes(L->exp_up->type) &&
+      q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
+  {
+    int32_t *rows = (int32_t *)xg;
+    for (uint32_t j = 0; j < rt.runs; j++)
+      tg[j] = f->m_ex[j][0], tu[j] = f->m_ex[j][1], td[j] = f->m_ex[j][2], cnt[j] = (int32_t)rt.count[j],
+      rows[j] = (int32_t)rt.start[j];
+    for (uint32_t q = 0; q < P; q++)
+      gidx[q] = (int32_t)(rt.by[q] / K);
+    const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
+    uint8_t *dv = f->m_dev;
+    const void **dg = (const void **)dv, **du = dg + ecap, **dd = du + ecap;
+    const int32_t *dcnt = (const int32_t *)(dd + ecap);
+    const int32_t *drows = (const int32_t *)(dcnt + ecap);
+    const int32_t *dgidx = (const int32_t *)((const uint32_t *)drows + 4 * ecap), *drow = dgidx + 2 * scap;
+    const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
+    const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = L->exp_gate->type, .up_type = L->exp_up->type,
+                          .down_type = L->exp_down->type, .wg = dg, .wu = du, .wd = dd, .cnt = dcnt, .xrow = drows,
+                          .xin = dgidx, .n = rt.runs, .max_cnt = n, .d = C, .ff = F, .x = f->xn, .x_rows = n,
+                          .xq = f->q_x, .xqd = f->q_xd, .sg = dsg, .su = dsu, .gcap = g->gate_softcap,
+                          .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h, .hqd = f->q_hd, .y = f->ed};
+    const double x0 = f->pf.on ? ink2_pf_now() : 0;
+    memcpy(f->m_host, h, bytes);
+    const bool ok = hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+                    q8_experts(&q8, f->st);
+    f->m_a = da, f->m_row = drow;
+    if (!ok)
+      return osmos_fail(err, "a GPU call failed (the experts on int8)");
+    if (f->pf.on)
+      hipDeviceSynchronize(), f->pf.step[PF_XK] += ink2_pf_now() - x0;
+    return true;
   }
   uint32_t ne = 0;
   if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))

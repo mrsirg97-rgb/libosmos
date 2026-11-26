@@ -9,6 +9,7 @@
 #include <algorithm>
 
 #include "q4x_ref.h"
+#include "q8_off.h"
 
 extern "C" {
 #include "osmos/gpu/mm.h"
@@ -96,6 +97,7 @@ static bool same_rows(const Q4xForward* f, uint32_t at, uint32_t rows, const std
 static void shared_steps(Q4xForward* f, const std::vector<int32_t>& ids, const std::vector<float>& logits,
                          uint32_t vocab) {
   char ferr[OSMOS_ERR] = "";
+  const Q8Off off;  // (the steps' bookkeeping against the one batch: its last step of 2 + 1 a decode's - the f16 path)
   Q4xSeq *a = q4x_seq_create(f, ferr), *b = q4x_seq_create(f, ferr), *c = q4x_seq_create(f, ferr);
   CHECK(a && b && c && q4x_batch(f, a, ids.data(), 100, 0, ferr) && q4x_batch(f, c, ids.data(), 200, 0, ferr));
   std::vector<int32_t> toks(ids.begin() + 100, ids.begin() + 103);
@@ -242,10 +244,24 @@ int main() {
   CHECK(std::memcmp(host_of(q4x_logits(f), (size_t) kTok * vocab).data(), logits.data(),
                     (size_t) kTok * vocab * 4) == 0);  // each half's rows where its row0 put them
   q4x_seq_destroy(s);
-  s = q4x_seq_create(f, ferr);
-  CHECK(q4x_batch(f, s, ids.data(), kTok - 1, 0, ferr) && q4x_batch(f, s, ids.data() + kTok - 1, 1, kTok - 1, ferr));
-  CHECK(std::memcmp(host_of(q4x_logits(f) + (size_t) (kTok - 1) * vocab, vocab).data(),
-                    &logits[(size_t) (kTok - 1) * vocab], vocab * 4) == 0);
+  {  // 255 + 1 on the f16 path: a decode step the prompt's bits (its contract)
+    const Q8Off off;
+    s = q4x_seq_create(f, ferr);
+    CHECK(q4x_batch(f, s, ids.data(), kTok - 1, 0, ferr) && q4x_batch(f, s, ids.data() + kTok - 1, 1, kTok - 1, ferr));
+    CHECK(std::memcmp(host_of(q4x_logits(f) + (size_t) (kTok - 1) * vocab, vocab).data(),
+                      &logits[(size_t) (kTok - 1) * vocab], vocab * 4) == 0);
+    q4x_seq_destroy(s);
+  }
+  // on the run's own path (int8 at a decode: computed apart from the prompt) the 255 + 1 twice: the same bits
+  std::vector<float> once;
+  for (int pass = 0; pass < 2; pass++) {
+    if (pass) q4x_seq_destroy(s);
+    s = q4x_seq_create(f, ferr);
+    CHECK(q4x_batch(f, s, ids.data(), kTok - 1, 0, ferr) && q4x_batch(f, s, ids.data() + kTok - 1, 1, kTok - 1, ferr));
+    const std::vector<float> got = host_of(q4x_logits(f) + (size_t) (kTok - 1) * vocab, vocab);
+    if (pass) CHECK(std::memcmp(got.data(), once.data(), vocab * 4) == 0);
+    once = got;
+  }
   CHECK(!q4x_batch(f, s, ids.data(), 2, kTok - 1, ferr));  // rows past max_tokens
   int32_t top = -1;
   CHECK(q4x_greedy(f, kTok - 1, 1, &top, ferr) &&
@@ -254,23 +270,34 @@ int main() {
   std::printf("  128 + 128 and 255 + 1: the logits the bits of the one batch\n");
   q4x_seq_destroy(s);
   {  // small steps' shared expert on the second stream forced to end last (q4x_forward_side_spin): 248 then 8 single
-     // steps, each row the one batch's - a read of it without the wait would see the step before's
+     // steps, each row the same steps' without it (the run's own path: a decode's) - a read of it without the wait
+     // would see the step before's
     constexpr uint32_t kSpinUs = 2000, kSingles = 8;
-    q4x_forward_side_spin(f, kSpinUs);
-    s = q4x_seq_create(f, ferr);
-    CHECK(s && q4x_batch(f, s, ids.data(), kTok - kSingles, 0, ferr));
-    for (uint32_t t = kTok - kSingles; t < kTok; t++) {
-      CHECK(q4x_batch(f, s, ids.data() + t, 1, 0, ferr));
-      CHECK(std::memcmp(host_of(q4x_logits(f), vocab).data(), &logits[(size_t) t * vocab], vocab * 4) == 0);
+    std::vector<float> singles;
+    for (const uint32_t spin : {0u, kSpinUs}) {
+      q4x_forward_side_spin(f, spin);
+      s = q4x_seq_create(f, ferr);
+      CHECK(s && q4x_batch(f, s, ids.data(), kTok - kSingles, 0, ferr));
+      for (uint32_t t = kTok - kSingles; t < kTok; t++) {
+        CHECK(q4x_batch(f, s, ids.data() + t, 1, 0, ferr));
+        const std::vector<float> row = host_of(q4x_logits(f), vocab);
+        if (!spin)
+          singles.insert(singles.end(), row.begin(), row.end());
+        else
+          CHECK(std::memcmp(row.data(), &singles[(size_t) (t - (kTok - kSingles)) * vocab], vocab * 4) == 0);
+      }
+      if (!spin) q4x_seq_destroy(s);
     }
     q4x_forward_side_spin(f, 0);
-    std::printf("  single steps with the shared expert forced to end last: each row the one batch's\n");
+    std::printf("  single steps with the shared expert forced to end last: each row the unforced one's\n");
   }
   q4x_seq_destroy(s);
   {  // steps of 9 (past MV_MAX_TOKENS, within Q4X_SIDE_STEP: the matvecs' wide tiles beside the shared expert on the
      // second stream): each step's rows the one batch's. 0.5.10 .. 0.5.11's expert tables (tiles_kernel) read their
      // totals as the last expert's thread made its scan exclusive - its slots then cleared, its tokens' expert output
-     // stale - at random, a few times a pass of these steps (8 and under, and the prompt's, never seen to)
+     // stale - at random, a few times a pass of these steps (8 and under, and the prompt's, never seen to). the
+     // matrix cores' tables, so the f16 path's (its last step of 4 a decode's: int8's otherwise)
+    const Q8Off off;
     constexpr uint32_t kSmall = 9;
     s = q4x_seq_create(f, ferr);
     CHECK(s);

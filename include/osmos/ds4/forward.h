@@ -47,6 +47,8 @@ typedef struct ForwardOptions
   float npu_share;       /* its share of an eligible layer's pairs, in (0, 1) */
   const char *drafter;   /* a DSpark drafter's directory (osmos/ds4/drafter.h): made with the forward, its own - its
                             taps the forward's from its first step (forward_drafter) - or NULL: none */
+  bool no_int8;          /* the routed experts' int8 decode off (OsmosOptions' no_int8: a pack's "int8": false) - their f16 / F32 path at
+                            every step */
 } ForwardOptions;
 
 Forward *forward_create(const Weights *w, int n_layers, uint32_t max_ctx, uint64_t budget, char err[OSMOS_ERR]);

@@ -1,8 +1,13 @@
 /* Qwen's MoE and PLE blocks (q4x_impl.h), llama.cpp's math: the routed experts (the
    membrane's, a host's tiles where a run is small), the shared expert, the n-gram layer's rows into b.h */
+#include <math.h>
+
 #include "osmos/mem/membrane.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
+#include "osmos/gpu/mv.h"
+#include "osmos/gpu/q8.h"
+#include "osmos/gpu/route.h"
 #include "osmos/model/qtype.h"
 #include "q4x_impl.h"
 #include "osmos/err.h"
@@ -31,22 +36,38 @@ static bool experts(const GgufTensor *t, const void **ptr, const Q4xBuf *b, cons
    the picks' copy waited for it - scored at a decode, held, waited for). false for a pick out of range, a refusal */
 static int run_of(uint32_t c) { return c <= MM_TILE ? 0 : c <= 2 * MM_TILE ? 1 : c <= 4 * MM_TILE ? 2 : 3; }
 
-static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
+/* the picks by expert on the host (moe_route), each run's expert from the membrane (visited - the GPU past the last
+   layer's experts: the picks' copy waited for it - scored at a decode, every distinct pick held first, then each
+   waited for: its addresses f->h_ex[run]) */
+static bool host_route(Q4xForward *f, int l, uint32_t e, MoeRoute *rt)
 {
   Q4xBuf *b = &f->b;
-  const uint32_t E = (uint32_t)f->w->geo.n_experts, k = (uint32_t)f->w->geo.n_used, part = MM_TILE << (Q4X_TILE_RUNS - 1);
+  const uint32_t E = (uint32_t)f->w->geo.n_experts, k = (uint32_t)f->w->geo.n_used;
   if (hipMemcpy(f->h_ids, b->ids, (size_t)e * 4, hipMemcpyDeviceToHost) != hipSuccess)
     return false;
-  MoeRoute rt = {f->h_by, f->h_row, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E, f->h_gidx, f->h_hidx,
-                 f->h_est, 0, 0};
+  *rt = (MoeRoute){f->h_by, f->h_row, f->h_run, f->h_run + E, f->h_run + 2 * E, f->h_run + 3 * E, f->h_gidx, f->h_hidx,
+                   f->h_est, 0, 0};
   char merr[OSMOS_ERR] = "";
-  if (!moe_route(f->h_ids, e, k, E, MM_TILE, &rt) || !membrane_visit(f->mem, (uint32_t)l, e >= E, merr))
+  if (!moe_route(f->h_ids, e, k, E, MM_TILE, rt) || !membrane_visit(f->mem, (uint32_t)l, e >= E, merr))
     return false;
   for (uint32_t m = 0; e < E && m < e; m++)
     membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->h_ids[m]);
-  for (uint32_t j = 0; j < rt.runs; j++) /* every distinct pick held first: the cold ones' reads under way together */
-    if (!membrane_hold(f->mem, (uint32_t)l * E + rt.expert[j], merr))
+  for (uint32_t j = 0; j < rt->runs; j++) /* the cold ones' reads under way together */
+    if (!membrane_hold(f->mem, (uint32_t)l * E + rt->expert[j], merr))
       return false;
+  for (uint32_t j = 0; j < rt->runs; j++)
+    if (!membrane_wait(f->mem, (uint32_t)l * E + rt->expert[j], f->h_ex[j], merr))
+      return false;
+  return true;
+}
+
+static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
+{
+  Q4xBuf *b = &f->b;
+  const uint32_t part = MM_TILE << (Q4X_TILE_RUNS - 1);
+  MoeRoute rt;
+  if (!host_route(f, l, e, &rt))
+    return false;
   uint32_t at[Q4X_TILE_RUNS];
   for (int r = 0; r < Q4X_TILE_RUNS; r++)
     at[r] = bd->first[r];
@@ -54,8 +75,6 @@ static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *
     f->h_cnt[i] = 0;
   for (uint32_t j = 0; j < rt.runs; j++)
   {
-    if (!membrane_wait(f->mem, (uint32_t)l * E + rt.expert[j], f->h_ex[j], merr))
-      return false;
     for (uint32_t off = 0; off < rt.count[j]; off += part)
     {
       const uint32_t c = rt.count[j] - off < part ? rt.count[j] - off : part, en = at[run_of(c)]++;
@@ -80,6 +99,42 @@ static bool host_tiles(Q4xForward *f, int l, uint32_t e, const Q4xExpertBounds *
          hipMemcpy(b->where, f->h_row, (uint64_t)e * 4, hipMemcpyHostToDevice) == hipSuccess;
 }
 
+/* a streamed layer's int8 tables on the host (a decode's: n <= MV_MAX_TOKENS tokens, an expert's picks one entry):
+   host_route's runs - each its count, its first sorted row and the membrane's three addresses - each sorted row's
+   token (by[q] / k), each pick's row (where): one copy each into the q_ tables */
+static bool host_q8(Q4xForward *f, int l, uint32_t e, uint32_t *entries)
+{
+  Q4xBuf *b = &f->b;
+  const uint32_t k = (uint32_t)f->w->geo.n_used;
+  MoeRoute rt;
+  if (!host_route(f, l, e, &rt))
+    return false;
+  int32_t *cnt = f->h_cnt, *rows = (int32_t *)f->h_xg, *tok = f->h_gidx;
+  const void **ptr = f->h_ptr;
+  for (uint32_t j = 0; j < rt.runs; j++)
+  {
+    cnt[j] = (int32_t)rt.count[j], rows[j] = (int32_t)rt.start[j];
+    for (int t = 0; t < Q4X_GROUP_TENSORS; t++)
+      ptr[(uint64_t)t * e + j] = f->h_ex[j][t];
+  }
+  for (uint32_t q = 0; q < e; q++)
+    tok[q] = (int32_t)(rt.by[q] / k);
+  *entries = rt.runs;
+  return hipMemcpy(b->q_cnt, cnt, (size_t)rt.runs * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->q_xrow, rows, (size_t)rt.runs * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->q_gidx, tok, (size_t)e * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->q_sidx, rt.row, (size_t)e * 4, hipMemcpyHostToDevice) == hipSuccess &&
+         hipMemcpy(b->q_wptr, ptr, (size_t)Q4X_GROUP_TENSORS * e * sizeof *ptr, hipMemcpyHostToDevice) == hipSuccess;
+}
+
+void q4x_forward_reading(Q4xForward *f, bool on)
+{
+  if (f)
+    f->reading = on;
+}
+
+bool q4x_forward_int8(const Q4xForward *f) { return f && !f->no_int8 && q8_enabled(); }
+
 bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
@@ -103,8 +158,34 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
     else if (!streamed)
       et.base[i] = q4x_dev(f, t[i]), et.bytes[i] = t[i]->bytes / E;
   }
+  if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL))
+    return false;
+  /* a decode's or a verify's experts on int8 (q8_experts): every expert in memory route_tok's tables (each expert's
+     picks one entry; its fault - a pick out of range or twice, q4x_route's never - b.overflow's: the step refused),
+     streamed the host's (host_q8: the membrane's addresses); each token's row
+     rounded once, read by token; the activation unweighted (Qwen's weights at the sum), every row's output where sidx
+     puts its pick. a prompt's on the matrix cores (f16, below): the two computed apart */
+  if (n <= MV_MAX_TOKENS && !f->reading && (tab || streamed) && !f->no_int8 && q8_enabled() && q8_takes(TY(t[0])) && q8_takes(TY(t[1])) &&
+      q8_takes(TY(t[2])) && D % 32 == 0 && ff % 32 == 0)
+  {
+    const uint32_t chunk = n;
+    uint32_t entries = e; /* route_tok's: n_tok x k, the counts 0 past its own; the host's: its runs */
+    const Q8Experts q8 = {.gate_type = TY(t[0]), .up_type = TY(t[1]), .down_type = TY(t[2]), .wg = b->q_wptr,
+                          .wu = b->q_wptr + e, .wd = b->q_wptr + 2 * (uint64_t)e, .cnt = b->q_cnt, .xrow = b->q_xrow,
+                          .xin = b->q_gidx, .n = e, .max_cnt = chunk, .d = D, .ff = ff, .x = b->mixed, .x_rows = n,
+                          .xq = b->q_x, .xqd = b->q_xd, .lim = INFINITY, .ga = b->ga, .up = b->up,
+                          .h = b->ga, .h_rows = e, .hq = b->q_h, .hqd = b->q_hd, .y = b->y};
+    const bool tables = tab ? route_tok(b->ids, b->w, n, k, E, chunk, et.tab[0], b->q_gidx, b->q_sidx, b->q_wsel,
+                                        b->q_cnt, b->q_xrow, b->q_wptr, b->overflow, NULL)
+                            : host_q8(f, (int)(L - f->w->layer), e, &entries);
+    Q8Experts q8n = q8;
+    q8n.n = entries;
+    return tables && q8_experts(&q8n, NULL) &&
+           (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
+           q4x_moe_sum(b->y, b->q_sidx, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
+  }
   /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
-  if (!mat(f, L->router, E, D, b->mixed, D, n, b->rl, E) || !q4x_route(b->rl, n, E, k, b->ids, b->w, b->rows, NULL) ||
+  if (
       (streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, D, ff) : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
     return false;
   /* the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed

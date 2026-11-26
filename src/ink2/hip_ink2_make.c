@@ -113,6 +113,9 @@ static bool buffers(Ink2Forward *f)
       {(void **)&f->head, f->head_rows * VR * 4}, {(void **)&f->logits, (uint64_t)f->logit_rows * f->vocab * 4},
       {(void **)&f->gid, T * 4}, {&f->amax, ops_argmax_scratch((uint32_t)T)},
       {(void **)&f->res_sc, INK2_RES_SCRATCH * 4}, {&f->bx16, INK2_BX16 * MM_BATCH_TOKENS * CH * 2},
+      /* a decode's int8 experts: x and the activations rounded (MV_MAX_TOKENS tokens, their picks) */
+      {(void **)&f->q_x, MV_MAX_TOKENS * C}, {(void **)&f->q_xd, MV_MAX_TOKENS * (C / 32) * 4},
+      {(void **)&f->q_h, MV_MAX_TOKENS * K * F}, {(void **)&f->q_hd, MV_MAX_TOKENS * K * (F / 32) * 4},
   };
   for (size_t i = 0; i < sizeof b / sizeof *b; i++)
     if (!ink2_dalloc(f, b[i].p, b[i].bytes))
@@ -169,6 +172,7 @@ Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, cha
     return osmos_fail(err, "out of memory"), NULL;
   f->ledger = o->ledger;
   f->pf.on = o->profile;
+  f->no_int8 = o->no_int8;
   f->bf16_mm = w->layer[0].q && ink2_type(w->layer[0].q) == QTYPE_BF16; /* (mm_takes': BF16 the model's dense weights) */
   f->w = w, f->v8 = o->values_q8, f->max_ctx = o->max_ctx, f->max_tokens = o->max_tokens, f->vocab = (uint32_t)w->geo.n_vocab;
   f->logit_rows = o->logit_rows && o->logit_rows < o->max_tokens ? o->logit_rows : o->max_tokens;

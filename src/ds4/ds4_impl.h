@@ -203,6 +203,7 @@ struct Forward
   bool lane;
   bool reading; /* forward_reading: a prompt's read - its steps the large steps' math whatever their size */
   int lane_threads;
+  bool no_int8; /* the experts' int8 decode off (ForwardOptions'; the lane's CPU half its own: lane_q8_types) */
   uint8_t *lane_up;
   void *lane_dev; /* lane_up's device address (mapped: the kernels read the tables where the host wrote them) */
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
@@ -338,6 +339,9 @@ bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd
 void fwd_taps_plan(Forward *f, const bool *at);
 /* hip_ds4_lane.c, hip_ds4_npu.c, hip_ds4_draft.c: what forward_create_with makes last (ForwardOptions' lane, npu, drafter) */
 bool fwd_lane_make(Forward *f, int cpu_threads, const int *cpu_cores, char *err);
+/* whether layer l's routed experts take the int8 path: with the lane's CPU half, the types both sides decode
+   (lane_q8_types: the CPU's bits the GPU's); without it, every type the GPU's lane takes (q8_takes), unless OSMOS_Q8 0 */
+bool fwd_lane_q8(const Forward *f, int l);
 bool fwd_npu_make(Forward *f, const char *dir, float share, char *err);
 /* the drafter's plan, read before the forward's GPU memory (its index, its target layers checked: at[]), and the
    drafter made from it at the forward's end (ix its from then on); destroyed with the forward */
