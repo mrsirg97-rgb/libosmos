@@ -70,7 +70,15 @@ int main() {
   std::snprintf(model_path, sizeof model_path, "%s", getenv("OSMOS_TEST_LFM3") ? getenv("OSMOS_TEST_LFM3") : "");
   if (!model_path[0]) std::snprintf(model_path, sizeof model_path, "%s/Models/osmos1.7b/osmos1.7b-Q4_0.gguf", home);
   std::snprintf(ref_path, sizeof ref_path, "%s", getenv("OSMOS_TEST_LFM3_REF") ? getenv("OSMOS_TEST_LFM3_REF") : "");
-  if (!ref_path[0]) std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_64_kvq8.bin", home);
+  // the 2,048-id reference where it is here (its sparse read and YaRN's stages run on it alone: 0.18.0's gate ran
+  // the 64-id one and skipped both - 0.18.1's LSA closer is the sparse read's), else the 64-id one
+  if (!ref_path[0]) {
+    std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_2048_kvq8.bin", home);
+    if (FILE* rf = std::fopen(ref_path, "rb"))
+      std::fclose(rf);
+    else
+      std::snprintf(ref_path, sizeof ref_path, "%s/osmos-oracle/lfm3_forward_64_kvq8.bin", home);
+  }
   int devs = 0;
   Gguf* g = nullptr;
   if (hipGetDeviceCount(&devs) != hipSuccess || !devs || !load(ref_path) || !(g = gguf_create(model_path, gerr))) {
