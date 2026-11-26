@@ -7394,3 +7394,22 @@ on the GPU; a streamed one's are the host's (the membrane's addresses).
 - **Switches:** OSMOS_Q8=0 the engine-wide (read every step); a pack's "int8": false (osmos-serve --no-int8,
   OsmosOptions' no_int8) where it measured slower. With DeepSeek's CPU half, its experts' types both sides'
   (lane_q8_types: QTYPE_CPU_Q8).
+
+### 0.18.0: DeepSeek's decode, counted - bandwidth, not a defect (2026-11-25, low-power, osmos-evo)
+
+DS4_PROFILE (each part synchronized: shares, not speed) over 256 plain tokens after a 27-token prompt: 62.6 ms a step
+(17.9 tok/s unprofiled) - the experts 30.4 ms (streamed: ~2,000 cold picks), attention 24.1, the rest 8.1. Attention
+does not follow the context it is built for (MAX_CTX 4,096 / 65,536 / 262,144: 23.6 / 24.6 / 24.9 ms) and is 3 of
+its kernels a layer (scores, softmax, values); the time is its weights: 90 MB a layer (q_b, output_b 28.8 each,
+output_a 23.1 - Q5_K), 3.6 GB a token across 40 layers, ~18 ms at the box's ~200 GB/s - ~75% of it. Every dense weight
+5.67 GB a token. Drafted (29.7 tok/s; 195 of 289 accepted, ~4 tokens a round): a verify 127 ms, the experts 84 of it.
+Not pursued in 0.18.0: lower-bit dense weights (a pack's choice, with its KL), the 1-token dense matmuls' last quarter
+of bandwidth (mm::kernel at a decode, 5 a layer: the 0.18.1 matvec work).
+
+### 0.18.0: Mini's drafts a round capped - not kept (2026-11-25, low-power)
+
+The first N drafts past the floors kept (a serve-level cap, 3 / 4 / 5 / none - its drafter's 7), drafted code and
+prose, two passes reversed: uncapped 45.3 / 41.6 tok/s, 5 44.5 / 41.8, 4 44.3 / 41.1, 3 42.5 / 39.8 (each pass within
+0.2). Its experts' verify near-linear in tokens (180 / 165 / 155 us a token at 1 / 4 / 7), yet a round's own costs -
+its drafter's pass, attention, the dense weights - are its deep drafts' worth. int8 at 4: 42.2 / 42.8 (its answers'
+own acceptance: code harder, prose easier). Mini keeps its block, f16; the cap not shipped.

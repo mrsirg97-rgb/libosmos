@@ -986,6 +986,26 @@ class KvQ8(Served, unittest.TestCase):
         self.assertIn("kv_q8", r.stderr)
 
 
+
+class Int8(Served, unittest.TestCase):
+    """osmos.json's int8: false - osmos-serve's --no-int8 (the routed experts' int8 decode off); a bool alone"""
+    settings = {"int8": False}
+
+    def test_0_passed_on(self):
+        self.ready()
+        self.assertIn("--no-int8", self.log()[0].split())
+
+    def test_1_refused(self):
+        d = tempfile.mkdtemp()
+        cfg = os.path.join(d, "osmos.json")
+        with open(cfg, "w") as f:
+            json.dump({"pack": "test", "model": MODEL, "max_context": 4096, "int8": "no"}, f)
+        r = subprocess.run([API, "--config", cfg, "--port", str(free_port()), "--engine", FAKE],
+                           capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("int8", r.stderr)
+
+
 class Profile(Served, unittest.TestCase):
     """osmos.json's profile and rope_stages: osmos-serve's --profile and --rope-stages (0.16.0: the INK2_PROFILE and
     OSMOS_LFM3_STAGES env knobs as options); profile a bool alone, rope_stages a string alone"""
