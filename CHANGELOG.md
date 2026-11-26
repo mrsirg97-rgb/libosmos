@@ -1,5 +1,46 @@
 # Changelog
 
+## [0.18.0]: int8 decode for every family's experts; one attention core; Small +13-27%, Hy4 +8-23%
+
+Mini's, DeepSeek's and osmos1.7b's answers are unchanged, token for token (hashed against 0.17.1's). Qwen's,
+Hy4's and Small's change by decision: their decode's routed experts now run on int8 inputs (each pack's KL below).
+Drafted == plain still holds for every pack, bit for bit.
+
+- **Speed** (performance profile, ~3K prompt / 256 tokens drafted code / prose / plain; 0.17.x's README in
+  parentheses):
+  - `osmos-evo-inkling` (Small): drafted 16.4 / 17.1 (14.5 / 14.3), plain 15.9 / 16.7 (12.6 / 13.2);
+  - `hy4-flash`: prompt 474 (408), drafted 26.9 / 24.8 (22.9 / 20.2), plain 18.8 (17.4);
+  - `qwen38-ud-iq3_xxs`: drafted 50.8 / 43.6 (50.0 / 44.3), plain 30.8 / 30.9 (28.7 / 29.2);
+  - `inkling-2-mini`, `osmos-evo-1017`, `osmos1.7b`: the same, within noise.
+- **A recorded agent session** (`tools/serve/session_bench.py`, new: a real 122-step rig session replayed to ~108K
+  tokens): every pack continued every step in its cache, parsed every answer, never looped, and drafted == plain on
+  every step - greedy and at each pack's own sampling. Decode, drafted as shipped: Qwen 59.5, Mini 49.6 (sampled),
+  DeepSeek 36.5 (sampled), Hy4 33.0, osmos1.7b 71.6 (sampled, no drafter); against this branch before int8 (that run
+  at low-power: the packs whose bits did not change moved 1-11% by the profile alone), Qwen +23%, Hy4 +48%, Small +26%
+  drafted / +52% plain; the cache's reuse token for token the same (Small's own answers, int8 now, read again: +5% of
+  its prompt).
+- **Agents** (4 at once, 8 turns): Hy4 514.6 -> 428.3 s (its answers, new bits, 26% fewer tokens: part of it),
+  DeepSeek 434.3 -> 411.1, Mini 208.3 -> 204.5; osmos1.7b 90.8 -> 92.0-93.3 (its bits unchanged: noise). Qwen 185.2 ->
+  191.5-192.0 (two runs): each turn's own answer, decoded on int8, read again from its prompt's point (reads apart:
+  ~5,800 tokens a run), and its drafted prose slightly slower on int8 - its plain decode 7% faster.
+- **int8 decode for the routed experts, every family's.** DeepSeek's int8 lane (each 32-value block of the input
+  rounded to int8, the weights' codes against it by v_dot4) now takes 19 expert types and one driver runs them for
+  any family: input rounded, gate + up + activation fused, hidden rounded, down. Only at a decode (a step of at most
+  8 tokens, so every drafter's verify): prompts keep the matrix cores in f16. KL against f16 (4,096 wiki tokens):
+  Small 0.0072 (top-1 96.9%, NLL unchanged), Qwen 0.0093 (98.0%), Hy4 0.123 (89.1%; its prompt path's own 0.118).
+  Mini measured slower on int8 (its verify is bandwidth-bound) and stays f16: its pack's `"int8": false`
+  (`osmos-serve --no-int8`). `OSMOS_Q8=0` turns it off engine-wide.
+- **A family's prompt read is never int8**, whatever its size: a server re-read of a turn takes the prompt's path.
+- **One attention core**: every family's attention (Inkling, Qwen, osmos1.7b, q35, Hy4's MLA, DeepSeek's latent,
+  the drafters) is now `attn_core`'s, each family's bits as they were (docs/attention-core.md).
+- **Hy4's Engram rows** are read 64 deep and a layer at a time under the GPU's work (cold prompts ~364 -> ~422
+  tok/s at low-power); a verify's one-token experts launch on their own (drafted +14%).
+- **Tools:** `tools/serve/session_bench.py` (a recorded agent session replayed step by step: cache reuse, parsing,
+  no loops, drafted == plain); `tools/bench/ekld` (KL for any family through the engine interface); HY4_PROFILE,
+  DS4_PROFILE.
+- **Measured, not kept** (DESIGN.md "0.18.0"): int8 on the prompt's matrix cores (bit-exact, 0.19-0.74x f16);
+  capped drafts for Mini; a trimmed verify for Small (its limit is its per-token experts, not the drafter).
+
 ## [0.17.1]: osmos1.7b v-r15 - a better model, in Q8_0: prompts as fast as before, decode ~96 tok/s, 256K
 
 A one-pack release: osmos1.7b moves to its v-r15 training (recipe v-r15: one engineer's agent sessions replayed in
