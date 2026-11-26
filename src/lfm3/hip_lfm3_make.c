@@ -188,6 +188,10 @@ static bool lsa_load(Lfm3Forward *f, const char *path, char *err)
   f->max_buckets = f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1;
   f->sub_n = rows / f->max_buckets < f->max_tokens ? (uint32_t)(rows / f->max_buckets) : f->max_tokens;
   f->sub_n = f->sub_n ? f->sub_n : 1;
+  uint32_t full = 0;
+  for (int l = 0; l < g->n_layers; l++)
+    full += g->kind[l] == LFM3_FULL;
+  ok = ok && (f->closer = lsa_closer_create(f->ledger, full ? full : 1, f->close_max));
   ok = ok && lfm3_alloc(&f->bufs, &f->iqb, (uint64_t)f->max_tokens * LSA_DIM * F) &&
        lfm3_alloc(&f->bufs, &f->lists, (uint64_t)f->max_tokens * LSA_READ_MAX * 4) &&
        lfm3_alloc(&f->bufs, &f->counts, (uint64_t)f->max_tokens * 4) &&
@@ -199,6 +203,8 @@ void lfm3_forward_destroy(Lfm3Forward *f)
 {
   if (!f)
     return;
+  lsa_closer_destroy(f->closer); /* (its jobs done: their events on the step's stream, their copies into the
+                                    sequences' buckets) */
   lsa_scratch_destroy(f->lsa_s);
   free(f->h_ik), free(f->h_cent), free(f->h_mem);
   if (f->st)

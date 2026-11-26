@@ -4,6 +4,7 @@
 /* the lfm3 forward's state (osmos/lfm3/forward.h), shared by hip_lfm3_make.c (the weights, buffers, sequences) and
    hip_lfm3_step.c (the step) */
 
+#include "osmos/gpu/lsa_close.h"
 #include "osmos/gpu/attn_core.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
@@ -52,6 +53,7 @@ struct Lfm3Forward
   uint32_t lsa_in;
   float *wq[LFM3_MAX_LAYERS], *wk[LFM3_MAX_LAYERS];
   LsaScratch *lsa_s;
+  LsaCloser *closer; /* a step that reads none of the blocks it closes: their buckets beside the GPU (0.18.1) */
   float *iq;
   uint32_t *list, *list_n;
   /* a prompt's sparse reads: from position sparse_from, its queries' index vectors, lists and counts (max_tokens

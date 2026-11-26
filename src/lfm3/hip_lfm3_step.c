@@ -95,14 +95,20 @@ static bool kv_put(Lfm3Forward *f, const Lfm3Run *r, const float *vf, int l, boo
 
 /* a full layer's blocks closed up to `want` (each its 512 keys indexed): its index vectors to the host, Ward there
    (src/lsa's lsa_block), its buckets back - every full layer's at once (the count the sequence's) */
-static bool close_blocks(Lfm3Forward *f, Lfm3Seq *s, int l, uint32_t want, uint32_t from)
+static bool close_blocks(Lfm3Forward *f, Lfm3Seq *s, int l, uint32_t want, uint32_t from, bool defer)
 {
+  /* defer: the step reads none of them (every read below sparse_from) - the closer's (osmos/gpu/lsa_close.h), the
+     step's GPU never waiting on the host; a batch it refused closed here as before */
   /* blocks from .. want: up to close_max a batch - their keys' index to the host in one copy and one wait, each
      bucketed (lsa_block, in block order: the same buckets), then their centroids and members back in one copy each.
      a block a wait was 30 (a 3K prompt) to 48 (a 4,096-token step) drains of the GPU's queue a step */
   for (uint32_t b0 = from; b0 < want; b0 += f->close_max)
   {
     const uint32_t k = want - b0 < f->close_max ? want - b0 : f->close_max;
+    if (defer && lsa_closer_queue(f->closer, s->ik[l] + (uint64_t)b0 * LSA_WINDOW * LSA_DIM, b0, k,
+                                  s->cent[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_DIM,
+                                  s->mem[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_CAP, &s->broken, f->st))
+      continue;
     if (hipMemcpyAsync(f->h_ik, s->ik[l] + (uint64_t)b0 * LSA_WINDOW * LSA_DIM, (uint64_t)k * LSA_WINDOW * LSA_DIM * F,
                        hipMemcpyDeviceToHost, f->st) != hipSuccess ||
         hipStreamSynchronize((hipStream_t)f->st) != hipSuccess)
@@ -137,9 +143,9 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     return false;
   if (read)
   {
-    if (!close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed))
-      return false;
     const uint32_t d = P >= f->sparse_from ? 0 : f->sparse_from - P < n ? f->sparse_from - P : n, m = n - d;
+    if (!close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed, !m)) /* (none of them read: the closer's) */
+      return false;
     *dense = d;
     if (!m)
       return true;
@@ -159,13 +165,13 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
   }
   if (P + n <= f->sparse_from) /* a decode below sparse_from: the dense attention's, as a prompt's rows there (its
                                   blocks still closed: the reads past it) - LSA's read every step cost 6% of decode */
-    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed);
+    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, s->closed, true);
   uint32_t closed = s->closed;
   for (uint32_t t = 0; t < n; t++)
   {
     const uint64_t at = (uint64_t)R->off + t;
     const uint32_t want = (P + t) / LSA_WINDOW;
-    if (!close_blocks(f, s, l, want, closed) ||
+    if (!close_blocks(f, s, l, want, closed, false) ||
         !lsa_index_gpu(f->qr + at * q, 1, q, KV, H / KV, hd, &fd, f->wq[l], false, f->iq, f->st) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], want, f->lsa_s, f->list, f->list_n, f->st) ||
         !attn_core_run(f->attn[0],
@@ -181,7 +187,7 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     closed = want > closed ? want : closed;
   }
   *dense = 0;
-  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed);
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed, false);
 }
 
 static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
@@ -253,6 +259,8 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
     return osmos_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
   if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
     return false;
+  (void)lsa_closer_join(f->closer); /* every bucket an earlier step queued in place (a failed one: its sequence
+                                       broken - refused below) */
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table */
   Lfm3Run run[LFM3_MAX_RUNS];
