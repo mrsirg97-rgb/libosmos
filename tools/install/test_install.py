@@ -80,8 +80,9 @@ class Manifest(unittest.TestCase):
         self.assertEqual((v["rig"]["efforts"], v["rig"]["effort"]), (["none", "high"], "high"))  # thinking off, on
         self.assertEqual({m["files"][f]["repo"] for f in v["shards"] + [v["lsa"]]}, {"mrsirg97-rgb/osmos1.7b"})
         self.assertEqual((manifest.pack_id(m, "vibes1.7b"), v["rig"]["aliases"]), ("osmos1.7b", ["vibes1.7b", "vibes"]))  # 0.11.1: renamed
-        self.assertEqual(m["packs"]["inkling-2-mini"]["settings"],  # 0.14.0: sampled at its release's temperature
-                         {"max_context": 1048576, "max_tokens": 4096, "kv_q8": True, "temperature": 1.0})
+        self.assertEqual(m["packs"]["inkling-2-mini"]["settings"],  # 0.14.0: sampled at its release's temperature;
+                         {"max_context": 1048576, "max_tokens": 4096, "kv_q8": True, "temperature": 1.0,
+                          "int8": False})  # 0.18.0: its experts f16 at a decode (int8 measured slower: DESIGN.md)
         # 0.15.2: each pack's sampling what measured best here (DESIGN.md, "0.15.2"): its release's (cards,
         # generation_config.json) where greedy looped on the stuck session's replay - Mini and Small (entered it),
         # DeepSeek (kept it); greedy where it did not and drafts faster - Qwen, Hy4-flash; osmos1.7b its card's (free:

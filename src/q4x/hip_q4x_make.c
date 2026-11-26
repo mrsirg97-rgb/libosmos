@@ -65,6 +65,7 @@ void q4x_forward_destroy(Q4xForward *f)
   free(f->ple_off);
   if (f->ple_copied)
     (void)hipEventDestroy(f->ple_copied);
+  attn_core_destroy(f->attn);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made (the step's, the MTP head's, the experts'
                               table, the n-gram stage): from the record - the readers of the stage stopped above */
   free(f->sub_seq);
@@ -74,7 +75,7 @@ void q4x_forward_destroy(Q4xForward *f)
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
                                char err[OSMOS_ERR])
 {
-  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, FIT_BUDGET_NOW, NULL, NULL, 0}; /* (fit now) */
+  const Q4xOptions o = {max_ctx, max_tokens, false, NULL, 0, NULL, FIT_BUDGET_NOW, NULL, NULL, 0, false}; /* (fit now) */
   return q4x_forward_create_with(w, mtp, &o, err);
 }
 
@@ -87,6 +88,7 @@ Q4xForward *q4x_forward_create_with(const Q4xWeights *w, const Q4xMtp *mtp, cons
   if (!f)
     return osmos_fail(err, "out of memory"), NULL;
   f->w = w, f->mtp = mtp, f->max_ctx = max_ctx, f->max_tokens = max_tokens, f->stream_ngram = o->stream_ngram;
+  f->no_int8 = o->no_int8;
   f->ledger = o->ledger;
   const Q4xDflash *df = o->dflash;
   /* a drafter's: its geometry these weights' (q4x_dflash_create's checks), its codebooks the selector's Q8_0 */

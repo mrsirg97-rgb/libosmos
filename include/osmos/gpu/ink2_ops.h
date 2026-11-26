@@ -5,6 +5,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/attn_core.h"
+
 /* Inkling-2-Small's own steps (DESIGN.md, "the forward, op by op"), F32 on the GPU, queued on `stream`: each held to
    transformers' own module (tools/convert/ink2_cases.py's files) */
 
@@ -68,10 +70,6 @@ bool ink2_axpy(float *y, const float *x, uint64_t n, float a, void *stream);
 #define INK2_MAX_HEAD 128   /* attention's head dim at most (Inkling's 128) */
 #define INK2_MAX_EXTENT 1024 /* the relative bias's extent at most (Inkling's 1,024) */
 #define INK2_MAX_REL 32      /* a head's relative states at most (Inkling's 16) */
-#define INK2_FA_MAX_GROUP 8  /* ink2_fa's query heads a KV head at most (Inkling's 6): its waves */
-#define INK2_FA_TILE 16      /* ink2_fa's keys a tile (WMMA's 16): a window's keys handed in from a multiple of it */
-#define INK2_FA_UNIT 256     /* its keys a unit (absolute): each its own softmax, folded in order */
-#define INK2_FA_REL 16       /* ink2_fa's relative states a head (Inkling's): its bias's sum unrolled */
 typedef struct Ink2Tau
 {
   uint32_t pos0;     /* the step's first token's position */
@@ -84,31 +82,15 @@ typedef struct Ink2Attn
   uint32_t heads, kv_heads, head_dim, d_rel, extent;
   uint32_t window; /* the keys a token sees, itself the last (0: every one before it) */
   float scaling;
-  void *x16;          /* a split decode's (ink2_fa's units): out also as mm_x16 puts it (NULL: not) */
-  int32_t *overflow;  /* x16's flag, mm_x16's */
 } Ink2Attn;
 bool ink2_attn(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
                uint32_t n_tok, const float *k, const float *v, uint32_t n_keys, const float *rel_proj, float *out,
                void *stream);
-bool ink2_fa(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate, uint32_t n_tok,
-             const float *k, const float *v, uint32_t n_keys, uint32_t pos0, const float *rel_proj, float *out,
-             float *scratch, void *stream);
-bool ink2_fa16(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
-               uint32_t n_tok, const uint16_t *k, const uint16_t *v, uint32_t n_keys, uint32_t pos0,
-               const float *rel_proj, float *out, float *scratch, void *stream);
-uint64_t ink2_fa_scratch(uint32_t heads, uint32_t max_keys);
 bool ink2_to_f16(const float *x, uint64_t n, uint16_t *y, void *stream);
-#define INK2_KV8_BLOCK 32 /* a Q8 record's values a scale (Q8_0's) */
-#define INK2_KV8_RECORD (INK2_MAX_HEAD + INK2_MAX_HEAD / INK2_KV8_BLOCK * 2) /* a head's row: its int8s, f16 scales */
-bool ink2_fa8(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
-              uint32_t n_tok, const uint8_t *k, const uint8_t *v, uint32_t n_keys, uint32_t pos0, const float *rel_proj,
-              float *out, float *scratch, void *stream);
+#define INK2_KV8_BLOCK ATTN_KV8_BLOCK   /* a Q8 record's values a scale (Q8_0's): the attention core's records */
+#define INK2_KV8_RECORD ATTN_KV8_RECORD /* a head's row: its int8s, f16 scales */
 bool ink2_to_kv8(const float *x, uint64_t rows, uint8_t *y, void *stream);
-#define INK2_KV5_RECORD (INK2_MAX_HEAD / 2 + INK2_MAX_HEAD / 8 + INK2_MAX_HEAD / INK2_KV8_BLOCK * 2) /* nibbles, fifth
-                                                                                                    bits, scales */
-bool ink2_fa85(const Ink2Attn *a, const float *q, const float *rel, const float *sink, const float *gate,
-               uint32_t n_tok, const uint8_t *k, const uint8_t *v, uint32_t n_keys, uint32_t pos0,
-               const float *rel_proj, float *out, float *scratch, void *stream);
+#define INK2_KV5_RECORD ATTN_KV5_RECORD /* nibbles, fifth bits, scales */
 bool ink2_to_kv5(const float *x, uint64_t rows, uint8_t *y, void *stream);
 typedef struct Ink2PrepKv
 {
@@ -125,7 +107,7 @@ typedef struct Ink2Prep
   float q_clip, rel_clip, k_clip, eps, conv_res, conv_scale;
   Ink2Tau tau;  /* q's and rel's */
   bool records; /* the stores keys Q8, values Q5 records (a full layer's); else f16 (a window's) */
-  bool v8;      /* with records, the values Q8 records too (ink2_fa8's), not Q5 */
+  bool v8;      /* with records, the values Q8 records too, not Q5 */
   Ink2PrepKv k, v;
 } Ink2Prep;
 bool ink2_attn_prep(const Ink2Prep *p, void *stream);
@@ -135,10 +117,6 @@ bool ink2_mtp_mix(const float *taps, uint32_t n_taps, const float *alpha, uint32
                   void *stream);
 bool ink2_mtp_kv_put(uint16_t *ring, uint32_t ring_rows, const float *x, uint32_t n, uint32_t row, int32_t pos0,
                      void *stream);
-uint64_t ink2_mtp_attn_scratch(uint32_t n_q, uint32_t heads, uint32_t kv_heads);
-bool ink2_mtp_attn(const float *q, uint32_t n_q, int32_t pos0, const float *kb, const float *vb, const uint16_t *kr,
-                   const uint16_t *vr, uint32_t ring_rows, int32_t ctx_from, uint32_t heads, uint32_t kv_heads,
-                   uint32_t window, float *scratch, float *out, void *stream);
 bool ink2_mtp_markov_in(const float *state, const uint16_t *w1, const int32_t *prev, uint32_t rank, float *vec,
                         void *stream);
 bool ink2_mtp_markov_gru(const float *p, const float *inv, const float *bias, uint32_t rank, float *state,
@@ -218,37 +196,13 @@ ink2_attn
   its own (value 0), softmax; out [n_tok][heads head_dim] the values' sum, times sigmoid(gate) (gate NULL: ungated).
   rel_proj [d_rel][extent].
 
-ink2_fa
-  ink2_attn for a prompt (the same arguments and result): a block a (16-token tile, KV head), a wave a query head of
-  its group (heads / kv_heads <= INK2_FA_MAX_GROUP), each tile of 16 keys loaded into LDS once for the group's waves -
-  q . k and p . v on WMMA (f16 in, f32 sums), the relative bias, mask, sink and online softmax in f32. a window's
-  first tile at a multiple of INK2_FA_TILE: a query's keys always the same tiles (the rounding of p to f16 against
-  the running max is a tile's), so its bits are the same in any block - and in any step, given keys whose index mod
-  INK2_FA_TILE is their position's (a sequence's window handed in from such a position). d_rel INK2_FA_REL, else
-  refused: the bias's products summed in order, unrolled - their loads in flight together, not one a term.
-
-units: a query's keys cut at absolute multiples of INK2_FA_UNIT (pos0: key 0's position, a multiple of
-  INK2_FA_TILE), each unit's online softmax from nothing, folded into the sink's start in order. given scratch
-  (ink2_fa_scratch(heads, the most keys) bytes) and at most INK2_FA_TILE tokens - a decode's, a draft block's - a block
-  a unit and KV head, then a fold kernel: the units in parallel, the prompt's bits (the same units, the same fold).
-  Ink2Attn's x16 (a split decode's alone, else refused): the fold writes out's f16 as mm_x16 would, the out
-  matrix's input in its launch.
-
-ink2_fa16, ink2_to_f16
-  ink2_fa over keys and values stored as f16 (a cache's: ink2_to_f16 of the F32 rows, IEEE half bits in uint16_t) -
-  the values ink2_fa rounds them to as it loads them, so the same bits; half the memory and the reads.
-
-ink2_fa8, ink2_to_kv8
-  ink2_fa over keys and values stored as Q8 records (a full layer's cache): ink2_to_kv8 of F32 rows of INK2_MAX_HEAD
-  (a key's KV heads), each its INK2_MAX_HEAD int8s then a f16 scale an INK2_KV8_BLOCK of them (Q8_0's: d = amax /
-  127, q = round(x / d)). a value loaded is q d rounded to f16 - ink2_fa16's bits on those values; 0.53 of f16's
-  memory and reads. not f16's values: a cache of them its own bits.
-
-ink2_fa85, ink2_to_kv5
-  ink2_fa8's keys, its values Q5 records (ink2_to_kv5): a row's low nibbles (value i at byte i / 2, odd i the high
-  one), its fifth bits (byte INK2_MAX_HEAD / 2 + i / 8, bit i % 8), a f16 scale an INK2_KV8_BLOCK - d = amax / 15, q
-  = round(x / d) stored q + 16. a value loaded (q - 16) d rounded to f16 - ink2_fa16's bits on those values; values
-  0.65 of Q8's memory.
+ink2_to_f16, ink2_to_kv8, ink2_to_kv5
+  the caches' rows the attention core reads (osmos/gpu/attn_core.h: ATTN_ROWS_F16, _KV8, _KV5): f16 (IEEE half bits in
+  uint16_t); Q8 records - F32 rows of INK2_MAX_HEAD (a key's KV heads), each its INK2_MAX_HEAD int8s then a f16 scale
+  an INK2_KV8_BLOCK of them (Q8_0's: d = amax / 127, q = round(x / d)); Q5 records - a row's low nibbles (value i at
+  byte i / 2, odd i the high one), its fifth bits (byte INK2_MAX_HEAD / 2 + i / 8, bit i % 8), a f16 scale an
+  INK2_KV8_BLOCK - d = amax / 15, q = round(x / d) stored q + 16. the core loads a Q8 value as q d rounded to f16, a Q5
+  one as (q - 16) d: f16 rows' bits on those values.
 
 ink2_attn_prep
   a layer's attention inputs from its projections, one launch: q's and rel's ink2_clip_rows (q_w, q_clip / rel_w,
@@ -265,12 +219,9 @@ ink2_mtp_kv_put
   n rows of x (row values each, F32) into an f16 ring of ring_rows: x's row t at (pos0 + t) % ring_rows.
 
 ink2_mtp_attn
-  the drafter's attention for a block of n_q queries at positions pos0 .. (q [n_q][heads][128], RoPE'd), against the
-  context's keys and values in the ring for positions ctx_from .. pos0 - 1 and the block's own (kb, vb [n_q][kv_heads]
-  [128] F32): a context key visible to query i when within `window` of it back (0: every one), every block key
-  visible (not causal). scores q.k / sqrt(128); a KV head's queries and heads together (n_q times heads / kv_heads
-  rows, 48 at most), each key read once for them; the keys in spans, a span's softmax partial a row (scratch:
-  ink2_mtp_attn_scratch - a bound by the GPU's blocks, not the context), merged in order. out [n_q][heads][128].
+  moved into the attention core (osmos/gpu/attn_core.h's ATTN_BLOCK_DRAFT: kernels/attn_core_draft.h, its bits) - a
+  desc of the ring's f16 rows, slots its rows, the window; a step's keys.key0 the context's first position, own_k /
+  own_v the block's
 
 ink2_mtp_markov_in, _gru, _pick
   the Markov head's step (TokenSpeed's sample_block): vec = [state | markov_w1[*prev]] (w1 BF16 [V][rank]); with p =

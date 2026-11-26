@@ -11,6 +11,8 @@
 #include <cstring>
 #include <vector>
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/q35_ops.h"
 #include "osmos/gpu/q4x_ops.h"
@@ -52,8 +54,8 @@ int main() {
     CHECK(hipMalloc((void**) &dv, hv.size() * 4) == hipSuccess && hipMalloc((void**) &dg, hg.size() * 4) == hipSuccess);
     CHECK(hipMalloc((void**) &out, hq.size() * 4) == hipSuccess && hipMalloc((void**) &ref, hq.size() * 4) == hipSuccess);
     CHECK(hipMalloc(&kc, ctx * row) == hipSuccess && hipMalloc(&vc, ctx * row) == hipSuccess);
-    CHECK(hipMalloc((void**) &fa, q4x_attn_scratch(H, ctx) * 4) == hipSuccess);
-    CHECK(hipMalloc((void**) &da, q35_attn_decode_scratch(H, Q35_ATTN_DECODE_MAX) * 4) == hipSuccess);
+    CHECK(hipMalloc((void**) &fa, 1 * 4) == hipSuccess);
+    CHECK(hipMalloc((void**) &da, 1 * 4) == hipSuccess);
     CHECK(hipMemcpy(dq, hq.data(), hq.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
     CHECK(hipMemcpy(dk, hk.data(), hk.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
     CHECK(hipMemcpy(dv, hv.data(), hv.size() * 4, hipMemcpyHostToDevice) == hipSuccess);
@@ -61,11 +63,11 @@ int main() {
     CHECK(q4x_kv_put(dk, dv, ctx, kv, kc, vc, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     const auto t0 = std::chrono::steady_clock::now();
-    CHECK(q4x_attn(dq, kc, vc, T, H, KV, D, pos0, dg, nullptr, nullptr, fa, out, nullptr, nullptr));
+    CHECK(core_q4x_attn(dq, kc, vc, T, H, KV, D, pos0, dg, nullptr, nullptr, fa, out, nullptr, nullptr));
     CHECK(hipDeviceSynchronize() == hipSuccess);
     const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     for (uint32_t t = 0; t < T; t++)
-      CHECK(q35_attn_decode(dq + (size_t) t * q, kc, vc, 1, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
+      CHECK(core_q35_attn_decode(dq + (size_t) t * q, kc, vc, 1, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
                             ref + (size_t) t * q, nullptr));
     std::vector<float> a(hq.size()), r(hq.size());
     CHECK(hipMemcpy(a.data(), out, a.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);
@@ -82,7 +84,7 @@ int main() {
     // 8,192 keys a step's first tokens took its last's split)
     for (uint32_t t = 0; t < T; t += Q35_ATTN_DECODE_MAX) {
       const uint32_t m = T - t < Q35_ATTN_DECODE_MAX ? T - t : Q35_ATTN_DECODE_MAX;
-      CHECK(q35_attn_decode(dq + (size_t) t * q, kc, vc, m, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
+      CHECK(core_q35_attn_decode(dq + (size_t) t * q, kc, vc, m, H, KV, D, nullptr, pos0 + t, dg + (size_t) t * q, da,
                             out + (size_t) t * q, nullptr));
     }
     CHECK(hipMemcpy(a.data(), out, a.size() * 4, hipMemcpyDeviceToHost) == hipSuccess);

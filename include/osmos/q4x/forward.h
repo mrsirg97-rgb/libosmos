@@ -43,6 +43,8 @@ typedef struct Q4xOptions
                       bits are another forward's (q4x_identity tells them apart) */
   float npu_share; /* the part of an eligible layer's prompt picks it takes, in (0, 1) (whole 128-token entries; an
                       IQ2_S layer's scaled by its cost) */
+  bool no_int8;    /* the routed experts' int8 decode off (OsmosOptions' no_int8: a pack's "int8": false) - their f16 / F32 path at
+                            every step */
 } Q4xOptions;
 
 Q4xForward *q4x_forward_create(const Q4xWeights *w, const Q4xMtp *mtp, uint32_t max_ctx, uint32_t max_tokens,
@@ -75,6 +77,8 @@ bool q4x_seq_mark_save(const Q4xSeq *s, void *out, uint64_t bytes, char err[OSMO
 bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
 #define Q4X_MAX_RUNS 64 /* a step's sequences at most (q4x_step) */
+void q4x_forward_reading(Q4xForward *f, bool on);
+bool q4x_forward_int8(const Q4xForward *f);
 bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
               uint32_t row0, char err[OSMOS_ERR]);
 bool q4x_batch(Q4xForward *f, Q4xSeq *s, const int32_t *tokens, uint32_t n, uint32_t row0, char err[OSMOS_ERR]);

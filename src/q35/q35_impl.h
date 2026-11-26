@@ -2,6 +2,7 @@
    its rings, rollback, prompt, state and marks) */
 #pragma once
 
+#include "osmos/gpu/attn_core.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
@@ -25,7 +26,8 @@ struct Q35Forward
   uint32_t head_type; /* the LM head's type on the GPU: its file's, or Q8_0 (head_q8) */
   float *h, *xn, *out;
   float *qkv, *z, *al, *be, *g, *b, *cv, *qkn, *ro, *fo;
-  float *qf, *kr, *vr, *q, *gt, *kq, *ao, *fa, *da; /* da: the decode attention's scratch */
+  float *qf, *kr, *vr, *q, *gt, *kq, *ao, *fa; /* fa: the attention core's scratch (borrowed) */
+  AttnCore *attn; /* the attention's (q35 reads apart: the step's read picks the prompt's or the decode's kernel) */
   float *ga, *up, *y;
   float *hx;                /* the kept rows' residuals, gathered for the head (logit_rows x n_embd) */
   float *logits;            /* the kept rows' logits, in the order kept (logit_rows x n_vocab) */

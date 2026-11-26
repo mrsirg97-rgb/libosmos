@@ -100,7 +100,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
      expert resident) */
   const Q4xOptions qo = {o->max_ctx,  osmos_step_tokens(o, Q4X_STEP_TOKENS),
                          o->stream_ngram, NULL, 0, e->df, o->budget, ledger,
-                         o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN};
+                         o->npu, o->npu_share > 0 ? o->npu_share : OSMOS_NPU_SHARE_QWEN, o->no_int8};
   if (!(e->f = q4x_forward_create_with(m->w, e->mtp, &qo, err)))
     return e_destroy(e), NULL;
   return e;
@@ -116,11 +116,15 @@ static bool e_step(void *p, void *const *run, const uint32_t *len, uint32_t runs
                    char err[OSMOS_ERR])
 {
   _Static_assert(Q4X_MAX_RUNS == OSMOS_FAMILY_RUNS, "a step's runs the engine's");
-  (void)read; /* (one math: a prompt's read its step) */
-  return q4x_step(((Eng *)p)->f, (Q4xSeq *const *)run, len, runs, tokens, 0, err);
+  q4x_forward_reading(((Eng *)p)->f, read); /* (apart's: a prompt's read never int8, at any size) */
+  const bool ok = q4x_step(((Eng *)p)->f, (Q4xSeq *const *)run, len, runs, tokens, 0, err);
+  q4x_forward_reading(((Eng *)p)->f, false);
+  return ok;
 }
 
 static void e_kept(const void *p, KeptView *k) { q4x_kept_view(((const Eng *)p)->f, k); }
+
+static bool e_apart(const void *p) { return q4x_forward_int8(((const Eng *)p)->f); }
 
 static uint32_t e_block(const void *p)
 {
@@ -202,6 +206,7 @@ const OsmosFamily osmos_q4x = {
     m_open,     m_close,       e_create, e_destroy, e_identity, e_stats,
     e_step,     e_kept,      e_block,  s_create,  s_destroy, s_reset,  s_prompt,   s_rollback,
     s_reach,    s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft,    s_draft_all,
-    false, /* a prompt's read its batch: its small and large steps one math (the same bits on every path) */
+    false, /* f16 alone: its small and large steps one math (the same bits on every path) */
     s_mark_bytes, s_mark_save, s_mark_load, /* a mark the states a later token changes (q4x_seq_mark_save) */
+    e_apart,  /* the int8 decode on: a decode's experts int8, a prompt's read f16 at any size - apart */
 };

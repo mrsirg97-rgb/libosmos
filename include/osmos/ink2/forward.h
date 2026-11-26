@@ -30,12 +30,14 @@ typedef struct Ink2Options
                             step's buffers, the drafter and the stream leave of it (room then unread); 0: room's */
   uint32_t logit_rows;   /* the logits' rows a step keeps at most, slots in the order computed (a prompt's last row,
                             a decode's or a drafted round's every row, each lane's); 0: max_tokens (every row) */
-  bool values_q8;        /* a full layer's cached values Q8 records (ink2_fa8), not Q5 (ink2_fa85): a value's bytes
+  bool values_q8;        /* a full layer's cached values Q8 records (ATTN_ROWS_KV8), not Q5 (ATTN_ROWS_KV5): a value's bytes
                             its key's - for a model with the room (osmos-serve's --kv-q8) */
   struct OsmosLedger *ledger; /* the forward's and its sequences' every allocation counted in it (osmos/mem/ledger.h:
                                  borrowed - the engine's, outliving the forward); NULL counts nothing */
   bool profile;          /* a step's sections timed, each after a synchronize (its bits the same), their totals said
                             at its destroy (stderr) - a measurement's build */
+  bool no_int8;          /* the routed experts' int8 decode off (OsmosOptions' no_int8: a pack's "int8": false) - their f16 / F32 path at
+                            every step */
 } Ink2Options;
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR]);
@@ -62,6 +64,8 @@ uint64_t ink2_seq_mark_bytes(const Ink2Seq *s);
 bool ink2_seq_mark_save(const Ink2Seq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
 bool ink2_seq_mark_load(Ink2Seq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
 
+void ink2_forward_reading(Ink2Forward *f, bool on);
+bool ink2_forward_int8(const Ink2Forward *f);
 bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                char err[OSMOS_ERR]);
 const float *ink2_logits(const Ink2Forward *f);
@@ -88,7 +92,7 @@ Ink2Forward
   Inkling-2-Small's forward with a cache: tools/bench/ink2_run's math (transformers' modeling_inkling2.py, held to its
   oracle) a step's tokens at a time - every weight but the routed experts resident (the attention's, the router's, the
   convs', the embedding and head), the experts a membrane's units (osmos/mem/membrane.h) read from the model's
-  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention ink2_fa's, the
+  files O_DIRECT into pinned host memory the GPU reads in place, `room` of them kept. the attention the attention core's, the
   matrices mm's where it has their type (WMMA, f16 in: the experts and the quantized dense) and the matvec's for the
   rest (F32, BF16) - at every step size, so a token's bits are the same however its sequence's tokens are split into
   steps, and ink2_run's (ATTN=fa MAT=mm) for the same tokens. a step's activation past f16's range refuses it.

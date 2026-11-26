@@ -20,12 +20,7 @@ bool fwd_engram_issue(Forward *f, char *err)
 {
   const Geometry *g = f->g;
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim;
-  if (f->eg_pending) /* a step that failed, or stopped before its Engram layers: its rows done with first */
-  {
-    f->eg_pending = false;
-    (void)rowread_wait(f->eg_read);
-  }
-  uint64_t at = 0, rb = 0;
+  uint64_t at = 0, rb = 0; /* (a step that failed or stopped before its Engram layers: rowstream_issue settles it) */
   for (uint32_t k = 0; k < f->n_sub; k++)
     for (int l = 0, nth = 0; l < f->n_layers; l++)
     {
@@ -47,12 +42,8 @@ bool fwd_engram_issue(Forward *f, char *err)
       }
       nth++;
     }
-  if (!at)
-    return true;
-  if (!rowread_start(f->eg_read, f->eg_fd, f->eg_off, (uint32_t)at, (uint32_t)rb, f->stage))
-    return osmos_fail(err, "Engram's readers refused the step's rows");
-  f->eg_pending = true;
-  return true;
+  f->eg_rs.read = f->eg_read, f->eg_rs.fd = f->eg_fd, f->eg_rs.off = f->eg_off, f->eg_rs.stage = f->stage;
+  return rowstream_issue(&f->eg_rs, 0, (uint32_t)at, rb) || osmos_fail(err, "Engram's readers refused the step's rows");
 }
 
 /* the nth Engram layer's rows for each token (fwd_engram_issue's, waited for the first time a layer needs them),
@@ -66,12 +57,8 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim, D = g->n_embd, hc = g->hc;
   const uint32_t n = f->n;
   const uint64_t rb = gguf_bytes(t->type, hd);
-  if (f->eg_pending)
-  {
-    f->eg_pending = false;
-    if (!rowread_wait(f->eg_read))
-      return osmos_fail(err, "an Engram row could not be read");
-  }
+  if (!rowstream_wait(&f->eg_rs))
+    return osmos_fail(err, "an Engram row could not be read");
   const uint8_t *stage = f->stage + f->eg_at[f->cur][nth] * rb;
   const uint64_t vals = (uint64_t)n * cols * hd;
   const bool ok = fwd_put_async(b->erow, stage, (uint64_t)n * cols * rb) &&

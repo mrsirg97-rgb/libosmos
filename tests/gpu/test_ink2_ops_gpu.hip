@@ -6,7 +6,10 @@
 
 #include "q4x_ref.h"
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/ink2_ops.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/ops.h"
@@ -409,23 +412,41 @@ int main() {
     held((w + "attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kExactRel);
     CHECK(ink2_attn(&at, dq, dr, ds, dg, n, dk, dv, n, drp, dout, nullptr));
     held((w + "attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kExactRel);
-    // the prompt's attention (ink2_fa: WMMA tiles, q / k / v / p in f16): f16's rounding of the same thing
-    CHECK(ink2_fa(&at, dq, dr, ds, nullptr, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
+    // the prompt's attention on the core (attn_core: WMMA tiles, q / k / v / p in f16): f16's rounding of the same
+    // thing. fa: a core of the layer's desc over the rows given (k, v from key k0, nk of them), queries s .. s + m - 1
+    auto fa = [&](AttnRows kr, AttnRows vr, uint32_t s, uint32_t m, const void* k, const void* v, uint32_t nk,
+                  uint32_t k0, const float* g, float* o, void* x16, int32_t* ov, uint32_t d_rel = 0) -> bool {
+      AttnCoreDesc d{};
+      d.heads = H, d.kv_heads = KV, d.dk = d.dv = D, d.k_rows = kr, d.v_rows = vr, d.window = full ? 0u : 1024u;
+      d.scaling = 0.08838834764831845f, d.term = ATTN_TERM_REL, d.d_rel = d_rel ? d_rel : R, d.extent = (uint32_t) rp.ne[0];
+      d.sink = ATTN_SINK_TOKEN, d.gate = ATTN_GATE_VALUE, d.block = ATTN_BLOCK_TOKENS, d.max_tokens = n, d.max_keys = n;
+      const uint64_t sb = attn_core_scratch(&d);
+      void* sc = dev_alloc<uint8_t>(sb);
+      char e[OSMOS_ERR] = "";
+      AttnCore* core = attn_core_create(&d, sc, sb, e);
+      bool ok = false;
+      if (core) {
+        const AttnStep st = {dq + (uint64_t) s * H * D, m, k0 + nk - m, nullptr, {k, v, k0, nk, nullptr, nullptr, nullptr, nullptr, 0},
+                             dr + (uint64_t) s * H * R, drp, ds + (uint64_t) s * H, g ? g + (uint64_t) s * H * D : nullptr,
+                             o, x16, ov, 0, false};
+        ok = attn_core_run(core, &st, nullptr) && hipDeviceSynchronize() == hipSuccess;
+      }
+      attn_core_destroy(core), hipFree(sc);
+      return ok;
+    };
+    CHECK(fa(ATTN_ROWS_F32, ATTN_ROWS_F32, 0, n, dk, dv, n, 0, nullptr, dout, nullptr, nullptr));
     held((w + "flash attention, ungated").c_str(), host_of(dout, qr.v.size()), in(c, "ungated"), 1.0, kF16Rel);
-    CHECK(ink2_fa(&at, dq, dr, ds, dg, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
+    CHECK(fa(ATTN_ROWS_F32, ATTN_ROWS_F32, 0, n, dk, dv, n, 0, dg, dout, nullptr, nullptr));
     held((w + "flash attention, gated").c_str(), host_of(dout, qr.v.size()), in(c, "out"), 1.0, kF16Rel);
-    {  // its relative bias INK2_FA_REL states a head, unrolled: another count refused, not summed short
-      CHECK(R == INK2_FA_REL);
-      Ink2Attn half = at;
-      half.d_rel = R / 2;
-      CHECK(!ink2_fa(&half, dq, dr, ds, dg, n, dk, dv, n, 0, drp, dout, nullptr, nullptr));
-      std::printf("  %s: flash attention's relative states %u a head (INK2_FA_REL), %u refused\n", c, R, R / 2);
+    {  // its relative bias ATTN_REL states a head, unrolled: another count refused, not summed short
+      CHECK(R == ATTN_REL);
+      CHECK(!fa(ATTN_ROWS_F32, ATTN_ROWS_F32, 0, n, dk, dv, n, 0, dg, dout, nullptr, nullptr, R / 2));
+      std::printf("  %s: flash attention's relative states %u a head (ATTN_REL), %u refused\n", c, R, R / 2);
     }
     {  // a step's rows the prompt's bits: queries s .. e - 1 over the keys to e, a window's from a tile's start - a
        // prompt's later chunk, one ending inside it, a decode's single token
       const std::vector<float> whole = host_of(dout, qr.v.size());
       float* dpart = dev_alloc<float>(qr.v.size());
-      float* fa_scr = (float*) dev_alloc<uint8_t>(ink2_fa_scratch(H, n));
       const std::pair<uint32_t, uint32_t> steps[] = {{1, n},          {7, n},       {17, n},     {100, n},
                                                      {n / 2 + 3, n}, {n - 1, n},   {0, 1},      {0, 37},
                                                      {5, 6},         {100, 164},   {547, 548},  {n / 2, n / 2 + 1},
@@ -434,13 +455,11 @@ int main() {
       for (auto [s, e] : steps) {
         if (e > n || s >= e) continue;
         const uint32_t want = full ? s : (s < at.window - 1 ? s : at.window - 1);
-        const uint32_t k0 = full ? 0 : s - (want + (s - want) % INK2_FA_TILE), m = e - s;
+        const uint32_t k0 = full ? 0 : s - (want + (s - want) % ATTN_TILE), m = e - s;
         const uint64_t kd = (uint64_t) KV * D;
-        // a step of a decode's size also split (a block a unit, then the fold): the same bits
-        for (int split = 0; split < (m <= INK2_FA_TILE ? 2 : 1); split++) {
-        CHECK(ink2_fa(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
-                      dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, drp, dpart,
-                      split ? fa_scr : nullptr, nullptr));
+        // a step of a decode's size split (a block a unit, then the fold): the same bits
+        const bool split = m <= ATTN_TILE;
+        CHECK(fa(ATTN_ROWS_F32, ATTN_ROWS_F32, s, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, dg, dpart, nullptr, nullptr));
         const std::vector<float> part = host_of(dpart, (size_t) m * H * D);
         uint32_t bad = 0;
         for (size_t i = 0; i < part.size(); i++) bad += part[i] != whole[(size_t) s * H * D + i];
@@ -451,33 +470,28 @@ int main() {
           void *xa = dev_alloc<uint8_t>(xb), *xw = dev_alloc<uint8_t>(xb);
           int32_t* ov = dev_alloc<int32_t>(1);
           CHECK(hipMemset(ov, 0, 4) == hipSuccess && hipMemset(xa, 0x5A, xb) == hipSuccess);
-          Ink2Attn ax = at;
-          ax.x16 = xa, ax.overflow = ov;
-          CHECK(ink2_fa(&ax, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
-                        dg + (uint64_t) s * H * D, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, drp, dpart, fa_scr,
-                        nullptr));
+          CHECK(fa(ATTN_ROWS_F32, ATTN_ROWS_F32, s, m, dk + k0 * kd, dv + k0 * kd, e - k0, k0, dg, dpart, xa, ov));
           CHECK(same_bits(host_of(dpart, (size_t) m * H * D), part));
           CHECK(mm_x16(dpart, H * D, m, H * D, xw, ov, nullptr));
           CHECK(same_bits(bytes_of(xa, xb), bytes_of(xw, xb)));
           hipFree(xa), hipFree(xw), hipFree(ov);
         }
         splits++;
-        }
       }
       std::printf("  %s: flash attention's rows the same bits in %d steps (chunks, decodes, split decodes) as in the prompt; "
                   "a split decode's f16 mm_x16's\n",
                   c, splits);
-      {  // the keys and values stored f16 (a cache's): ink2_fa's bits
+      {  // the keys and values stored f16 (a cache's): the F32 rows' bits
         const size_t kvn = (size_t) n * KV * D;
         uint16_t *k16 = dev_alloc<uint16_t>(kvn), *v16 = dev_alloc<uint16_t>(kvn);
         CHECK(ink2_to_f16(dk, kvn, k16, nullptr) && ink2_to_f16(dv, kvn, v16, nullptr));
-        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, 0, drp, dpart, nullptr, nullptr));
-        CHECK(host_of(dpart, qr.v.size()) == whole || (std::printf("  %s: f16 keys not ink2_fa's bits\n", c), false));
+        CHECK(fa(ATTN_ROWS_F16, ATTN_ROWS_F16, 0, n, k16, v16, n, 0, dg, dpart, nullptr, nullptr));
+        CHECK(host_of(dpart, qr.v.size()) == whole || (std::printf("  %s: f16 keys not the prompt's bits\n", c), false));
         std::printf("  %s: keys and values stored f16, the same bits\n", c);
         hipFree(k16), hipFree(v16);
       }
-      {  // the keys and values stored Q8 (a full layer's cache): the host's Q8_0 records; ink2_fa8 the bits of
-         // ink2_fa16 on those records' values; a split decode's rows the prompt's
+      {  // the keys and values stored Q8 (a full layer's cache): the host's Q8_0 records; the core the bits of
+         // f16 rows of those records' values; a split decode's rows the prompt's
         const size_t rows = (size_t) n * KV, bytes = rows * INK2_KV8_RECORD;
         uint8_t *k8 = dev_alloc<uint8_t>(bytes), *v8 = dev_alloc<uint8_t>(bytes);
         CHECK(ink2_to_kv8(dk, rows, k8, nullptr) && ink2_to_kv8(dv, rows, v8, nullptr));
@@ -490,15 +504,14 @@ int main() {
         uint16_t *k16 = dev_alloc<uint16_t>(rows * D), *v16 = dev_alloc<uint16_t>(rows * D);
         CHECK(hipMemcpy(k16, hk.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess &&
               hipMemcpy(v16, hv.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess);
-        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, 0, drp, dpart, nullptr, nullptr));
+        CHECK(fa(ATTN_ROWS_F16, ATTN_ROWS_F16, 0, n, k16, v16, n, 0, dg, dpart, nullptr, nullptr));
         const std::vector<float> want16 = host_of(dpart, qr.v.size());
-        CHECK(ink2_fa8(&at, dq, dr, ds, dg, n, k8, v8, n, 0, drp, dpart, nullptr, nullptr));
+        CHECK(fa(ATTN_ROWS_KV8, ATTN_ROWS_KV8, 0, n, k8, v8, n, 0, dg, dpart, nullptr, nullptr));
         const std::vector<float> got8 = host_of(dpart, qr.v.size());
         CHECK(got8 == want16 || (std::printf("  %s: Q8 keys not f16's bits on their values\n", c), false));
         if (full) {  // the last token a decode's, split: its row the prompt's
           const uint32_t s = n - 1;
-          CHECK(ink2_fa8(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
-                         dg + (uint64_t) s * H * D, 1, k8, v8, n, 0, drp, dpart, fa_scr, nullptr));
+          CHECK(fa(ATTN_ROWS_KV8, ATTN_ROWS_KV8, s, 1, k8, v8, n, 0, dg, dpart, nullptr, nullptr));
           const std::vector<float> row = host_of(dpart, (size_t) H * D);
           CHECK(std::equal(row.begin(), row.end(), got8.begin() + (size_t) s * H * D) ||
                 (std::printf("  %s: a Q8 split decode not the prompt's bits\n", c), false));
@@ -510,7 +523,7 @@ int main() {
                     "keys: max |err| %.2e of the output's rms %.2e)\n", c, worst, std::sqrt(sq / got8.size()));
         hipFree(k8), hipFree(v8), hipFree(k16), hipFree(v16);
       }
-      {  // keys Q8, values Q5 (ink2_fa85): the host's Q5 records; f16's bits on both records' values; a split decode's
+      {  // keys Q8, values Q5: the host's Q5 records; f16's bits on both records' values; a split decode's
          // row the prompt's
         const size_t rows = (size_t) n * KV;
         uint8_t *k8 = dev_alloc<uint8_t>(rows * INK2_KV8_RECORD), *v5 = dev_alloc<uint8_t>(rows * INK2_KV5_RECORD);
@@ -523,15 +536,14 @@ int main() {
         uint16_t *k16 = dev_alloc<uint16_t>(rows * D), *v16 = dev_alloc<uint16_t>(rows * D);
         CHECK(hipMemcpy(k16, hk.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess &&
               hipMemcpy(v16, hv.data(), rows * D * 2, hipMemcpyHostToDevice) == hipSuccess);
-        CHECK(ink2_fa16(&at, dq, dr, ds, dg, n, k16, v16, n, 0, drp, dpart, nullptr, nullptr));
+        CHECK(fa(ATTN_ROWS_F16, ATTN_ROWS_F16, 0, n, k16, v16, n, 0, dg, dpart, nullptr, nullptr));
         const std::vector<float> want16 = host_of(dpart, qr.v.size());
-        CHECK(ink2_fa85(&at, dq, dr, ds, dg, n, k8, v5, n, 0, drp, dpart, nullptr, nullptr));
+        CHECK(fa(ATTN_ROWS_KV8, ATTN_ROWS_KV5, 0, n, k8, v5, n, 0, dg, dpart, nullptr, nullptr));
         const std::vector<float> got = host_of(dpart, qr.v.size());
         CHECK(got == want16 || (std::printf("  %s: Q8 / Q5 not f16's bits on their values\n", c), false));
         if (full) {
           const uint32_t s = n - 1;
-          CHECK(ink2_fa85(&at, dq + (uint64_t) s * H * D, dr + (uint64_t) s * H * R, ds + (uint64_t) s * H,
-                          dg + (uint64_t) s * H * D, 1, k8, v5, n, 0, drp, dpart, fa_scr, nullptr));
+          CHECK(fa(ATTN_ROWS_KV8, ATTN_ROWS_KV5, s, 1, k8, v5, n, 0, dg, dpart, nullptr, nullptr));
           const std::vector<float> row = host_of(dpart, (size_t) H * D);
           CHECK(std::equal(row.begin(), row.end(), got.begin() + (size_t) s * H * D) ||
                 (std::printf("  %s: a Q8 / Q5 split decode not the prompt's bits\n", c), false));
@@ -543,7 +555,6 @@ int main() {
                     "%.2e of the output's rms %.2e)\n", c, worst, std::sqrt(sq / got.size()));
         hipFree(k8), hipFree(v5), hipFree(k16), hipFree(v16);
       }
-      hipFree(fa_scr);
       hipFree(dpart);
     }
     for (float* d : {dq, dqw, dr, drw, dk, dv, drp, ds, dg, dout}) hipFree(d);
@@ -681,16 +692,16 @@ int main() {
           for (uint32_t d = 0; d < D; d++) want[((size_t) i * H + h) * D + d] = (float) (o[d] / l);
         }
       float *dq = dev_from(q), *dkb = dev_from(kb), *dvb = dev_from(vb), *dout = dev_alloc<float>(want.size()),
-            *dscr = dev_alloc<float>(ink2_mtp_attn_scratch(nq, H, KH) / 4);
+            *dscr = dev_alloc<float>(1);
       uint16_t *dkr = dev_alloc<uint16_t>(kr.size()), *dvr = dev_alloc<uint16_t>(vr.size());
       CHECK(hipMemcpy(dkr, kr.data(), kr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
       CHECK(hipMemcpy(dvr, vr.data(), vr.size() * 2, hipMemcpyHostToDevice) == hipSuccess);
-      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(core_ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       const std::vector<float> got = host_of(dout, want.size());
-      CHECK(ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(core_ink2_mtp_attn(dq, nq, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       const std::vector<float> again = host_of(dout, want.size());
       CHECK(std::memcmp(got.data(), again.data(), got.size() * 4) == 0);
-      CHECK(!ink2_mtp_attn(dq, nq + 1, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
+      CHECK(!core_ink2_mtp_attn(dq, nq + 1, c.pos0, dkb, dvb, dkr, dvr, c.ring, c.from, H, KH, c.window, dscr, dout, nullptr));
       double worst = 0;
       for (size_t i = 0; i < got.size(); i++) worst = std::max(worst, (double) std::fabs(got[i] - want[i]));
       CHECK(worst < 1e-5 || (std::printf("  mtp_attn: %d keys back: max |err| %.2e\n", c.pos0 - c.from, worst), false));

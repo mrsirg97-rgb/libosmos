@@ -1,5 +1,6 @@
 /* Ink2Forward's and Ink2Seq's insides (osmos/ink2/forward.h) */
 #pragma once
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/gpu/mm.h" /* (MM_TILE: the experts' table sizes below) */
 #include "osmos/mem/ledger_hip.h"
@@ -62,6 +63,7 @@ typedef struct Ink2MtpDev
   void *x16;         /* the block's activations as mm reads them: a tile of its widest input */
   int32_t *overflow; /* an x16 value past f16's range (the draft's refusal, not the step's) */
   OverflowFlag ovf;  /* its reset (osmos/gpu/overflow.h) */
+  AttnCore *attn[INK2_MTP_MAX_LAYERS]; /* a layer's attention (the core's draft block: its ring, its window), scr its scratch */
 } Ink2MtpDev;
 
 enum
@@ -134,6 +136,8 @@ struct Ink2Forward
   bool bf16_mm;  /* the model's dense weights BF16 (Mini's): its BF16 matrices mm's (mm_takes), not a side tensor's alone */
   bool router16; /* f->x16 the MoE's input's (rms_for's): the router's, read first */
   bool whole;
+  bool no_int8; /* the experts' int8 decode off (Ink2Options') */
+  bool reading; /* the steps a prompt's read (ink2_forward_reading): the matrix cores at any size, never int8 */
   const void **exp_tab;
   float *scale_tab;
   uint32_t *picks_d;
@@ -142,6 +146,12 @@ struct Ink2Forward
   int32_t *t_cnt, *t_gidx, *t_hidx, *t_where, *t_off;
   uint32_t *t_xg, *t_yg, *t_xd, *t_yd;
   float *t_sg, *t_su, *t_a;
+  /* a decode's int8 experts (q8_experts; q8_enabled, the layer's types q8_takes'): every expert in memory, route_tok's
+     tables (q_gidx .. q_wptr); either way the step's x and the activations rounded (MV_MAX_TOKENS tokens at most) */
+  int32_t *q_gidx, *q_sidx, *q_cnt, *q_xrow;
+  float *q_wsel, *q_xd, *q_hd;
+  const void **q_wptr;
+  int8_t *q_x, *q_h;
   uint32_t t_entries; /* the tables' entries, for t_ptr's three runs of them */
   /* the experts */
   int *fds;
@@ -160,7 +170,7 @@ struct Ink2Forward
   OverflowFlag ovf;  /* the step flag's reset (osmos/gpu/overflow.h): owed when one failed */
   int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
-  float *fa_part; /* a split decode's attention units (ink2_fa_scratch) */
+  AttnCore *attn[2]; /* a sliding layer's attention, a full layer's (attn_core: their scratch ed, borrowed) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
   uint32_t *m_at, *m_by, *m_run; /* the read's routing (moe_route): its scratch, sorted rows' pairs, runs */
   uint64_t *m_key;

@@ -9,9 +9,11 @@
 // not the drafter's, a draft before its context is seeded, a seed past the last step or the position. needs a
 // gfx1151, the UD-IQ3_XXS set, ~/Models/qwen38/DFlash2/dflash2-Q8_0.gguf and the reference; skipped (77) without them.
 #include <map>
+#include <memory>
 
 #include "osmos/err.h"
 #include "q4x_ref.h"
+#include "q8_off.h"
 
 extern "C" {
 #include "osmos/q4x/dflash.h"
@@ -208,6 +210,7 @@ int main() {
   CHECK(f);
   q4x_forward_probe(f, probe, nullptr);
 
+  auto off = std::make_unique<Q8Off>();  // the reference's taps the f16 path's: its drafts held to them with it
   const auto plain = pass(f, ids, P, rounds, false);
   const auto plain_hid = g_hid;
   uint32_t agree = 0, total = 0, made = 0;
@@ -233,10 +236,13 @@ int main() {
     CHECK(e < kHiddenRel);
   }
 
+  // the same rounds two tokens past each rolled back, the prompt shared: the plain pass's bits on its path (a round and
+  // its two a step past a decode's at 7 drafts: the prompt's path then, its kept rows another path's - held on f16)
   g_hid.clear();
   const auto junk = pass(f, ids, P, rounds, true);
   CHECK(junk == plain);
   for (auto& [r, h] : plain_hid) CHECK(std::memcmp(g_hid.at(r).data(), h.data(), h.size() * 4) == 0);
+  off.reset();  // the rest (a loaded sequence's drafts against another's) on the run's own path
   std::printf("  the prompt shared with another sequence and seeded in two parts, two tokens past each round rolled"
               " back (seeded first, or refused): every draft and hidden the plain pass's bits\n");
 
@@ -316,7 +322,8 @@ int main() {
   osmos_clear(err);
   CHECK(q4x_dflash_seed(g, ra, (int32_t) W + 100, (int32_t) W + 108, err) && q4x_seq_rollback(ra, 8));
   read(ra, W + 100, W + 101);
-  read(rb, 0, W + 101);
+  read(rb, 0, W + 100);  // (and its token W + 100 a step of its own, as ra's: one path for both, int8's at a decode)
+  read(rb, W + 100, W + 101);
   osmos_clear(err);
   CHECK(q4x_dflash_draft(g, ra, toks[W + 101], 7, 0, 0, a, ca, err) == 7);
   osmos_clear(err);

@@ -5,17 +5,20 @@
 #include "osmos/mem/experts.h"
 #include "osmos/model/moe_route.h"
 
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/bufs.h"
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "osmos/hy4/forward.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/model/engram.h"
 #include "osmos/gpu/overflow.h"
 
 #define F sizeof(float)
-#define HY4_ROW_THREADS 8   /* the Engram rows' readers (rowread's threads) */
+#define HY4_ROW_THREADS 64  /* the Engram rows' readers (rowread's threads): a cold prompt step's ~50,000 random rows SSD-bound - 64 deep (8: 305 ms a 1,024-token step on wiki, 153 on code; 32: 124 / 92; 64: 71 on code) */
 #define HY4_MAX_HEADS 128   /* a layer's heads at most (the per-head tables' room) */
 #define HY4_STATE_HISTORY 2 /* the tokens before the position a saved state keeps (a trigram's) */
 #define HY4_SCORE_ROWS 256 /* the indexer's score scratch's tokens: a longer run's selection in sub-batches of these (a
@@ -59,13 +62,17 @@ struct Hy4Forward
   Rowread *eg_read;
   uint64_t *eg_off;  /* host: the step's rows' offsets, layer-major */
   uint8_t *eg_stage; /* pinned: the rows read */
+  RowStream eg_rs;   /* the step's rows read under the GPU's work (eg_read, eg_fd, eg_off, eg_stage): an Engram
+                        layer's batch at a time, the next issued as one is waited for */
+  uint32_t eg_n;     /* the step's tokens (each Engram layer's batch n x cols rows) */
   void *eg_raw;      /* device: the rows as stored */
   float *eg_rows;    /* device: the rows decoded ([layer][token][cols][dim]) */
   /* a step's buffers */
   float *h, *xn, *y, *post;            /* the streams, a sublayer's input, its output, iHC's post */
   float *hcs;                          /* iHC's dots' slices (hy4_hc_scratch) */
   void *table;                         /* MLA's per-head matvecs' table (hy4_mla_table_bytes) */
-  float *attn_part;                    /* MLA's attention's partials (hy4_mla_attn_scratch) */
+  float *attn_part;                    /* MLA's attention's partials (attn_core_scratch: the layers' cores borrow it) */
+  AttnCore *mla[HY4_MAX_LAYERS];       /* a layer's MLA attention (a sliding one's window and ring, a sparse one's groups) */
   /* the read math's: the f16 activations an mm reads (MM_MAX_TOKENS of the widest input), the experts' gathered
      slots, f16's overflow; the experts' read tables (mm_group's: entries, slots) */
   void *x16, *xe16;
@@ -77,7 +84,7 @@ struct Hy4Forward
   void **joints;              /* the concatenated matrices (freed whole), n_joints of them */
   uint32_t n_joints;
   bool *in_joint;             /* a tensor's device bytes inside one (not freed alone) */
-  int32_t *fault;             /* a decode's routing saw a pick out of range or twice (hy4_route): the step refused */
+  int32_t *fault;             /* a decode's routing saw a pick out of range or twice (route_tok): the step refused */
   int32_t *pin_flags;         /* overflow and fault (one buffer on the GPU: fault = overflow + 1) read with one copy */
   uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
   int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
@@ -85,10 +92,25 @@ struct Hy4Forward
   uint64_t *rkey;             /* the entries' sort keys (count, then build order) */
   /* the routed experts behind the membrane (experts.h): units [MoE layer][expert], a MoE layer l - n_dense; their own
      O_DIRECT descriptors; every one resident (whole): their addresses' device table [MoE layer][gate, up, down][expert]
-     (hy4_route's), else decode's tables the host's; the fixed bytes (GPU memory before them) and their pinned */
+     (route_tok's), else decode's tables the host's; the fixed bytes (GPU memory before them) and their pinned */
   Experts ex;
   int *xfds;
   bool whole;
+  /* HY4_PROFILE set: a step's wall time and its Engram read's parts, summed - printed at destroy; HY4_PROFILE=2 also
+     a layer's parts, each timed to a stream sync (the syncs' own cost in them) */
+  struct
+  {
+    int on;
+    bool read;        /* the step a prompt's (its parts not timed) */
+    uint64_t dsteps;  /* the decode steps (the parts' divisor) */
+    uint64_t drafts;  /* the drafts (hy4_seq_draft's calls: its parts' divisor) */
+    double part_s[32]; /* hy4_layer's: Engram's update, iHC before attention, attention, iHC before the FFN, experts,
+                         the dense FFN; then the embedding and the head (launches'); then attention's own parts
+                         (its projections in, q_b, the kv rows and q's absorption, the indexer, the MLA attention, the
+                         values' absorption, the projection out) */
+    uint64_t steps, tokens, rows, bytes;
+    double step_s, rowread_s, copy_s; /* the whole step; the rows' preads; their copy to the GPU and decode */
+  } pf;
   const void **exp_tab, **h_tab;        /* (h_tab: its host copy, a read's) */
   const void *(*h_ex)[POOL_PARTS];      /* a step's runs' experts' addresses (n_experts of them) */
   uint64_t fixed_bytes, pinned_bytes;
@@ -105,6 +127,10 @@ struct Hy4Forward
   float *emb, *ekv;                    /* Engram's projection's input and output */
   float *ga, *up, *act;                /* the MLPs */
   float *logit_r, *wtok, *rin, *xg, *eg_g, *eg_u, *eg_h, *eg_y, *wsel, *rsum, *sh;
+  /* a decode's experts over int8 inputs (q8_experts; q8 set): rin's rows and eg_h's rounded, codes and block scales */
+  bool q8;
+  int8_t *xq, *hq;
+  float *xqd, *hqd;
   int32_t *idx, *gidx, *sidx, *cnt, *xrow; /* the router's picks; the experts' order and back; mv_group_tok's table */
   void **wptr;                             /* mv_group_tok's matrices (device), a table of three */
   int32_t *h_idx, *h_gidx, *h_sidx;                  /* host copies (a read's routing) */
@@ -159,7 +185,8 @@ bool hy4_mat(Hy4Forward *f, const GgufTensor *t, uint32_t rows, uint32_t cols, c
 bool hy4_mat_pair(Hy4Forward *f, const GgufTensor *t0, uint32_t rows0, float *y0, const GgufTensor *t1, uint32_t rows1,
                   float *y1, const float *x, uint32_t cols, uint32_t n, bool read, bool *ready);
 /* the step's Engram rows read and decoded (f->eg_rows), the runs' tokens already in their sequences' histories */
-bool hy4_engram_read(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
+bool hy4_engram_offsets(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n);
+bool hy4_engram_layer(Hy4Forward *f, int e, uint32_t n);
 /* layer l's blocks on the step's streams */
 bool hy4_layer(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t n, int l, bool read);
 /* a joint's launches over a token's x into out (its members at their offsets) */
@@ -196,3 +223,36 @@ bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err);
 bool hy4_freqs(Hy4Forward *f, float base, uint32_t dim, float **out);
 bool hy4_joints_make(Hy4Forward *f, uint32_t *most);
 bool hy4_upload(Hy4Forward *f, char *err);
+
+/* a monotonic clock in seconds (HY4_PROFILE's) */
+static inline double hy4_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+
+/* HY4_PROFILE=2: the part just queued, to a sync, into its sum */
+static inline bool hy4_part_done(Hy4Forward *f, int k, double *t)
+{
+  if (f->pf.on < 2)
+    return true;
+  if (f->pf.read != (f->pf.on > 2))  /* the steps timed: a decode's (2), a prompt's (3) - never both, so no
+                                         unsynced part of the other kind lands in a timed one */
+    return true;
+  const bool ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const double now = hy4_now();
+  f->pf.part_s[k] += now - *t, *t = now;
+  return ok;
+}
+
+/* HY4_PROFILE=2: a draft's part (hy4_seq_draft's), to a sync, into its sum (whatever the last step) */
+static inline bool hy4_draft_part(Hy4Forward *f, int k, double *t)
+{
+  if (f->pf.on < 2)
+    return true;
+  const bool ok = hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const double now = hy4_now();
+  f->pf.part_s[k] += now - *t, *t = now;
+  return ok;
+}

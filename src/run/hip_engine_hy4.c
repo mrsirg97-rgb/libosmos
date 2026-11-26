@@ -91,7 +91,7 @@ static void *e_create(const void *pm, const OsmosOptions *o, OsmosLedger *ledger
   /* the experts sized to the budget (budget auto's builds: 0 the first, the smallest - a byte, not Hy4Options' 0,
      every expert resident) */
   const Hy4Options ho = {steps, o->max_ctx, HY4_LOGIT_ROWS, false, true,
-                         o->budget, ledger, o->drafter, true}; /* (DFly2 Q8_0: half its reads) */
+                         o->budget, ledger, o->drafter, true, o->no_int8}; /* (DFly2 Q8_0: half its reads) */
   if (!(e->f = hy4_forward_create(m->w, m->fds, &ho, err)))
     return e_destroy(e), NULL;
   e->drafts = o->drafter ? HY4_DFLY_DRAFTS : 0;
@@ -160,4 +160,5 @@ const OsmosFamily osmos_hy4 = {
     s_reach,       s_position, s_state_bytes, s_save_to, s_load_from, s_seed,     s_draft, NULL,
     true, /* a prompt's read the matrix cores' math, a decode's the matvecs': two maths (hy4_step_read)  */
     NULL, NULL, NULL, /* no marks: the whole state */
+    NULL, /* (its reads apart always) */
 };

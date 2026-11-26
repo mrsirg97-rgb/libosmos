@@ -14,6 +14,8 @@
 #include <cstring>
 #include <vector>
 
+#include "../../tools/bench/attn_core_call.h"
+
 extern "C" {
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/ops.h"
@@ -478,7 +480,7 @@ int main() {
   float* ring_f = nullptr;  // the window's rows unpacked: the ring a prompt's step reads
   CHECK(hipMalloc(&ring_f, h.ring.size() * 4) == hipSuccess && ops_kv_unpack(KV_FP8, ring_p, kSlots, kHd, ring_f, nullptr));
   const auto attn = [&](uint32_t t0, uint32_t n, uint32_t fmt = KV_FP4_E4M3, uint32_t rfmt = KV_FP8) {
-    CHECK(ops_sparse_attn(q + (size_t) t0 * kHeads * kHd, rfmt == KV_F32 ? (const void*) ring_f : (const void*) ring_p,
+    CHECK(core_ops_sparse_attn(q + (size_t) t0 * kHeads * kHd, rfmt == KV_F32 ? (const void*) ring_f : (const void*) ring_p,
                           rfmt, kSlots, pos + t0, kWindow, 0,
                           fmt == KV_F32 ? (const void*) ckv : (const void*) ckv_p, fmt,
                           sel + (size_t) t0 * OPS_MAX_SELECT, nsel + t0, OPS_MAX_SELECT, kSel, sink, scale, kHeads, kHd,
@@ -516,11 +518,11 @@ int main() {
   std::printf("  the window's ring unpacked to F32, the compressed rows packed or F32 (every key F32: the plain loads' "
               "kernels), a batch or a token at a time: the same bits\n");
 
-  CHECK(!ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT, kSel, sink,
+  CHECK(!core_ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT, kSel, sink,
                          scale, kHeads, 128, kTok, sc, o, nullptr));  // head_dim not a multiple of 256
-  CHECK(!ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, 9, sel, nsel, OPS_MAX_SELECT, kSel, sink,
+  CHECK(!core_ops_sparse_attn(q, ring_p, KV_FP8, kSlots, pos, kWindow, 0, ckv_p, 9, sel, nsel, OPS_MAX_SELECT, kSel, sink,
                          scale, kHeads, kHd, kTok, sc, o, nullptr));  // no such format
-  CHECK(!ops_sparse_attn(q, ring_p, KV_FP4_E4M3, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT,
+  CHECK(!core_ops_sparse_attn(q, ring_p, KV_FP4_E4M3, kSlots, pos, kWindow, 0, ckv_p, KV_FP4_E4M3, sel, nsel, OPS_MAX_SELECT,
                          kSel, sink, scale, kHeads, kHd, kTok, sc, o, nullptr));  // a ring neither FP8 nor F32
   for (void* p : {(void*) q, (void*) o, (void*) sc, (void*) ring, (void*) ckv, (void*) ring_p, (void*) ring_f, (void*) ckv_p,
                   (void*) sink, (void*) pos, (void*) sel, (void*) nsel})

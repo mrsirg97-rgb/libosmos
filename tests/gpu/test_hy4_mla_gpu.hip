@@ -5,6 +5,7 @@
 // projections' outputs (q_b, kv_a, the gate) to o_proj's input, k_b and v_b read as the file's Q8_0. then a token's
 // bits its own: the last token's output alone, after the cache its earlier tokens wrote, the same as in the batch.
 // ~/osmos-oracle/hy4_mla.bin; skipped (77) without.
+#include "../../tools/bench/attn_core_call.h"
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
 }
@@ -48,19 +49,19 @@ static void layer(int L) {
   float *norm = up(A(key("kv_a_norm").c_str())), *sinks = up(A(key("sinks").c_str()));
   float *cache = scratch((size_t) T * row), *qa = scratch((size_t) T * H * row);
   void* table = scratch(hy4_mla_table_bytes(T, H) / sizeof(float) + 1);
-  float* part = scratch(hy4_mla_attn_scratch(H));
+  float* part = scratch(1);
   float *o_lat = scratch((size_t) T * H * lat), *out = scratch((size_t) T * H * vd);
   const float scale = 1.0f / sqrtf((float) (nope + rd));
   CHECK(hy4_mla_kv(kva, norm, lat, rd, 1e-5f, freqs, dpos, T, cache, 0, false, 0));
   CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
+  CHECK(core_hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> all = down(out, (size_t) T * H * vd);
   match("o_proj's input (gated attention)", all, key("o_in").c_str(), kTol);
 
   // the last token alone, its queries' the batch's rows: the cache the batch's (every earlier row written)
   const uint32_t last = T - 1;
-  CHECK(hy4_mla_attn(qa + (size_t) last * H * row, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale,
+  CHECK(core_hy4_mla_attn(qa + (size_t) last * H * row, cache, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale,
                      dpos + last, 1, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate + (size_t) last * H * vd, H, lat, vd, 1, out, table, 0));
   const std::vector<float> one = down(out, (size_t) H * vd);
@@ -75,13 +76,13 @@ static void layer(int L) {
     for (uint32_t t0 = 0; t0 < T; t0 += step) {
       const uint32_t m = T - t0 < step ? T - t0 : step;
       CHECK(hy4_mla_kv(kva + (size_t) t0 * row, norm, lat, rd, 1e-5f, freqs, dpos + t0, m, ring, slots, false, 0));
-      CHECK(hy4_mla_attn(qa + (size_t) t0 * H * row, ring, slots, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0,
+      CHECK(core_hy4_mla_attn(qa + (size_t) t0 * H * row, ring, slots, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0,
                          scale, dpos + t0, m, o_lat + (size_t) t0 * H * lat, part, false, 0));
     }
     CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
     const std::vector<float> ringed = down(out, (size_t) T * H * vd);
     CHECK(std::memcmp(ringed.data(), all.data(), all.size() * sizeof(float)) == 0);
-    CHECK(!hy4_mla_attn(qa, ring, window - 1, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, 1, o_lat, part, false,
+    CHECK(!core_hy4_mla_attn(qa, ring, window - 1, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, 1, o_lat, part, false,
                         0));
     std::printf("  a ring of %u rows in steps of %u: the full cache's bits (a ring under the window refused)\n", slots,
                 step);
@@ -107,12 +108,12 @@ static void layer(int L) {
       std::memcpy(&dec[(size_t) t * row + lat], r + lat / 32 * 34, rd * sizeof(float));
     }
     float* cd = up(dec);
-    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
+    CHECK(core_hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     const std::vector<float> o8 = down(o_lat, (size_t) T * H * lat);
-    CHECK(hy4_mla_attn(qa, cd, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
+    CHECK(core_hy4_mla_attn(qa, cd, 0, false, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     const std::vector<float> od = down(o_lat, (size_t) T * H * lat);
     CHECK(std::memcmp(o8.data(), od.data(), o8.size() * sizeof(float)) == 0);
-    CHECK(hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
+    CHECK(core_hy4_mla_attn(qa, c8, 0, true, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, false, 0));
     CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
     const std::vector<float> q8out = down(out, (size_t) T * H * vd);
     double worst = 0, top = 0;
@@ -126,7 +127,7 @@ static void layer(int L) {
     // a token's output its own keys' alone - in steps of 32 (a ring for a sliding layer) the whole batch's bits
     for (int k8 = 0; k8 < 2; k8++) {
       const void* c = k8 ? (const void*) c8 : (const void*) cache;
-      CHECK(hy4_mla_attn(qa, c, 0, k8, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, true, 0));
+      CHECK(core_hy4_mla_attn(qa, c, 0, k8, sinks, H, lat, rd, window, nullptr, nullptr, 0, 0, scale, dpos, T, o_lat, part, true, 0));
       const std::vector<float> om = down(o_lat, (size_t) T * H * lat);
       CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
       const std::vector<float> mo = down(out, (size_t) T * H * vd);
@@ -138,7 +139,7 @@ static void layer(int L) {
       for (uint32_t t0 = 0; t0 < T; t0 += step) {
         const uint32_t n = T - t0 < step ? T - t0 : step;
         if (window) CHECK(hy4_mla_kv(kva + (size_t) t0 * row, norm, lat, rd, 1e-5f, freqs, dpos + t0, n, ring, slots, k8, 0));
-        CHECK(hy4_mla_attn(qa + (size_t) t0 * H * row, window ? (const void*) ring : c, slots, k8, sinks, H, lat, rd,
+        CHECK(core_hy4_mla_attn(qa + (size_t) t0 * H * row, window ? (const void*) ring : c, slots, k8, sinks, H, lat, rd,
                              window, nullptr, nullptr, 0, 0, scale, dpos + t0, n, o_lat + (size_t) t0 * H * lat, part, true, 0));
       }
       const std::vector<float> os = down(o_lat, (size_t) T * H * lat);
@@ -166,7 +167,7 @@ int main() {
     return 77;
   }
   std::printf("[test_hy4_mla_gpu] start\n");
-  CHECK(!hy4_mla_attn(nullptr, nullptr, 0, false, nullptr, 64, HY4_MLA_MAX_LATENT + 32, 64, 0, nullptr, nullptr, 0, 0, 1.0f,
+  CHECK(!core_hy4_mla_attn(nullptr, nullptr, 0, false, nullptr, 64, HY4_MLA_MAX_LATENT + 32, 64, 0, nullptr, nullptr, 0, 0, 1.0f,
                       nullptr, 1, nullptr, nullptr, false, 0));
   layer(2);
   layer(5);

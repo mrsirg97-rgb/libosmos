@@ -1,5 +1,6 @@
 /* the lfm3 forward's making (osmos/lfm3/forward.h): every tensor to the GPU, the ropes, a step's buffers; a sequence's
    state (its convolutions' rings, its attention layers' caches) */
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -40,7 +41,7 @@ static bool upload(Lfm3Forward *f, char *err) { return upload_file(f, f->w->mode
 static bool lfm3_df_buffers(Lfm3Forward *f, char *err)
 {
   const uint64_t T = (uint64_t)f->df->geo.n_taps * (uint64_t)f->df->geo.n_embd;
-  return (lfm3_alloc(&f->bufs, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx)) ||
+  return (lfm3_alloc(&f->bufs, &f->taps, (uint64_t)f->max_tokens * T * F) && df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx, f->df_ring)) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
@@ -205,6 +206,7 @@ void lfm3_forward_destroy(Lfm3Forward *f)
   gpu_free_table(f->ledger, f->w->model, f->dev, f->in_joint); /* (a joint's members its buffer's) */
   free(f->in_joint);
   lfm3_free(f, f->head_q8); /* (gpu_q8_rows': not the record's) */
+  attn_core_destroy(f->attn[0]), attn_core_destroy(f->attn[1]);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer lfm3_alloc made - the step's, LSA's, the joints', the taps':
                               from the record, before the joints' table it NULLs */
   free(f->slot);
@@ -300,15 +302,35 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
     f->head = lfm3_dev(f, w->embd), f->head_type = w->embd->type;
   ok = ok && (o->head == LFM3_HEAD_FILE || o->head == LFM3_HEAD_Q8_0 || osmos_fail(err, "a head this build does not make")) &&
        (o->head == LFM3_HEAD_FILE || head_q8(f, err));
+  /* the attention's cores (osmos1.7b reads apart: a prompt's kernels and a decode's, the step's read picks), a full
+     layer's and a sliding one's, over one scratch */
+  AttnCoreDesc ad[2];
+  for (int s = 0; s < 2; s++)
+    ad[s] = (AttnCoreDesc){.heads = (uint32_t)g->n_heads,
+                           .kv_heads = (uint32_t)g->n_kv_heads,
+                           .dk = (uint32_t)g->head_dim,
+                           .dv = (uint32_t)g->head_dim,
+                           .k_rows = ATTN_ROWS_Q8_0,
+                           .v_rows = ATTN_ROWS_Q8_0,
+                           .window = s ? (uint32_t)g->window : 0,
+                           .slots = s ? f->ring : 0,
+                           .scaling = 1.0f / sqrtf((float)g->head_dim),
+                           .term = ATTN_TERM_NONE,
+                           .gate = ATTN_GATE_HEAD,
+                           .block = ATTN_BLOCK_HEADS,
+                           .unit = 128,
+                           .apart = true,
+                           .max_tokens = f->max_tokens,
+                           .max_keys = s && f->ring > f->max_ctx ? f->ring : f->max_ctx}; /* (a ring past a short context) */
+  const uint64_t sc0 = attn_core_scratch(&ad[0]), sc1 = attn_core_scratch(&ad[1]), scratch = sc0 > sc1 ? sc0 : sc1;
   const GpuWant want[] = {
       {&f->tok, n * 4},          {&f->h, n * D * F},       {&f->xn, n * D * F},    {&f->y, n * D * F},
       {&f->bcx, n * 3 * D * F},  {&f->u, n * D * F},       {&f->qf, n * q * F},    {&f->kf, n * kv * F},
       {&f->vf, n * kv * F},      {&f->qr, n * q * F},      {&f->kr, n * kv * F},   {&f->g, n * g->n_heads * F},
       {&f->att, n * q * F},      {&f->ga, n * ff * F},     {&f->up, n * ff * F},   {&f->act, n * ff * F},
-      {&f->attn_scratch, q35_attn_decode_scratch((uint32_t)g->n_heads, Q35_ATTN_DECODE_MAX) * F},
       {&f->xf, lr * D * F},      {&f->logits, lr * g->n_vocab * F}, {&f->hk, lr * D * F},
       {&f->ids, lr * 4},         {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
-      {&f->fa_scratch, q4x_attn_scratch_dim((uint32_t)g->n_heads, (uint32_t)g->n_kv_heads, (uint32_t)g->head_dim, f->max_ctx) * F},
+      {&f->fa_scratch, scratch},
       {&f->x16, (uint64_t)(n + MM_TILE - 1) / MM_TILE * MM_TILE * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
@@ -318,6 +340,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
        gpu_bufs_host(&f->bufs, f->ledger, &f->pin_logits, lr * g->n_vocab * F) &&
        (f->slot = malloc(n * 4)) &&
        (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) && hipDeviceSynchronize() == hipSuccess;
+  for (int s = 0; ok && s < 2; s++)
+    ok = (f->attn[s] = attn_core_create(&ad[s], f->fa_scratch, scratch, err)) != NULL;
   if (!ok)
     return lfm3_forward_destroy(f), (err && !*err ? osmos_fail(err, "the forward not made") : false), NULL;
   return f;

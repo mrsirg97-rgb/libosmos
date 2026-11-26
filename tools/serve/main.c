@@ -3,7 +3,7 @@
 
      osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] [--max-context N]
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
-                     [--stream-ngram] [--kv-q8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>]
+                     [--stream-ngram] [--kv-q8] [--no-int8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>]
                      [--profile] [--rope-stages <from:factor,...>] [--npu <dir> [--npu-share S]] [--stats]
                      [--no-slots | --slot-cap N --slot-dir <dir> --slot-gb GB --slot-min N --slot-ram-gb GB
                       --slot-days D] [--serve]
@@ -25,6 +25,8 @@
    (Q4xOptions' stream_ngram: the same bits); DeepSeek's Engram always is.
    --kv-q8: Inkling's full layers' cached values Q8, as its keys, not Q5 (OsmosOptions' kv_q8: 17 KiB a token of
    Mini's cache, not 14 - another output; a pack with the room's choice); the other families refuse it.
+   --no-int8: the routed experts' int8 decode off - each family's f16 / F32 path at every step (OsmosOptions'
+   no_int8: a pack's "int8": false, where its drafted decode measured slower: Inkling-2-Mini's NVFP4).
    --npu: the NPU's kernels' directory, the NPU beside the GPU; --npu-share its share of a layer's pairs (0 to 1).
    --profile: a measurement's build - a step's sections timed (each after a synchronize: the bits the same), their
    totals on stderr at the engine's destroy (OsmosOptions' profile: Inkling's; the others refuse it).
@@ -161,7 +163,7 @@ int main(int argc, char **argv)
   if (!model)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
-               "[--no-guess] [--stream-ngram] [--kv-q8] [--npu <dir> [--npu-share F]] "
+               "[--no-guess] [--stream-ngram] [--kv-q8] [--no-int8] [--npu <dir> [--npu-share F]] "
                "[--overlay <gguf>] [--lsa <maps>] [--profile] [--rope-stages <from:factor,...>] [--serve]");
   SlotFlags sf = {opt(argc, argv, "--slot-dir", NULL), 0, 0, 0, 0, 0}; /* (read first: a bad one refused before a build) */
   if (!flag_num(argc, argv, "--slot-cap", 4, 1, 1e6, &sf.cap) || !flag_num(argc, argv, "--slot-gb", 16, 0.001, 1e6, &sf.gb) ||
@@ -212,7 +214,8 @@ int main(int argc, char **argv)
                           opt(argc, argv, "--picks", NULL), has(argc, argv, "--no-guess"),
                           opt(argc, argv, "--dspark", NULL), true, sv.ram_kept, has(argc, argv, "--stream-ngram"),
                           opt(argc, argv, "--npu", NULL), npu_share, has(argc, argv, "--kv-q8"),
-                          has(argc, argv, "--profile"), opt(argc, argv, "--rope-stages", NULL)};
+                          has(argc, argv, "--profile"), opt(argc, argv, "--rope-stages", NULL),
+                          has(argc, argv, "--no-int8")};
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");

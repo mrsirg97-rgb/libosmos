@@ -15,6 +15,10 @@
 //   STATS=1    with DFLY: each draft reached (all before it accepted) - its acceptance by place and by probability
 //   NLL=1      the prompt's every row kept: the mean NLL of each next id (teacher-forced), a cache's or a math's cost
 //              over the whole text (KV_F32: the reference's F32 cache against the engine's Q8_0)
+//   LOGP_OUT=path  with NLL: every scored row's log-probabilities written (F32 [rows][vocab]) - a reference
+//   REF=path       with NLL: each scored row's KL(reference || run) over the whole vocabulary, and the top-1 agreement
+//                  (a math change's distance from a reference run: MoE routing makes the NLL alone too noisy to judge)
+#include <algorithm>
 #include <fcntl.h>
 #include <hip/hip_runtime.h>
 #include <unistd.h>
@@ -77,8 +81,12 @@ int main(int argc, char** argv) {
   std::printf("hy4_run: loaded in %.1f s; prompt %u in steps of %u, decode %u\n", now() - t0, P, S, D);
   const double t1 = now();
   uint32_t n = 0;
-  double nll = 0;
-  uint64_t scored = 0;
+  double nll = 0, kl = 0;
+  uint64_t scored = 0, agree = 0;
+  FILE* lout = getenv("LOGP_OUT") ? std::fopen(getenv("LOGP_OUT"), "wb") : nullptr;
+  FILE* lref = getenv("REF") ? std::fopen(getenv("REF"), "rb") : nullptr;
+  std::vector<float> lp, rp;
+  std::vector<double> kls;
   const uint32_t V = (uint32_t) w->geo.n_vocab;
   for (uint32_t at = 0; at < P; at += S) {
     n = P - at < S ? P - at : S;
@@ -89,10 +97,37 @@ int main(int argc, char** argv) {
       for (uint32_t v = 0; v < V; v++) m = std::fmax(m, x[v]);
       for (uint32_t v = 0; v < V; v++) z += std::exp(x[v] - m);
       nll -= x[ids[at + r + 1]] - m - std::log(z), scored++;
+      if (lout || lref) {
+        const double lz = m + std::log(z);
+        lp.resize(V);
+        for (uint32_t v = 0; v < V; v++) lp[v] = (float) (x[v] - lz);
+        if (lout) CHECK(std::fwrite(lp.data(), 4, V, lout) == V);
+        if (lref) {
+          rp.resize(V);
+          CHECK(std::fread(rp.data(), 4, V, lref) == V);
+          double k = 0;
+          uint32_t ta = 0, tb = 0;
+          for (uint32_t v = 0; v < V; v++) {
+            const double pr = std::exp((double) rp[v]);
+            k += pr * ((double) rp[v] - (double) lp[v]);
+            ta = rp[v] > rp[ta] ? v : ta, tb = lp[v] > lp[tb] ? v : tb;
+          }
+          kl += k, kls.push_back(k), agree += ta == tb;
+        }
+      }
     }
   }
   if (nll_mode) std::printf("NLL: %.5f over %llu tokens (%s cache)\n", nll / scored, (unsigned long long) scored,
                             getenv("KV_F32") ? "F32" : "Q8_0");
+  if (lout) std::fclose(lout);
+  if (lref) {
+    std::sort(kls.begin(), kls.end());
+    double sd = 0;
+    for (double k : kls) sd += (k - kl / scored) * (k - kl / scored);
+    std::printf("KL(ref || run): mean %.5f (se %.5f), median %.5f, p99 %.5f; top-1 agreement %.2f%%\n", kl / scored,
+                std::sqrt(sd / scored / scored), kls[kls.size() / 2], kls[kls.size() * 99 / 100], 100.0 * agree / scored);
+    std::fclose(lref);
+  }
   const double t2 = now();
   int32_t next = 0;
   uint64_t hash = 1469598103934665603ull, lhash = hash;

@@ -230,8 +230,8 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   const uint32_t D = (uint32_t)g->n_embd, ql = (uint32_t)g->q_lora, lat = (uint32_t)g->kv_lora;
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, vd = (uint32_t)g->v_dim;
   for (int i = 0; i < HY4_DFLY_LAYERS; i++)
-    if (TARGETS[i] >= g->n_layers || g->sliding[TARGETS[i]])
-      return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers");
+    if (TARGETS[i] >= g->n_layers || g->sliding[TARGETS[i]] || g->n_heads[TARGETS[i]] != g->n_heads[TARGETS[0]])
+      return osmos_fail(err, "DFly2: a target layer not one of this model's sparse layers (each the same heads)");
   if (MASK_TOKEN >= g->n_vocab)
     return osmos_fail(err, "DFly2: its mask token past this model's vocabulary");
   if (f->max_tokens < ROWS) /* a draft's block in the step's buffers (its MLA table max_tokens x heads) */
@@ -374,18 +374,21 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
   const uint32_t nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim, vd = (uint32_t)g->v_dim, qk = nope + rd;
   const uint32_t row = lat + rd, H = (uint32_t)g->n_heads[TARGETS[0]], V = (uint32_t)g->n_vocab;
   const uint32_t top = (uint32_t)(g->ix_topk / g->ix_pool), pool = (uint32_t)g->ix_pool;
-  const float eps = g->rms_eps, scale = 1.0f / sqrtf((float)qk);
+  const float eps = g->rms_eps;
   const GgufTensor *emb = f->w->embed;
   const uint64_t erow = emb->bytes / emb->dims[1];
   for (uint32_t j = 0; j < R; j++)
     d->pin_ids[j] = j ? MASK_TOKEN : y, d->pin_pos[j] = anchor + (int32_t)j;
+  double pt = f->pf.on > 1 ? hy4_now() : 0;
+  f->pf.drafts += f->pf.on > 1;
   bool ok = hipMemcpyAsync(d->ids, d->pin_ids, R * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hipMemcpyAsync(d->pos, d->pin_pos, R * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             q4x_rows(emb->type, hy4_dev(f, emb), erow, D, d->ids, R, d->h, f->st);
   /* the fusion on the anchor's row: h0 += (gate W) [enorm(e0); hnorm(target hidden)] */
   ok = ok && ops_rms(d->h, D, D, d->enorm, eps, 1, d->cat, 2 * D, f->st) &&
        ops_rms(s->dhid + (uint64_t)i * D, D, D, d->hnorm, eps, 1, d->cat + D, 2 * D, f->st) &&
-       mat(f, d->ehtype, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st);
+       mat(f, d->ehtype, d->eh, D, 2 * D, d->cat, 1, d->y) && ops_add(d->h, d->y, D, f->st) &&
+       hy4_draft_part(f, 24, &pt);
   for (int li = 0; ok && li < HY4_DFLY_LAYERS; li++)
   {
     const Layer *L = &d->layer[li];
@@ -400,8 +403,10 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          hy4_dfly_sel(s->dsel + ((uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i) * top,
                       s->dn + (uint64_t)li * HY4_DFLY_KEEP + (uint32_t)i, anchor, pool, top, R, d->cap, d->sel, d->n_sel,
                       f->st) &&
-         hy4_mla_attn(d->qa, s->cache[tl], 0, f->kv8, L->sinks, H, lat, rd, 0, d->sel, d->n_sel, d->cap, pool, scale, d->pos, R,
-                      d->olat, f->attn_part, false, f->st) &&
+         attn_core_run(f->mla[tl], &(AttnStep){.q = d->qa, .n_tok = R, .pos = d->pos, .sink = L->sinks, .out = d->olat,
+                                               .keys = {.k = s->cache[tl], .v = s->cache[tl], .sel = d->sel,
+                                                        .npick = d->n_sel, .stride = d->cap}},
+                       f->st) &&
          hy4_mla_out(d->olat, L->v_b, d->gt, H, lat, vd, R, d->ao, f->table, f->st) &&
          mat(f, d->wtype, L->o, D, H * vd, d->ao, R, d->out) &&
          ops_rms_add_rms(d->h, d->out, L->post_proj_norm, L->ffn_norm, eps, D, R, d->xn, f->st) &&
@@ -410,7 +415,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          ops_swiglu(d->ga, d->up, d->ff, INFINITY, NULL, R, d->act, f->st) &&
          mat(f, d->wtype, L->ffn_down, D, d->ff, d->act, R, d->y) && ops_add(d->h, d->y, (uint64_t)R * D, f->st);
   }
-  ok = ok && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
+  ok = ok && hy4_draft_part(f, 25, &pt) && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
   /* the chain: draft j from row j's hidden corrected by the token before it (the anchor's, then each draft's) */
   for (uint32_t j = 1; ok && j < R; j++)
   {
@@ -422,11 +427,11 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          mat(f, d->wtype, d->corr_up, d->corr_ff, 2 * D, d->cat, 1, d->up) &&
          ops_swiglu(d->ga, d->up, d->corr_ff, INFINITY, NULL, 1, d->act, f->st) &&
          mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
-         ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) &&
+         ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) && hy4_draft_part(f, 26, &pt) &&
          (d->head4 ? mat(f, QTYPE_Q4_0, d->head4, V, D, d->c, 1, d->logits)
           : d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
                    : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
-         hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st);
+         hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st) && hy4_draft_part(f, 27, &pt);
   }
   ok = ok && hipMemcpyAsync(d->pin_pick, d->pick, most * 4, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipMemcpyAsync(d->pin_prob, d->prob, most * F, hipMemcpyDeviceToHost, f->st) == hipSuccess &&

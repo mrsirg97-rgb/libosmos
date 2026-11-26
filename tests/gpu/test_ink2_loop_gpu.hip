@@ -9,6 +9,7 @@
 // there; skipped (77) without the model, the 64-id dump or a GPU
 extern "C" {
 #include "osmos/ink2/forward.h"
+#include "osmos/gpu/mv.h"
 #include "osmos/ink2/weights.h"
 #include "osmos/model/gguf.h"
 }
@@ -21,11 +22,13 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "q4x_ref.h"
+#include "q8_off.h"
 
 // the oracle's own noise (measured 2026-11-20): llama.cpp's GPU run against its CPU run of the same file - BF16
 // activations, BF16-rounded experts (the release's NVFP4, ~2e-3 of a weight), an F16 cache, each sum's order its own:
@@ -40,6 +43,7 @@ constexpr double kTop1Miss = 0.05;  // of the rows
 constexpr const char* kRefModel = "%s/Models/inkling2-mini/osmos/ink2-mini-00001-of-00002.gguf";
 constexpr const char* kDump = "%s/osmos-oracle/ink2-mini-dump-%u";
 constexpr uint32_t kSplits[] = {1, 7, 13};  // the uneven steps' first lengths: then the rest at once
+constexpr uint32_t kDecodeStep = MV_MAX_TOKENS;  // a decode's most tokens a step: the int8 path's
 
 struct Taps {
   uint32_t n = 0, dim = 0;
@@ -62,6 +66,23 @@ static std::vector<int32_t> dump_ids(const std::string& dir) {
 }
 
 // KL(ref || got) of a row's logits, in double
+// the ids in steps of `step`, every row's logits in order (each step's rows ink2_logits' 0 .. len - 1)
+static std::vector<float> in_steps(Ink2Forward* f, const std::vector<int32_t>& ids, uint32_t n, uint32_t step,
+                                   uint32_t V, char* err) {
+  Ink2Seq* u = ink2_seq_create(f, err);
+  CHECK(u);
+  std::vector<float> all;
+  for (uint32_t at = 0; at < n;) {
+    uint32_t len = std::min(step, n - at);
+    CHECK(ink2_step(f, &u, &len, 1, ids.data() + at, err) || (std::fprintf(stderr, "  %s\n", err), false));
+    const std::vector<float> rows = host_of(ink2_logits(f), (size_t) len * V);
+    all.insert(all.end(), rows.begin(), rows.end());
+    at += len;
+  }
+  ink2_seq_destroy(u);
+  return all;
+}
+
 static double kl(const float* ref, const float* got, uint32_t V) {
   double mr = ref[0], mg = got[0], sr = 0, sg = 0, k = 0;
   for (uint32_t i = 1; i < V; i++) mr = std::max(mr, (double) ref[i]), mg = std::max(mg, (double) got[i]);
@@ -142,9 +163,10 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
               rows - miss, rows);
   CHECK(worst <= kTolSlot && kl_sum / rows <= kKlMean && kl_max <= kKlMax && miss <= kTop1Miss * rows);
 
-  // the same ids in uneven steps: the last row's logits the same bits
+  // the same ids in uneven steps: the last row's logits the same bits (the f16 path's contract: a decode's step on it)
   ink2_seq_destroy(s);
   ink2_forward_tap(f, nullptr, nullptr);
+  std::unique_ptr<Q8Off> off = std::make_unique<Q8Off>();
   for (uint32_t first : kSplits) {
     Ink2Seq* u = ink2_seq_create(f, err);
     CHECK(u);
@@ -161,6 +183,10 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   }
   std::printf("  the same ids in steps of %u, %u and %u then the rest: the last row's logits the same bits\n",
               kSplits[0], kSplits[1], kSplits[2]);
+  off.reset();
+  // decode-sized steps on the run's own path (int8 at a decode: route_tok's tables here, the host's streamed below):
+  // every row's logits, to be the streamed forward's bits
+  const std::vector<float> small = in_steps(f, ids, n, kDecodeStep, V, err);
   ink2_forward_destroy(f);
 
   // half the experts in memory (the rest streamed): the tables the host's, every row's logits the same bits
@@ -168,11 +194,14 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   Ink2Seq* hs = ink2_seq_create(hf, err);
   CHECK(hs && (ink2_step(hf, &hs, &n, 1, ids.data(), err) || (std::fprintf(stderr, "  %s\n", err), false)));
   CHECK(host_of(ink2_logits(hf), (size_t) n * V) == logits);
-  std::printf("  half the experts streamed (the host's tables): every row's logits the same bits\n");
   ink2_seq_destroy(hs);
+  const std::vector<float> small_h = in_steps(hf, ids, n, kDecodeStep, V, err);
+  CHECK(std::memcmp(small_h.data(), small.data(), small.size() * 4) == 0);
+  std::printf("  half the experts streamed (the host's tables): every row's logits the same bits, in one step and in"
+              " steps of %u\n", kDecodeStep);
   ink2_forward_destroy(hf);
 
-  // a full layer's values Q8 (values_q8, ink2_fa8): the logits within the same bounds, its uneven steps' last row
+  // a full layer's values Q8 (values_q8: Q8 records on the attention core): the logits within the same bounds, its uneven steps' last row
   // the one step's bits (a decode's split units over Q8 values)
   Ink2Forward* qf = forward(w, n, true, true);
   Ink2Seq* qs = ink2_seq_create(qf, err);
@@ -191,6 +220,7 @@ static void one_dump(const Ink2Weights* w, uint32_t n) {
   CHECK(qsum / rows <= kKlMean && qmax <= kKlMax && qmiss <= kTop1Miss * rows);
   CHECK(ql != logits);  // (another cache: other bits)
   {
+    const Q8Off q8_off;  // (the f16 path's contract, as above)
     Ink2Seq* u = ink2_seq_create(qf, err);
     CHECK(u);
     uint32_t at = 0, len = std::min(kSplits[1], n);

@@ -180,12 +180,11 @@ static void layer(const Gguf* g, int l) {
                 tg->type, rows, cols, lim, clamped, kTok);
   }
   by_token(tg->type, gates, ups, dcnt, dxrow, xrow, rows, cols, nrow, sc, dx, dq, dd, dga, dup, dh, dref);
-  // refusals: no scale, h's rows shorter than a row, a type not the contract's
-  CHECK(!q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, nullptr, 1.0f, dh, rows,
+  // refusals: h's rows shorter than a row, a type not the contract's (MXFP8). no scale is 1 (a family whose weights
+  // are applied at the sum), not a refusal
+  CHECK(!q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows - 1,
                     nullptr) &&
-        !q8_gate_up(tg->type, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows - 1,
-                    nullptr) &&
-        !q8_gate_up(13, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows, nullptr));
+        !q8_gate_up(43, gates, ups, dcnt, dxrow, nullptr, nullptr, kExperts, kTok, rows, cols, dq, dd, ds, 1.0f, dh, rows, nullptr));
   for (void* p : {(void*) dw, (void*) dp, (void*) dx, (void*) dq, (void*) dd, (void*) ds, (void*) dga, (void*) dup,
                   (void*) dh, (void*) dref, (void*) dcnt, (void*) dxrow})
     CHECK(hipFree(p) == hipSuccess);

@@ -1,6 +1,6 @@
 /* the hy4 latent MoE (hy4_impl.h's hy4_moe): the router, the routed experts in the latent - each expert read once for
    the tokens that picked it, a decode's on the matvec (mv_group_tok), a prompt's on the matrix cores
-   (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (hy4_route), a read's on the host - the shared expert, the combine norm. a token's sums its own in
+   (mm_group over each expert's gathered tokens); a decode's tables built on the GPU (route_tok), a read's on the host - the shared expert, the combine norm. a token's sums its own in
    either: its picks' order and its sum's (slot order) its own */
 #include <math.h>
 #include <stdlib.h>
@@ -9,10 +9,12 @@
 #include <hip/hip_runtime_api.h>
 
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/route.h"
 #include "osmos/model/moe_route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/q8.h"
 #include "osmos/model/qtype.h"
 #include "hy4_impl.h"
 
@@ -59,7 +61,7 @@ static bool in_memory(Hy4Forward *f, int l, const MoeRoute *rt, uint32_t picks)
 /* a read's picks grouped by expert on the host (moe_route: ascending; within one, its tokens ascending): each sorted
    row's token and weight, each (token, slot)'s row; mm_group's entries (moe_entries: chunks of MM_MAX_TOKENS, each
    expert's slots a whole number of tiles, the entries ordered by count so a launch is a run of the same column
-   tiles). a decode's tables are the GPU's (hy4_route: no host between the router and the experts) */
+   tiles). a decode's tables are the GPU's (route_tok: no host between the router and the experts) */
 static bool route(Hy4Forward *f, int l, uint32_t n, uint32_t *entries, uint32_t *slots)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -129,10 +131,10 @@ static bool mm_experts(uint32_t type, const void *const *w, const int32_t *h_cnt
   return ok;
 }
 
-/* a decode's tables on the host (some experts not resident: the membrane's addresses), hy4_route's: the picks by
+/* a decode's tables on the host (some experts not resident: the membrane's addresses), route_tok's: the picks by
    expert ascending, an expert's tokens ascending - row r's token and weight, pick m's row; the entries each expert's
    rows in chunks (experts ascending), the count 0 past them to n_tok x k. a pick out of range or twice in a token
-   refused (hy4_route's fault) */
+   refused (route_tok's fault) */
 static bool decode_tables(Hy4Forward *f, int l, uint32_t n, uint32_t chunk)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -181,28 +183,41 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     const void **wg = (const void **)f->wptr, **wu = wg + nk, **wd = wg + 2 * nk;
     const uint32_t chunk = n < MV_MAX_TOKENS ? n : MV_MAX_TOKENS;
     const void *const *tab = f->exp_tab + (uint64_t)(l - g->n_dense) * 3 * E; /* (every expert resident) */
-    return (f->whole ? hy4_route(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt, f->xrow, wg,
-                                 f->fault, f->st)
-                     : decode_tables(f, l, n, chunk)) &&
-           ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) &&
-           mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) &&
-           mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) &&
+    double t = f->pf.on > 1 ? hy4_now() : 0;
+    const bool tables = f->whole ? route_tok(f->idx, f->wtok, n, K, E, chunk, tab, f->gidx, f->sidx, f->wsel, f->cnt,
+                                             f->xrow, wg, f->fault, f->st)
+                                 : decode_tables(f, l, n, chunk);
+    if (f->q8 && q8_enabled() && q8_takes(L->exp_gate->type) && q8_takes(L->exp_up->type) && q8_takes(L->exp_down->type))
+    { /* each token's row rounded once (rin), its picks' rows by gidx; the table exact: experts in any count order */
+      const Q8Experts e = {.gate_type = L->exp_gate->type, .up_type = L->exp_up->type, .down_type = L->exp_down->type,
+                           .wg = wg, .wu = wu, .wd = wd, .cnt = f->cnt, .xrow = f->xrow, .xin = f->gidx, .n = nk,
+                           .max_cnt = chunk, .d = lat, .ff = ffe, .x = rin, .x_rows = n, .xq = f->xq, .xqd = f->xqd,
+                           .scale = f->wsel, .lim = g->clamp[l], .ga = f->eg_g, .up = f->eg_u, .h = f->eg_h,
+                           .h_rows = nk, .hq = f->hq, .hqd = f->hqd, .y = f->eg_y};
+      return tables && hy4_part_done(f, 17, &t) && q8_experts(&e, f->st) && hy4_part_done(f, 20, &t);
+    }
+    return tables &&
+           ops_gather_rows(f->xg, rin, f->gidx, nk, lat, f->st) && hy4_part_done(f, 17, &t) &&
+           mv_experts(L->exp_gate, wg, f, nk, chunk, ffe, lat, f->xg, f->eg_g) && hy4_part_done(f, 18, &t) &&
+           mv_experts(L->exp_up, wu, f, nk, chunk, ffe, lat, f->xg, f->eg_u) && hy4_part_done(f, 19, &t) &&
            ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
-           mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y);
+           mv_experts(L->exp_down, wd, f, nk, chunk, lat, ffe, f->eg_h, f->eg_y) && hy4_part_done(f, 20, &t);
   }
   uint32_t entries = 0, slots = 0;
+  double t = f->pf.on > 1 ? hy4_now() : 0;
   if (!route(f, l, n, &entries, &slots))
     return false;
   const uint64_t ecap = hy4_read_entries(f->max_tokens, g);
   const void **rw = f->rw;
-  return mm_x16_rows(rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
+  return hy4_part_done(f, 17, &t) && mm_x16_rows(rin, lat, f->rgidx, slots, lat, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_gate->type, rw, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_g, f->ry, ffe, f->st) &&
+         hy4_part_done(f, 18, &t) &&
          mm_experts(L->exp_up->type, rw + ecap, f->h_rcnt, f->rcnt, entries, ffe, lat, f->xe16, f->rx, f->eg_u, f->ry,
-                    ffe, f->st) &&
+                    ffe, f->st) && hy4_part_done(f, 19, &t) &&
          ops_swiglu(f->eg_g, f->eg_u, ffe, g->clamp[l], f->wsel, nk, f->eg_h, f->st) &&
          mm_x16_rows(f->eg_h, ffe, f->rhidx, slots, ffe, f->xe16, f->overflow, f->st) &&
          mm_experts(L->exp_down->type, rw + 2 * ecap, f->h_rcnt, f->rcnt, entries, lat, ffe, f->xe16, f->rxd, f->eg_y,
-                    f->ryd, lat, f->st);
+                    f->ryd, lat, f->st) && hy4_part_done(f, 20, &t);
 }
 
 bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
@@ -217,18 +232,21 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   float *logit = joint ? f->jo_ffn + J->off[0] : f->logit_r, *rin = joint ? f->jo_ffn + J->off[1] : f->rin;
   float *ga = joint ? f->jo_ffn + J->off[2] : f->ga, *up = joint ? f->jo_ffn + J->off[3] : f->up;
   bool on_xn = false;
+  double t = f->pf.on > 1 ? hy4_now() : 0;
   const bool on_x = joint ? hy4_joint(f, J, D, f->xn, f->jo_ffn)
                           : hy4_mat(f, L->router, E, D, f->xn, n, logit, read) &&
                                 hy4_mat_pair(f, L->routed_down, lat, rin, L->sh_gate, sh, ga, f->xn, D, n, read, &on_xn) &&
                                 hy4_mat_pair(f, L->sh_up, sh, up, NULL, 0, NULL, f->xn, D, n, read, &on_xn);
-  return on_x &&
+  return on_x && hy4_part_done(f, 15, &t) &&
          ops_router_scored(logit, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,
-                           f->wtok, f->st) &&
-         routed(f, l, n, read, rin) && ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) &&
-         hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) &&
+                           f->wtok, f->st) && hy4_part_done(f, 16, &t) &&
+         routed(f, l, n, read, rin) && (t = f->pf.on > 1 ? hy4_now() : 0, true) &&
+         ops_gather_sum(f->rsum, f->eg_y, f->sidx, K, n, lat, f->st) && hy4_part_done(f, 23, &t) &&
+         hy4_mat(f, L->routed_up, D, lat, f->rsum, n, f->out, read) && hy4_part_done(f, 21, &t) &&
          ops_swiglu(ga, up, sh, INFINITY, NULL, n, f->act, f->st) &&
          hy4_mat(f, L->sh_down, D, sh, f->act, n, f->sh, read) &&
          ops_add(f->out, f->sh, (uint64_t)n * D, f->st) &&
          ops_rms(f->out, D, D, hy4_fv(f, L->post_ffn_norm), g->rms_eps, n, f->y, D, f->st) &&
-         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st); /* the routed and shared sum, its post norm, into the streams */
+         hy4_hc_post(f->h, f->y, f->post, (uint32_t)g->hc, D, n, f->st) && /* the routed and shared sum, its post norm, into the streams */
+         hy4_part_done(f, 22, &t);
 }

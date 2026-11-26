@@ -50,8 +50,9 @@ static void rows_and_ids(void)
     check(COLS % t->values == 0, id, "COLS not whole blocks of it");
     check(t->paths != 0, id, "a row no path reads");
     check(t->name && t->name[0], id, "no name");
-    /* the lane's contract: which side computes an expert changes no bit, so each takes what the other takes */
-    check(!(t->paths & QTYPE_Q8) == !(t->paths & QTYPE_CPU_Q8), id, "int8 experts on one side only");
+    /* the lane's contract: which side computes an expert changes no bit, so every type the CPU's half takes the GPU's
+       takes too (the GPU's alone: its own experts - DeepSeek's lane without its CPU half, the other families) */
+    check(!(t->paths & QTYPE_CPU_Q8) || (t->paths & QTYPE_Q8), id, "an int8 expert the CPU's alone");
     check(!(t->paths & QTYPE_MV_TOK) || (t->paths & QTYPE_MV), id, "an expert's tokens without the matvec");
   }
   check(qtype_info(UINT32_MAX) == NULL, UINT32_MAX, "a row for an id no file holds");
@@ -93,7 +94,7 @@ static void cpu_paths(void)
   {
     const uint32_t paths = qtype_paths(id);
     check(cpu_mv_known(id) == !!(paths & QTYPE_CPU_MV), id, "cpu_mv_known disagrees with QTYPE_CPU_MV");
-    check(!!lane_q8_type(id) == !!(paths & QTYPE_Q8), id, "lane_q8_type disagrees with QTYPE_Q8");
+    check(!!lane_q8_type(id) == !!(paths & QTYPE_CPU_Q8), id, "lane_q8_type disagrees with QTYPE_CPU_Q8");
     if (q8)
       check(cpu_q8_rows(id, w, COLS, 0, ROWS, q, d, 1, y, ROWS) == !!(paths & QTYPE_CPU_Q8), id,
             "cpu_q8_rows disagrees with QTYPE_CPU_Q8");

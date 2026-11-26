@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/bufs.h"
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/q4x/dflash.h"
@@ -27,6 +28,7 @@ typedef struct DfBuf
   int32_t *pin_tok, *pin_path, *pin_idx; /* pinned: the block's anchor in; its path, the top-k's ids, values, p out */
   float *pin_val, *pin_p;
   GpuBufs bufs;        /* the device buffers' record (osmos/gpu/bufs.h: its ledger the pinned ones' too) */
+  AttnCore *attn;      /* the layers' attention (the core's draft block: the rings' ring rows, the window) */
 } DfBuf;
 
 /* a target's calls the drafter's math goes through - each on its own stream, its own matrices' path */
@@ -54,7 +56,8 @@ typedef struct DfRings
   uint32_t ring;
 } DfRings;
 
-bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx);
+bool df_buffers(DfBuf *d, OsmosLedger *l, const Q4xDflashGeometry *g, uint32_t max_tokens, uint32_t max_ctx,
+                uint32_t ring);
 void df_buffers_free(DfBuf *d);
 bool df_seed(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, const float *taps, int32_t from,
              uint32_t n);
@@ -65,7 +68,8 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
 
 /*
 df_buffers, df_buffers_free
-  every buffer for a drafter of geometry g on a forward of max_tokens a step and max_ctx positions (the block's
+  every buffer for a drafter of geometry g on a forward of max_tokens a step and max_ctx positions, its sequences'
+  rings of ring rows (the attention's core made for them; the block's
   tokens after its anchor the mask, iota 0 .. max_ctx + block on the device); false where the GPU refused one (the
   caller's message). free: each NULL or freed, the struct then zeros.
 

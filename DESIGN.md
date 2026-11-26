@@ -7357,3 +7357,77 @@ blocks x 6 layers a 3K prompt). Batching a layer's blocks into one copy and one 
 KL, top-1 and NLL to every digit) did not move the 3K prompt - the bucketing itself is the time. Deferring it to the
 first read that needs one changes what a saved state's `closed` means (its buckets saved, the rollback rule, the
 loader's check); bucketing on the GPU, or on a thread beside it, is 0.18.0's.
+
+### 0.18.0: the routed experts' int8 decode, every family's (2026-11-25, low-power)
+
+The lane's int8 inputs (DeepSeek's since 0.6: each 32-value block of x rounded to int8, a weight's codes against them
+by v_dot4, then the scales in F32) now take every QTYPE_MV_TOK type but MXFP8 - 19, the table's QTYPE_Q8 rows;
+q8_takes reads them; test_q8_types_gpu holds each to exact arithmetic on its F32 decoder - and one driver runs them
+for any family (q8_experts: x rounded, gate + up + the activation fused, h rounded, down; by the host's count runs,
+DeepSeek's, or exact for a table in any order). route_tok (Hy4's router, moved) builds a resident family's tables
+on the GPU; a streamed one's are the host's (the membrane's addresses).
+
+- **At a decode only** (a step of at most MV_MAX_TOKENS, 8: every drafter's verify fits, so drafted == plain). A
+  prompt keeps its own path (the matrix cores, f16): Qwen's and Inkling's prompt == decode now holds on that path
+  alone (their tests: under OSMOS_Q8=0; on int8, a decode's bits deterministic and resident == streamed). A batch
+  of sequences past 8 tokens takes the prompt's path, as Hy4's and DeepSeek's always did.
+- **Measured** (drafted, 256 tokens, low-power; KL: ekld, 4,096 wiki tokens in steps of 4, int8 against f16):
+
+  | pack | int8 | drafted code / prose | KL mean, top-1 | |
+  |---|---|---|---|---|
+  | Small (IQ1_S / IQ2 / IQ3) | on | 12.9 -> 17.0, 13.0 -> 16.4 | 0.0072, 96.9% | NLL 1.10845 -> 1.10839 |
+  | Hy4 (Q3_K) | on | 22.0 -> 26.2, 19.4 -> 23.9 | 0.123, 89.1% | the read path's own: 0.118, 90.5% |
+  | Qwen (IQ2_S / IQ3 / IQ4_NL) | on | 48.2 -> 49.3, 41.7 -> 39.7 | 0.0093, 98.0% | plain +5.6%; resident == streamed bits |
+  | Mini (NVFP4 / MXFP8) | **off** ("int8": false) | 45.2 -> 41.5, 41.4 -> 40.5 | 0.0017, 97.9% | its verify bandwidth-bound |
+  | DeepSeek | on (unchanged) | the same bits | | moved onto the driver |
+
+- **Mini**: its experts touch ~7 distinct experts a verify token (49 of 56 picks at 7 tokens): a bandwidth contest,
+  and NVFP4 decodes cheaply - f16 mm_group streams ~200 GB/s. Two fixes for every family's verify: a 4-bit table's
+  codes looked up in registers (v_perm_b32), not one global load a code (32 a block: NVFP4 / MXFP4 / IQ4_NL / IQ4_XS);
+  exact as two launches (count 1, then 2 or more at the table's most), not one a count - each a grid the others'
+  leave empty. Mini's 7-token layer 1242 -> 1113 us (f16 1088); 1 token 136 -> 130 (f16 186). The same bits.
+- **Not kept: int8 on the prompt's matrix cores** (branch q8mm-park, 63acca8): a bit-exact matmul (each token's sums
+  the matvec's: block_sum split into exact integers + combine, the lanes' order folded pairwise in bit-reversed
+  order; 135 byte checks, a lane-order mutation fails all) ran 4-6 TFLOP/s flat against mm_group's 6.5-24.8 (0.19-
+  0.74x): a 16-token tile re-decodes its weights, and the exact epilogue (a scalar combine and fmaf a 32-value block)
+  costs about the WMMA's own work - parity its ceiling.
+- **Switches:** OSMOS_Q8=0 the engine-wide (read every step); a pack's "int8": false (osmos-serve --no-int8,
+  OsmosOptions' no_int8) where it measured slower. With DeepSeek's CPU half, its experts' types both sides'
+  (lane_q8_types: QTYPE_CPU_Q8).
+
+### 0.18.0: DeepSeek's decode, counted - bandwidth, not a defect (2026-11-25, low-power, osmos-evo)
+
+DS4_PROFILE (each part synchronized: shares, not speed) over 256 plain tokens after a 27-token prompt: 62.6 ms a step
+(17.9 tok/s unprofiled) - the experts 30.4 ms (streamed: ~2,000 cold picks), attention 24.1, the rest 8.1. Attention
+does not follow the context it is built for (MAX_CTX 4,096 / 65,536 / 262,144: 23.6 / 24.6 / 24.9 ms) and is 3 of
+its kernels a layer (scores, softmax, values); the time is its weights: 90 MB a layer (q_b, output_b 28.8 each,
+output_a 23.1 - Q5_K), 3.6 GB a token across 40 layers, ~18 ms at the box's ~200 GB/s - ~75% of it. Every dense weight
+5.67 GB a token. Drafted (29.7 tok/s; 195 of 289 accepted, ~4 tokens a round): a verify 127 ms, the experts 84 of it.
+Not pursued in 0.18.0: lower-bit dense weights (a pack's choice, with its KL), the 1-token dense matmuls' last quarter
+of bandwidth (mm::kernel at a decode, 5 a layer: the 0.18.1 matvec work).
+
+### 0.18.0: Mini's drafts a round capped - not kept (2026-11-25, low-power)
+
+The first N drafts past the floors kept (a serve-level cap, 3 / 4 / 5 / none - its drafter's 7), drafted code and
+prose, two passes reversed: uncapped 45.3 / 41.6 tok/s, 5 44.5 / 41.8, 4 44.3 / 41.1, 3 42.5 / 39.8 (each pass within
+0.2). Its experts' verify near-linear in tokens (180 / 165 / 155 us a token at 1 / 4 / 7), yet a round's own costs -
+its drafter's pass, attention, the dense weights - are its deep drafts' worth. int8 at 4: 42.2 / 42.8 (its answers'
+own acceptance: code harder, prose easier). Mini keeps its block, f16; the cap not shipped.
+
+### 0.18.0: Small's verify trimmed - neither kept (2026-11-25, low-power)
+
+osmos-evo-inkling drafted barely past plain (16.4 / 15.9 tok/s, performance; 0.17.0: 14.5 / 12.6): its step ~80% the
+routed experts, each token's its own (a 1-token step 65 ms, then +21 / +29 / +27 ms a token; ~63% of 541 drafts
+accepted, 2.4 tokens a round). Its drafts capped (2 / 3 / 4) or their confidence product's floor raised (0.3 / 0.5 /
+0.7) against today's (0.1, its drafter's block), two passes reversed: today 16.3 / 15.7, the best of the rest floor
+0.3's 16.3 / 15.6 - every cap slower (2: 14.9 / 15.6). The same answers throughout. Neither shipped.
+
+### 0.18.0: Inkling's verify, f16 against int8 - the drafter not the limit (2026-11-25, low-power, profiled)
+
+A step's cost by its tokens (ink2's profile): Mini 36.8 ms at 1, +5-6 ms a token after (67 at 8: ~15% of a step a
+token - its shared attention and BF16 dense the step's); Small 75 at 1, +22-30 a token (~35-40%: its routed experts
+~80% of a step, each token's its own, the SSD's cold ones among them). Their drafters alike: ~61% / ~63% of drafts
+accepted, a draft 22% / 17% of a step. int8 against f16 on Small: faster at every size (1: 75 / 90 ms, 4: 157 / 202,
+8: 287 / 309) - drafted 17.1 / 16.7 against 13.8 / 13.9 tok/s. Small's drafting is its experts' (0.18.1: the
+membrane's resident set, its reads under the compute). The matvec's exact mode as one launch, each matrix its own
+count: Mini's layer 1,107 -> 1,090 us at 7 tokens, 681 -> 699 at 4 (f16 1,091 / 663) - not kept.

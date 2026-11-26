@@ -40,6 +40,7 @@ typedef struct DPin
 
 struct Drafter
 {
+  struct AttnCore *latent; /* its attention: the ring's window, then the block's own rows F32 */
   Forward *f;
   GpuBufs bufs; /* every GPU and pinned buffer of the drafter, recorded as made (its forward's ledger's) */
   uint32_t ex_type; /* the routed experts' type, every one's (dspark.json's: MXFP4 as packed, or requantized) */

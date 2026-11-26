@@ -63,11 +63,13 @@ typedef struct OsmosFamily
                     int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
                     char err[OSMOS_ERR]);
   bool reads_apart; /* a prompt's read another math than a decode's (step's read): osmos_reads_apart; false one math
-                       (Qwen's, Inkling's: read ignored) */
+                       unless apart says otherwise */
   /* a mark (oseq_mark_save), or NULL: the whole state */
   uint64_t (*mark_bytes)(const void *seq);
   bool (*mark_save)(const void *seq, void *out, uint64_t bytes, char err[OSMOS_ERR]);
   bool (*mark_load)(void *seq, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
+  bool (*apart)(const void *eng); /* or NULL: whether this engine reads apart though its family need not (Qwen's,
+                                     Inkling's: their int8 decode on) - read then honored, a prompt's math at any size */
 } OsmosFamily;
 
 /* a sequence's family half (a family's batch reads its sequences' through it) */
@@ -106,6 +108,7 @@ struct Osmos
   int32_t *dpick; /* device: a drawn token */
   OsmosLedger *ledger; /* the engine's memory, one count (osmos/mem/ledger.h): its own, every family's build borrowing it */
   uint64_t ram_kept; /* the system's RAM a build leaves free: OsmosOptions' fill, else FIT_RAM_FREE */
+  bool apart;        /* reads apart: its family's, or its build's (OsmosFamily's apart) */
 };
 
 struct OsmosSeq

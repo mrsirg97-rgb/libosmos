@@ -54,8 +54,9 @@ LANE_FN float lane_exp(float x)
 LANE_FN float lane_q8_inv(float amax) { return amax > 0.0f ? LANE_Q8_MAX / amax : 0.0f; }
 LANE_FN float lane_q8_scale(float amax) { return amax / LANE_Q8_MAX; }
 LANE_FN int lane_q8_round(float x, float inv) { return (int)rintf(x * inv); }
-/* whether an expert's three matrices all have the contract's decode: the table's rows naming QTYPE_Q8 (qtype.h) */
-#define LANE_Q8_ROW(name, id, values, bytes, paths) || (t == (id) && ((paths) & QTYPE_Q8))
+/* whether an expert's three matrices all have the contract's decode on both sides - the CPU lane's too: the table's
+   rows naming QTYPE_CPU_Q8 (qtype.h; the GPU's alone: QTYPE_Q8, q8_takes) */
+#define LANE_Q8_ROW(name, id, values, bytes, paths) || (t == (id) && ((paths) & QTYPE_CPU_Q8))
 LANE_FN int lane_q8_type(unsigned t) { return 0 QTYPES(LANE_Q8_ROW); }
 #undef LANE_Q8_ROW
 LANE_FN int lane_q8_types(unsigned g, unsigned u, unsigned d) { return lane_q8_type(g) && lane_q8_type(u) && lane_q8_type(d); }

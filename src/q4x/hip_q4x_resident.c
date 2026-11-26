@@ -1,6 +1,7 @@
 /* Qwen's forward, its weights made resident (q4x_impl.h): every tensor's bytes on the device (read through a
    pinned piece) or the membrane's, the room left as it goes, the experts' pool, the step's and drafters' buffers */
 #define _GNU_SOURCE /* O_DIRECT */
+#include <math.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -13,6 +14,7 @@
 #include "osmos/mem/experts.h"
 #include "osmos/mem/membrane.h"
 #include "osmos/run/fit.h"
+#include "osmos/gpu/mv.h"
 #include "q4x_impl.h"
 #include "osmos/err.h"
 
@@ -214,7 +216,7 @@ bool q4x_mtp_buffers(Q4xForward *f, char *err)
 /* the drafter's buffers (the DFlash2 core's): a feed's max_tokens context rows, a block's */
 bool q4x_df_buffers(Q4xForward *f, char *err)
 {
-  return df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx) ||
+  return df_buffers(&f->d, f->ledger, &f->df->geo, f->max_tokens, f->max_ctx, f->df_ring) ||
          osmos_fail(err, "GPU memory refused (the drafter's buffers)");
 }
 
@@ -234,6 +236,33 @@ bool q4x_ple_stream(Q4xForward *f, char *err)
   return true;
 }
 
+/* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
+   q4x_attn's bits) */
+static AttnCoreDesc attn_desc(const Q4xForward *f)
+{
+  const Q4xGeometry *g = &f->w->geo;
+  return (AttnCoreDesc){.heads = (uint32_t)g->n_heads,
+                        .kv_heads = (uint32_t)g->n_kv_heads,
+                        .dk = (uint32_t)g->head_dim,
+                        .dv = (uint32_t)g->head_dim,
+                        .k_rows = ATTN_ROWS_Q8_0,
+                        .v_rows = ATTN_ROWS_Q8_0,
+                        .scaling = 1.0f / sqrtf((float)g->head_dim),
+                        .term = ATTN_TERM_NONE,
+                        .gate = ATTN_GATE_VALUE,
+                        .block = ATTN_BLOCK_HEADS,
+                        .ratio = (uint32_t)g->ix_ratio,
+                        .unit = 128,
+                        .max_tokens = f->max_tokens,
+                        .max_keys = f->max_ctx};
+}
+
+static uint64_t attn_scratch_bytes(const Q4xForward *f)
+{
+  const AttnCoreDesc d = attn_desc(f);
+  return attn_core_scratch(&d);
+}
+
 bool q4x_buffers(Q4xForward *f, char *err)
 {
   const Q4xGeometry *g = &f->w->geo;
@@ -249,6 +278,7 @@ bool q4x_buffers(Q4xForward *f, char *err)
   Q4xExpertBounds bd;
   q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
   const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
+  const uint64_t dk = (uint64_t)MV_MAX_TOKENS * k; /* a decode's picks at most (the int8 experts' tables) */
   const uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
   const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * wide * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
@@ -265,13 +295,17 @@ bool q4x_buffers(Q4xForward *f, char *err)
       {&b->fo, n * in * F, 1},         {&b->qf, n * 2 * q * F, 1},      {&b->kr, n * kv * F, 1},         {&b->kq, n * kv * F, 1},         {&b->vr, n * kv * F, 1},         {&b->q, n * q * F, 1},
       {&b->iqr, n * ixq * F, 1},       {&b->iq, n * ixq * F, 1},        {&b->ikr, n * Q4X_IX_DIM * F, 1},
       {&b->ixs, q4x_ix_scratch(f->max_ctx, ratio) * F, 0},           {&b->sel, n * blocks * 4, 1},    {&b->npick, n * 4, 1},
-      {&b->gt, n * q * F, 1},          {&b->ao, n * q * F, 1},          {&b->fa, q4x_attn_scratch((uint32_t)g->n_heads, f->max_ctx) * F, 0},          {&b->rl, n * g->n_experts * F, 1}, {&b->w, n * k * F, 1},
+      {&b->gt, n * q * F, 1},          {&b->ao, n * q * F, 1},          {&b->fa, attn_scratch_bytes(f), 0},          {&b->rl, n * g->n_experts * F, 1}, {&b->w, n * k * F, 1},
       {&b->ga, n * k * ff * F, 1},     {&b->up, n * k * ff * F, 1},     {&b->y, n * k * D * F, 1},
       {&b->shg, n * sff * F, 1},       {&b->shu, n * sff * F, 1},       {&b->sh, n * D * F, 1},          {&b->sl, n * F, 1},
       {&b->ids, n * k * 4, 1},         {&b->rows, n * k * 4, 1},        {&b->cnt, entries * 4, 0},       {&b->gidx, slots * 4, 0},
       {&b->hidx, slots * 4, 0},        {&b->eoff, 3ull * g->n_experts * 4, 0},        {&b->where, n * k * 4, 1},       {&b->xg, entries * 4, 0},        {&b->yg, entries * 4, 0},
       {&b->xd, entries * 4, 0},        {&b->yd, entries * 4, 0},        {&b->x16, x16, 0},               {&b->xe16, xe16, 0},
       {&b->overflow, 4, 0},
+      {&b->q_gidx, dk * 4, 0},         {&b->q_sidx, dk * 4, 0},         {&b->q_cnt, dk * 4, 0},          {&b->q_xrow, dk * 4, 0},
+      {&b->q_wsel, dk * F, 0},         {&b->q_wptr, 3 * dk * sizeof(void *), 0},
+      {&b->q_x, MV_MAX_TOKENS * D, 0}, {&b->q_xd, MV_MAX_TOKENS * (D / 32) * F, 0},
+      {&b->q_h, dk * ff, 0},           {&b->q_hd, dk * (ff / 32) * F, 0},
       {&b->x16b, (uint64_t)MM_SILU_MAX_TOKENS * g->hc_rank * 2, 0},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
@@ -302,6 +336,11 @@ bool q4x_buffers(Q4xForward *f, char *err)
   free(iota);
   if (!put)
     return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  /* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
+     q4x_attn's bits), over b.fa */
+  const AttnCoreDesc ad = attn_desc(f);
+  if (!(f->attn = attn_core_create(&ad, b->fa, attn_core_scratch(&ad), err)))
+    return false;
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
           pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
           (b->slot = malloc(n * sizeof *b->slot)) && memset(b->slot, 0xff, n * sizeof *b->slot)) ||

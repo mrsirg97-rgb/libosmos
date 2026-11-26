@@ -4,6 +4,7 @@
 // pooled group keys (pool_groups'), each token's groups the reference's recall exactly (its 511 best complete groups
 // before its own and its own; fewer complete groups: all of them), then the gated attention over them entering
 // o_proj. every group selected, the dense path's bits; run twice, the same bits. ~/osmos-oracle/hy4_indexer.bin; skipped (77) without.
+#include "../../tools/bench/attn_core_call.h"
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
 #include "osmos/gpu/ops.h"
@@ -185,19 +186,19 @@ int main() {
   float *norm = up(A("kv_a_norm")), *sinks = up(A("sinks"));
   float *cache = scratch((size_t) T * row), *qa = scratch((size_t) T * H * row);
   void* table = scratch(hy4_mla_table_bytes(T, H) / sizeof(float) + 1);
-  float* part = scratch(hy4_mla_attn_scratch(H));
+  float* part = scratch(1);
   float *o_lat = scratch((size_t) T * H * lat), *out = scratch((size_t) T * H * vd);
   const float scale = 1.0f / sqrtf((float) (nope + rd));
   CHECK(hy4_mla_kv(kva, norm, lat, rd, kEps, freqs, dpos, T, cache, 0, false, 0));
   CHECK(hy4_mla_q(q, kb, H, nope, lat, rd, freqs, dpos, T, qa, table, 0));
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, false, 0));
+  CHECK(core_hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, sel, n_sel, top, pool, scale, dpos, T, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, T, out, table, 0));
   const std::vector<float> sparse = down(out, (size_t) T * H * vd);
   match("o_proj's input (sparse attention)", sparse, "o_in", kTolAttn);
 
   // every group selected (the first 2,048 tokens' own selection is all of theirs): the dense path's bits
   const uint32_t dense_n = (top - 1) * pool;
-  CHECK(hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, false, 0));
+  CHECK(core_hy4_mla_attn(qa, cache, 0, false, sinks, H, lat, rd, 0, nullptr, nullptr, 0, 0, scale, dpos, dense_n, o_lat, part, false, 0));
   CHECK(hy4_mla_out(o_lat, vb, gate, H, lat, vd, dense_n, out, table, 0));
   const std::vector<float> dense = down(out, (size_t) dense_n * H * vd);
   CHECK(std::memcmp(dense.data(), sparse.data(), dense.size() * sizeof(float)) == 0);

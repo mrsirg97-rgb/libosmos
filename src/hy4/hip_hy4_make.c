@@ -21,6 +21,7 @@
 #include "osmos/model/expert_units.h"
 #include "osmos/model/fnv.h"
 #include "osmos/model/qtype.h"
+#include "osmos/gpu/q8.h"
 #include "hy4_impl.h"
 #include "osmos/err.h"
 #include "osmos/err_hip.h"
@@ -32,6 +33,31 @@ void hy4_forward_destroy(Hy4Forward *f)
   if (f->st)
     hipStreamSynchronize((hipStream_t)f->st), hipStreamDestroy((hipStream_t)f->st);
   hy4_dfly_free(f);
+  for (int l = 0; l < HY4_MAX_LAYERS; l++)
+    attn_core_destroy(f->mla[l]);
+  if (f->pf.on && f->pf.steps)
+    fprintf(stderr,
+            "hy4 profile: %llu steps, %llu tokens; a step %.2f ms; the Engram read %.3f ms a step (preads %.3f, copy and "
+            "decode %.3f), %.1f rows and %.1f KB a step\n",
+            (unsigned long long)f->pf.steps, (unsigned long long)f->pf.tokens, 1e3 * f->pf.step_s / (double)f->pf.steps,
+            1e3 * (f->pf.rowread_s + f->pf.copy_s) / (double)f->pf.steps, 1e3 * f->pf.rowread_s / (double)f->pf.steps,
+            1e3 * f->pf.copy_s / (double)f->pf.steps, (double)f->pf.rows / (double)f->pf.steps,
+            (double)f->pf.bytes / 1024.0 / (double)f->pf.steps);
+  if (f->pf.on > 1 && f->pf.dsteps)
+  {
+    static const char *const part[24] = {"engram update", "iHC attn", "attention", "iHC ffn", "experts", "dense ffn",
+                                         "embed", "head", "  proj in", "  q_b", "  kv, q absorb", "  indexer",
+                                         "  mla attn", "  v absorb", "  proj out", "  x: router, down, shared in",
+                                         "  router picks", "  route, gather", "  experts gate", "  experts up",
+                                         "  swiglu, down", "  routed up", "  shared down, post", "  gather sum"};
+    for (int k = 0; k < 24; k++)
+      fprintf(stderr, "  %-14s %7.2f ms a %s step\n", part[k], 1e3 * f->pf.part_s[k] / (double)f->pf.dsteps,
+              f->pf.on > 2 ? "prompt" : "decode");
+    static const char *const dpart[4] = {"draft: embed, fusion", "draft: 5 layers", "draft: corrections x5",
+                                         "draft: head + pick x5"};
+    for (int k = 0; f->pf.drafts && k < 4; k++)
+      fprintf(stderr, "  %-22s %7.2f ms a draft\n", dpart[k], 1e3 * f->pf.part_s[24 + k] / (double)f->pf.drafts);
+  }
   experts_destroy(&f->ex); /* its readers stopped, then its memory */
   for (int i = 0; f->xfds && i < f->w->model->n_files; i++)
     if (f->xfds[i] >= 0)
@@ -54,6 +80,29 @@ void hy4_forward_destroy(Hy4Forward *f)
 /* a read's per-head absorption (k_b: q_nope to the latent; v_b: the latent to the head's values) as one mm_group a
    layer over its heads: each layer's heads' matrices, and where head h reads (its columns of the tiled x16: the q /
    latent rows converted once) and writes - fixed for the forward's life */
+/* layer l's MLA attention (hy4_mla_attn's, now the core's): one latent row for every head, keys the row (latent and
+   rope) and values its latent, a head's sink; a sliding layer's window over the ring, a sparse one's groups */
+static AttnCoreDesc mla_desc(const Hy4Forward *f, int l)
+{
+  const Hy4Geometry *g = &f->w->geo;
+  const bool sw = g->sliding[l];
+  const uint32_t lat = (uint32_t)g->kv_lora, rd = (uint32_t)g->rope_dim, qk = (uint32_t)(g->nope_dim + g->rope_dim);
+  return (AttnCoreDesc){.heads = (uint32_t)g->n_heads[l], .kv_heads = 1, .dk = lat + rd, .dv = lat,
+                        .k_rows = f->kv8 ? ATTN_ROWS_MLA_Q8 : ATTN_ROWS_MLA_F32,
+                        .v_rows = f->kv8 ? ATTN_ROWS_MLA_Q8 : ATTN_ROWS_MLA_F32, .window = sw ? (uint32_t)g->window : 0,
+                        .scaling = 1.0f / sqrtf((float)qk), .term = ATTN_TERM_NONE, .sink = ATTN_SINK_HEAD,
+                        .gate = ATTN_GATE_NONE, .block = ATTN_BLOCK_HEADS, .ratio = sw ? 0 : (uint32_t)g->ix_pool,
+                        .unit = 32, .slots = sw ? f->ring : 0, .apart = true,
+                        .max_tokens = f->max_tokens, .max_keys = HY4_MLA_MAX_KEYS};
+}
+/* the cores' scratch: the most heads' (every layer's core borrows it, a step's alone) */
+static uint64_t mla_scratch(const Hy4Forward *f, uint32_t heads)
+{
+  AttnCoreDesc d = mla_desc(f, 0);
+  d.heads = heads;
+  return attn_core_scratch(&d);
+}
+
 static bool head_tables(Hy4Forward *f)
 {
   const Hy4Geometry *g = &f->w->geo;
@@ -103,6 +152,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   f->kring = (o->max_tokens + (uint32_t)g->ix_pool + HY4_MAX_BACK + (uint32_t)g->ix_pool - 1) / (uint32_t)g->ix_pool *
              (uint32_t)g->ix_pool;
   f->eg_fd = -1;
+  f->pf.on = getenv("HY4_PROFILE") ? (atoi(getenv("HY4_PROFILE")) > 2 ? 3 : atoi(getenv("HY4_PROFILE")) > 1 ? 2 : 1) : 0;
+  f->q8 = !o->no_int8; /* a decode's experts over int8 inputs (the pack's; OSMOS_Q8=0 at any step: F32) */
   for (int l = 0; l < HY4_MAX_LAYERS; l++)
     f->dfly_slot[l] = -1;
   int hmax = 0;
@@ -116,7 +167,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   /* (xg and eg_h a chunk's rows past the last: mv_group_tok reads an entry's MV_MAX_TOKENS rows, uses its count) */
   const GpuWant want[] = {
       {&f->h, n * hc * D * F}, {&f->xn, n * D * F}, {&f->y, n * D * F}, {&f->post, n * hc * F}, {&f->hcs, hy4_hc_scratch((uint32_t)n) * F},
-      {&f->table, hy4_mla_table_bytes((uint32_t)n, (uint32_t)H)}, {&f->attn_part, hy4_mla_attn_scratch((uint32_t)H) * F},
+      {&f->table, hy4_mla_table_bytes((uint32_t)n, (uint32_t)H)}, {&f->attn_part, mla_scratch(f, (uint32_t)H)},
       {&f->qr, n * g->q_lora * F}, {&f->qres, n * g->q_lora * F}, {&f->q, n * H * qk * F}, {&f->kva, n * row * F},
       {&f->gt, n * H * g->v_dim * F}, {&f->qa, n * H * row * F}, {&f->olat, n * H * g->kv_lora * F},
       {&f->ao, n * H * g->v_dim * F}, {&f->out, n * D * F}, {&f->ixk, n * g->ix_dim * F}, {&f->ixkn, n * g->ix_dim * F},
@@ -126,6 +177,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->up, n * g->n_ff * F}, {&f->act, n * g->n_ff * F}, {&f->logit_r, n * g->n_experts * F}, {&f->wtok, n * K * F},
       {&f->rin, n * L * F}, {&f->xg, (n * K + MV_MAX_TOKENS) * L * F}, {&f->eg_g, n * K * ffe * F},
       {&f->eg_u, n * K * ffe * F}, {&f->eg_h, (n * K + MV_MAX_TOKENS) * ffe * F}, {&f->eg_y, n * K * L * F}, {&f->wsel, n * K * F}, {&f->rsum, n * L * F},
+      {&f->xq, n * L}, {&f->xqd, n * (L / 32) * F}, {&f->hq, (n * K + MV_MAX_TOKENS) * ffe},
+      {&f->hqd, (n * K + MV_MAX_TOKENS) * (ffe / 32) * F},
       {&f->sh, n * D * F}, {&f->idx, n * K * 4}, {&f->gidx, n * K * 4}, {&f->sidx, n * K * 4},
       {&f->cnt, entries * 4}, {&f->xrow, entries * 4}, {&f->wptr, 3 * entries * sizeof(void *)},
       {&f->tok, n * 4}, {&f->pos, n * 4}, {&f->hx, lr * hc * D * F}, {&f->logits, lr * g->n_vocab * F},
@@ -197,6 +250,11 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
        (f->h_by = malloc(n * K * 4)) &&
        (f->h_w = malloc(n * K * F)) &&
        (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
+  for (int l = 0; ok && l < g->n_layers; l++)
+  { /* a layer's MLA core: its heads, a sliding one's window over the ring, a sparse one's groups of ix_pool */
+    const AttnCoreDesc d = mla_desc(f, l);
+    ok = (f->mla[l] = attn_core_create(&d, f->attn_part, mla_scratch(f, (uint32_t)H), err)) != NULL;
+  }
   ok = ok && (!o->dfly || hy4_dfly_load(f, o->dfly, o->dfly_q8, err)); /* (whole: its drafter part of the build) */
   /* the fixed part, counted (experts_plan's): the table read, the records' buffers, DFly2's - not the GPU's free
      memory before and after, which anything else moves (DFly2 loaded after the experts: outside the budget) */

@@ -136,6 +136,9 @@ static bool field(Config *c, const char *k, const Json *v, char *err)
   if (!strcmp(k, "kv_q8"))
     return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->kv_q8 = v->type == JSON_TRUE, true
                                                          : fail(err, "true or false", k);
+  if (!strcmp(k, "int8")) /* the routed experts' int8 decode: true (the default) or false */
+    return v->type == JSON_TRUE || v->type == JSON_FALSE ? c->no_int8 = v->type == JSON_FALSE, true
+                                                         : fail(err, "true or false", k);
   if (!strcmp(k, "slots"))
     return slots(c, v, err);
   if (!strcmp(k, "stats"))
@@ -222,6 +225,8 @@ bool config_argv(Config *c, const char *engine, int eos, const char *answer_afte
     argv[n++] = "--stream-ngram";
   if (c->kv_q8)
     argv[n++] = "--kv-q8";
+  if (c->no_int8)
+    argv[n++] = "--no-int8";
   if (c->profile)
     argv[n++] = "--profile";
   if (c->stats)

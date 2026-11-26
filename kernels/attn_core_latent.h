@@ -1,21 +1,24 @@
-// ops_sparse_attn (include/osmos/gpu/ops.h): the model has one latent - key and value - for all its heads, so a
+// DeepSeek's latent attention (the attention core's: attn_core.hip's FP8 rows, docs/attention-core.md C3) -
+// ops_sparse_attn's code moved whole, its bits. the model has one latent - key and value - for all its heads, so a
 // token's attention is two products, scores = q (heads x hd) . keys^T and o = p . keys (p the scores' softmax), each a
 // register-tiled F32 matmul over the token's own keys. every output a sum in one order - over d ascending, over the
 // keys in theirs - whatever the tile, the batch, or the token's place in it
-#include <cmath>
-#include "launch.h"
-#include <cstdint>
-
+#pragma once
 #include <hip/hip_runtime.h>
 
+#include <cmath>
+#include <cstdint>
+
 #include "kvload.h"
+#include "launch.h"
 
 extern "C" {
 #include "osmos/gpu/kvfmt.h"
 #include "osmos/gpu/ops.h"
 }
 
-namespace {
+namespace attn_ds4 {
+
 
 using launches::st;
 using launches::ok;
@@ -269,9 +272,8 @@ void launch(const Keys& K, const float* q, const float* sink, float scale, uint3
                                                                                                heads, o);
 }
 
-}  // namespace
 
-extern "C" bool ops_sparse_attn(const float* q, const void* ring, uint32_t ring_fmt, uint32_t slots,
+inline bool run(const float* q, const void* ring, uint32_t ring_fmt, uint32_t slots,
                                 const int32_t* pos, uint32_t window, int32_t floor, const void* ckv, uint32_t ckv_fmt,
                                 const int32_t* sel, const int32_t* n_sel, uint32_t sel_cap, uint32_t max_sel,
                                 const float* sink, float scale, uint32_t heads, uint32_t head_dim, uint32_t n_tok,
@@ -292,3 +294,5 @@ extern "C" bool ops_sparse_attn(const float* q, const void* ring, uint32_t ring_
     launch<false>(K, q, sink, scale, heads, head_dim, keys, n_tok, scores, den, o, st(stream));
   return ok();
 }
+
+}  // namespace attn_ds4

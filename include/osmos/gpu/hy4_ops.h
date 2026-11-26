@@ -31,17 +31,6 @@ bool hy4_mla_kv(const float *kva, const float *norm_w, uint32_t latent, uint32_t
 uint64_t hy4_mla_table_bytes(uint32_t n_tok, uint32_t heads); /* hy4_mla_q's and hy4_mla_out's table: bytes */
 bool hy4_mla_q(const float *q, const void *k_b, uint32_t heads, uint32_t nope, uint32_t latent, uint32_t rope_dim,
                const float *freqs, const int32_t *pos, uint32_t n_tok, float *qa, void *table, void *stream);
-uint64_t hy4_mla_attn_scratch(uint32_t heads); /* hy4_mla_attn's partials: floats */
-bool hy4_mla_attn(const float *qa, const void *cache, uint32_t slots, bool q8, const float *sinks, uint32_t heads,
-                  uint32_t latent, uint32_t rope_dim, uint32_t window, const int32_t *sel, const int32_t *n_sel, uint32_t sel_cap,
-                  uint32_t pool, float scale, const int32_t *pos, uint32_t n_tok, float *o_lat, float *scratch,
-                  bool read, void *stream);
-/* a decode's expert tables on the GPU (hy4_route below) */
-#define HY4_ROUTE_MAX_EXPERTS 1024
-#define HY4_ROUTE_MAX_K 64
-bool hy4_route(const int32_t *idx, const float *wtok, uint32_t n_tok, uint32_t k, uint32_t n_exp, uint32_t chunk,
-               const void *const *tab, int32_t *gidx, int32_t *sidx, float *wsel, int32_t *cnt, int32_t *xrow,
-               const void **wptr, int32_t *fault, void *stream);
 bool hy4_mla_qrope(const float *q, uint32_t heads, uint32_t qk, uint32_t row, uint32_t rope_dim, const float *freqs,
                    const int32_t *pos, uint32_t n_tok, float *qa, void *stream);
 bool hy4_gate_mul(float *out, const float *gate, uint64_t n, void *stream);
@@ -114,29 +103,8 @@ hy4_mla_q
   token's own), its table in `table` (hy4_mla_table_bytes, the device's).
 
 hy4_mla_attn
-  each head's attention over its token's keys: the cache rows at positions max(0, pos[t] - window + 1) .. pos[t]
-  (window 0: from 0) - or, sel given (a sparse layer past its dense length), the tokens of the n_sel[t] groups at
-  sel[t * sel_cap ..] (ascending; each `pool` positions, the last the token's own, its tokens up to pos[t]): scores
-  qa_h . row * scale; the head's sink a logit with no value (softmax over the scores and the sink); o_lat
-  [n_tok][heads][latent] = sum over the keys of p row[:latent], in the keys' order - every group selected, the dense
-  path's bits. a key's row is its position's, or position % slots (slots given: a ring at least the window long);
-  q8: rows hy4_mla_kv's q8 (their latent decoded d times a code, exact in F32, before any of the math).
-  flash decoding: a block a group of 8 heads (MQA's rows read once for them) over a split of 64 of its token's keys, an
-  online softmax in the keys' order; the splits merged in order with the sink - the splits a token's own: its bits
-  whatever the step. scratch: hy4_mla_attn_scratch(heads) floats (the partials of 16 tokens at a time). at most
-  HY4_MLA_MAX_KEYS keys, latent at most HY4_MLA_MAX_LATENT.
-  read (a prompt's step): on the matrix cores where the shape fits (16 heads a group, a row at most 576) - f16 Q, K, V
-  and P, F32 sums (mla_mm_kernel: a token's output its own keys' alone, its bits whatever the step; not the F32 path's
-  bits); env HY4_MLA_F32 set: the F32 path's for every step
-
-hy4_route
-  a decode's routed picks (idx/wtok: n_tok x k, each token's k experts distinct, < n_exp) as the expert matvecs' tables,
-  no host between: the picks by expert ascending, an expert's tokens ascending - row r's token gidx[r] and weight
-  wsel[r], pick m's row sidx[m]; the entries (each expert's rows in chunks of `chunk`, experts ascending) cnt, xrow (its
-  first row) and wptr (3 tables, n_tok x k apart: tab[i n_exp + e] - the membrane's addresses of expert e's gate, up,
-  down, a device table [3][n_exp]), then count 0 to n_tok x k (mv_group_tok's skipped entries: a launch to that bound).
-  a pick out of range or twice in a token: *fault = 1 (the tables then not used). false, nothing queued, for k 0 or past
-  HY4_ROUTE_MAX_K, n_exp past HY4_ROUTE_MAX_EXPERTS, chunk 0, n_tok 0.
+  moved into the attention core (osmos/gpu/attn_core.h's MLA rows: kernels/attn_core_mla.h, its bits) - a desc of
+  kv_heads 1, dk the latent and the rope part, dv the latent, ATTN_SINK_HEAD, unit 32, apart; groups its ratio (pool)
 
 hy4_mla_qrope / hy4_gate_mul
   hy4_mla_q's and hy4_mla_out's ends alone (a read's absorptions on the matrix cores: mm_group a head): each head's
@@ -178,7 +146,7 @@ hy4_ix_select
   511th group may swap; env HY4_IX_F32 set: the F32 loop's)
 
 hy4_dfly_sel
-  a DFly2 draft block's rows' groups (hy4_mla_attn's sel / n_sel, cap apart): row j (position anchor + j, j < rows)
+  a DFly2 draft block's rows' groups (the MLA core's sel / npick, stride cap apart): row j (position anchor + j, j < rows)
   the snapshot's snap_n groups (a target layer's picks for position anchor - 1, ascending, the last its own group),
   then every group after that one through (anchor + j) / pool - the target's keys for the last accepted token and the
   block's own rows up to the row's. false, nothing queued, for anchor < 1, rows 0 or past HY4_DFLY_MAX_ROWS, or a cap

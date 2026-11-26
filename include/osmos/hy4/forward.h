@@ -38,6 +38,8 @@ typedef struct Hy4Options
                                  (osmos/mem/ledger.h: borrowed - the engine's, outliving the forward); NULL nothing */
   const char *dfly; /* DFly2, the drafter (below), made with the forward: its safetensors' path, or NULL */
   bool dfly_q8;     /* its matrices and the drafts' head Q8_0 (ggml's rounding of the BF16): half the reads */
+  bool no_int8;     /* the routed experts' int8 decode off (OsmosOptions' no_int8: a pack's "int8": false) - their f16 / F32 path at
+                            every step */
 } Hy4Options;
 
 /* the weights to the GPU (every tensor but the Engram table, read from `fds`' files as the step needs its rows: the

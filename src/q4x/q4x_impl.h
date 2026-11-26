@@ -6,8 +6,10 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/npu_pack.h"
 #include "osmos/gpu/ops.h"
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/npu/npu.h"
 #include "osmos/q4x/dflash.h"
 #include "osmos/q4x/forward.h"
@@ -30,6 +32,12 @@ typedef struct Q4xBuf
   void *x16, *xe16;                                /* mm's f16 activations: a matrix's, the experts' tiles */
   void *x16b; /* a small step's mixer's down's silu as f16 for its up (mm_run_silu: x16 still read), MM_SILU_MAX_TOKENS rows */
   int32_t *overflow;                               /* an activation past f16's: the step refused */
+  /* a decode's int8 experts (q8_experts; resident experts, q8_enabled): route_tok's tables over the step's picks, x
+     and the activations rounded (MV_MAX_TOKENS tokens at most) */
+  int32_t *q_gidx, *q_sidx, *q_cnt, *q_xrow;
+  float *q_wsel, *q_xd, *q_hd;
+  const void **q_wptr;
+  int8_t *q_x, *q_h;
   float *emb, *key, *val, *kn, *qn, *pg, *gated, *nrm, *conv;         /* the n-gram layer's */
   int32_t *ple_rows, *tok;                                            /* device: its rows, the step's tokens */
   uint8_t *ple_sbuf; /* device: a streamed n-gram table's step rows, a token's ple_heads (stream_ngram) */
@@ -84,6 +92,7 @@ struct Q4xForward
   uint32_t max_ctx, max_tokens;
   Q4xRope rope; /* every rotation's: plain to the native context, YaRN past it (q4x_rope) */
   Q4xBuf b;
+  AttnCore *attn; /* the full layers' attention (attn_core: its scratch b.fa, borrowed) */
   Q4xMtpBuf m;
   q4x_probe_fn probe;
   void *probe_arg;
@@ -102,7 +111,9 @@ struct Q4xForward
      to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
   int32_t tap_layer[Q4X_MAX_TAPS]; /* Q4xOptions' tap_layers, ascending; n_taps of them */
   uint32_t n_taps;
-  bool stream_ngram, ple_pending;
+  bool stream_ngram;
+  bool no_int8; /* the experts' int8 decode off (Q4xOptions') */
+  bool reading; /* the steps a prompt's read (q4x_forward_reading): the matrix cores at any size, never int8 */
   int ple_fd;
   /* the experts on a membrane (q4x_forward_whole): its memory, the model's files opened O_DIRECT, the device table
      [layer][gate, up, down][expert] of their addresses; mem NULL: the experts their tensors', uploaded whole */
@@ -120,6 +131,7 @@ struct Q4xForward
   Rowread *ple_read;
   uint8_t *ple_stage;
   uint64_t *ple_off;
+  RowStream ple_rs; /* the step's rows read under the GPU's work (osmos/mem/rowstream.h): ple_read, ple_off, ple_stage */
   uint32_t ple_n;
   hipEvent_t ple_copied;
   uint32_t side_spin; /* q4x_forward_side_spin: a delay before the shared expert, on s2 (0: none) */

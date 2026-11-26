@@ -167,15 +167,6 @@ bool q4x_mix(Q4xForward *f, const GgufTensor *norm, const GgufTensor *down, cons
          (!inject || inject_of(f, inject, n, hc, hd)) && down_up(f, down, up, n, hc, D, r, ready);
 }
 
-/* a step's side copy at a run's rows (t0 its first) */
-static const Q4xX16 *side_at(const Q4xX16 *all, uint32_t t0, Q4xX16 *s)
-{
-  if (!all)
-    return NULL;
-  *s = *all, s->row0 = t0;
-  return s;
-}
-
 bool q4x_deltanet(Q4xForward *f, const Q4xRun *r, uint32_t runs, int l, uint32_t n)
 {
   const Q4xGeometry *g = &f->w->geo;
@@ -274,7 +265,7 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t
   Q4xBuf *b = &f->b;
   const uint32_t D = (uint32_t)g->n_embd, heads = (uint32_t)g->n_heads, kvh = (uint32_t)g->n_kv_heads;
   const uint32_t hd = (uint32_t)g->head_dim, q = heads * hd, kv = kvh * hd;
-  Q4xX16 sd, rs;
+  Q4xX16 sd;
   const Q4xX16 *all = q4x_side(f, n, q, &sd);
   const bool ready = n <= MM_MAX_TOKENS; /* b.x16 the mixer's mixed (q4x_mix), then the attention's output */
   const uint32_t ratio = (uint32_t)g->ix_ratio, blocks = (uint32_t)g->ix_top_k / ratio;
@@ -295,10 +286,17 @@ bool q4x_attention(Q4xForward *f, const Q4xLayer *L, const Q4xCache *c, uint32_t
   for (uint32_t i = 0; ok && i < runs; i++) /* each run over its own cache and picks, its output at its rows */
   {
     const uint64_t t0 = c[i].t0;
-    const Q4xPick pick = {b->sel + t0 * blocks, b->npick + t0, ratio, blocks};
-    ok = q4x_attn(b->q + t0 * q, c[i].kc, c[i].vc, c[i].n, heads, kvh, hd, (uint32_t)c[i].pos, b->gt + t0 * q, &pick,
-                  NULL,
-                  b->fa, b->ao + t0 * q, side_at(all, c[i].t0, &rs), NULL);
+    const AttnStep st = {.q = b->q + t0 * q,
+                         .n_tok = c[i].n,
+                         .pos0 = (uint32_t)c[i].pos,
+                         .keys = {.k = c[i].kc, .v = c[i].vc, .n_keys = (uint32_t)c[i].pos + c[i].n,
+                                  .sel = b->sel + t0 * blocks, .npick = b->npick + t0, .stride = blocks},
+                         .gate = b->gt + t0 * q,
+                         .out = b->ao + t0 * q,
+                         .x16 = all ? all->x16 : NULL,
+                         .overflow = all ? all->overflow : NULL,
+                         .x16_row0 = (uint32_t)t0};
+    ok = attn_core_run(f->attn, &st, NULL);
   }
   return ok && q4x_mat(f, L->out, D, q, b->ao, q, n, b->out, D, ready);
 }

@@ -73,11 +73,11 @@ static bool tail_make(OsmosLedger *l, Ink2Tail *t, uint32_t row, uint32_t esize,
 }
 
 /* what a sequence's next token reads of each kind: the conv's taps - 1, a window's window - 1 and the keys before
-   them back to a tile's start (INK2_FA_TILE - 1 at most; fewer before them all) */
+   them back to a tile's start (ATTN_TILE - 1 at most; fewer before them all) */
 static uint32_t conv_need(const Ink2Forward *f) { return (uint32_t)f->w->geo.conv - 1; }
 static uint32_t win_need(const Ink2Forward *f, int32_t pos)
 {
-  const uint32_t w = (uint32_t)f->w->geo.window - 1 + INK2_FA_TILE - 1;
+  const uint32_t w = (uint32_t)f->w->geo.window - 1 + ATTN_TILE - 1;
   return (uint32_t)pos < w ? (uint32_t)pos : w;
 }
 static uint32_t conv_row(const Ink2Forward *f, int c)
@@ -96,8 +96,8 @@ Ink2Seq *ink2_seq_create(Ink2Forward *f, char err[OSMOS_ERR])
   s->f = f;
   const Ink2Geometry *g = &f->w->geo;
   const uint32_t kd = (uint32_t)(g->n_kv_heads * g->head_dim), kv = (uint32_t)g->n_kv_heads, T = f->max_tokens;
-  /* a window keeps window - 1 + INK2_FA_TILE - 1 (its keys handed in from a tile's start) and a rollback's */
-  const uint32_t ck = conv_need(f) + INK2_MAX_BACK, wk = (uint32_t)g->window - 1 + INK2_FA_TILE - 1 + INK2_MAX_BACK;
+  /* a window keeps window - 1 + ATTN_TILE - 1 (its keys handed in from a tile's start) and a rollback's */
+  const uint32_t ck = conv_need(f) + INK2_MAX_BACK, wk = (uint32_t)g->window - 1 + ATTN_TILE - 1 + INK2_MAX_BACK;
   bool ok = true;
   for (int l = 0; ok && l < g->n_slots; l++)
   {

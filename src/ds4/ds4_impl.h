@@ -18,11 +18,13 @@
 #include "osmos/mem/hip_slots.h"
 #include "osmos/mem/resident.h"
 #include "osmos/mem/rowread.h"
+#include "osmos/mem/rowstream.h"
 #include "osmos/cpu/lane.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/npu_pack.h"
+#include "osmos/gpu/attn_core.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/model/engram.h"
 #include "osmos/npu/npu.h"
@@ -90,7 +92,7 @@ typedef struct Scratch
   float *ckv_f;                  /* a prompt step's compressed rows unpacked once for its attention (hip_ds4_attn.c), up
                                     to ckv_f_rows of them */
   float *ring_f;                 /* and the window's ring (the forward's slots) */
-  float *att;                   /* the attention's scores, then their denominators (ops_sparse_attn) */
+  float *att;                   /* the attention's scores, then their denominators (the latent core borrows it) */
   float *erow_f, *ekv;
   uint8_t *erow;
   int32_t *ids, *pos, *rpos, *ridx, *sel, *n_sel, *overflow, *oa_cnt;
@@ -148,13 +150,23 @@ struct Forward
   Rowread *eg_read; /* Engram's rows, read many at once */
   uint64_t *eg_off; /* a step's rows' places in the Engram file: [sub-batch][Engram layer][token][col] */
   uint64_t eg_at[FWD_MAX_SUBS][WEIGHTS_MAX_LAYERS]; /* where each sub-batch's nth Engram layer's rows start (rows) */
-  bool eg_pending;                                   /* the step's rows begun, not yet waited for */
+  RowStream eg_rs;                                   /* the step's rows read under the GPU's work (osmos/mem/rowstream.h) */
   Engram *hash;
   float *eg_gate[WEIGHTS_MAX_LAYERS]; /* each Engram layer's gate, F32 q k on the device (ops_engram_gate) */
   uint16_t *guess_router[WEIGHTS_MAX_LAYERS]; /* an F32 router's BF16 copy for the guess alone (hip_ds4_guess.c), or NULL */
   bool no_guess;                              /* ForwardOptions': nothing guessed, no router copy made */
   float *freqs_win, *freqs_comp;
   Scratch b;
+  /* DS4_PROFILE=2: a step's parts each timed to a device sync (the lane's and the GPU's work both), summed by the
+     step's kind (0: a small step - a decode or a verify; 1: a prompt's) - printed at destroy */
+  struct
+  {
+    bool on;
+    int kind;
+    uint64_t steps[2], tokens[2];
+    double s[2][12], step_s[2];
+  } pf;
+  AttnCore *latent; /* the attention (the core's latent: the window's FP8 ring, the selected FP4 rows) */
   OverflowFlag ovf; /* b.overflow's reset (osmos/gpu/overflow.h): owed when one failed */
   float *xf0, *moe0, *mid0, *f_post0, *f_comb0; /* Scratch's xf .. f_comb whole (the sub-batches' views of them) */
   /* the experts' routing, a layer's every sub-batch at once: pinned, the picks [token][slot] and the tables
@@ -191,6 +203,7 @@ struct Forward
   bool lane;
   bool reading; /* forward_reading: a prompt's read - its steps the large steps' math whatever their size */
   int lane_threads;
+  bool no_int8; /* the experts' int8 decode off (ForwardOptions'; the lane's CPU half its own: lane_q8_types) */
   uint8_t *lane_up;
   void *lane_dev; /* lane_up's device address (mapped: the kernels read the tables where the host wrote them) */
   float *lane_x, *lane_w; /* a small step's rows' FFN inputs and weights, gathered by expert */
@@ -326,6 +339,9 @@ bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd
 void fwd_taps_plan(Forward *f, const bool *at);
 /* hip_ds4_lane.c, hip_ds4_npu.c, hip_ds4_draft.c: what forward_create_with makes last (ForwardOptions' lane, npu, drafter) */
 bool fwd_lane_make(Forward *f, int cpu_threads, const int *cpu_cores, char *err);
+/* whether layer l's routed experts take the int8 path: with the lane's CPU half, the types both sides decode
+   (lane_q8_types: the CPU's bits the GPU's); without it, every type the GPU's lane takes (q8_takes), unless OSMOS_Q8 0 */
+bool fwd_lane_q8(const Forward *f, int l);
 bool fwd_npu_make(Forward *f, const char *dir, float share, char *err);
 /* the drafter's plan, read before the forward's GPU memory (its index, its target layers checked: at[]), and the
    drafter made from it at the forward's end (ix its from then on); destroyed with the forward */
@@ -390,4 +406,22 @@ bool fwd_guess_routers(Forward *f, const Weights *w, char *err);
 bool fwd_oa_tables(Forward *f, char *err);
 /* hip_ds4_make.c's, for the experts' pool (hip_ds4_resident.c): the step buffers' sub-views, made again */
 bool fwd_subs(Forward *f);
+/* DS4_PROFILE: the part just queued, to a device sync, into its sum (its kind's) */
+#include <time.h>
+static inline double fwd_now(void)
+{
+  struct timespec t;
+  clock_gettime(CLOCK_MONOTONIC, &t);
+  return (double)t.tv_sec + 1e-9 * (double)t.tv_nsec;
+}
+static inline bool fwd_part(Forward *f, int k, double *t)
+{
+  if (!f->pf.on)
+    return true;
+  const bool ok = hipDeviceSynchronize() == hipSuccess;
+  const double now = fwd_now();
+  f->pf.s[f->pf.kind][k] += now - *t, *t = now;
+  return ok;
+}
+
 #endif

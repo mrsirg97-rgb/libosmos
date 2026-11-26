@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <vector>
 
+#include "attn_core_call.h"
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
 }
@@ -27,7 +28,7 @@ int main(int argc, char** argv) {
   for (const Shape& s : shapes) {
     const uint32_t ctx = s.slots ? s.slots : keys;
     float *qa = fill((size_t) s.heads * row), *cache = fill((size_t) ctx * row), *sinks = fill(s.heads);
-    float *o = fill((size_t) s.heads * lat), *scratch = fill(hy4_mla_attn_scratch(s.heads));
+    float *o = fill((size_t) s.heads * lat), *scratch = fill(1);
     int32_t* pos = nullptr;
     const int32_t p = (int32_t) (s.slots ? 5000 : keys - 1);
     if (hipMalloc(&pos, 4) != hipSuccess || hipMemcpy(pos, &p, 4, hipMemcpyHostToDevice) != hipSuccess) return 1;
@@ -35,11 +36,11 @@ int main(int argc, char** argv) {
     if (hipEventCreate(&a) != hipSuccess || hipEventCreate(&b) != hipSuccess) return 1;
     bool ok = true;
     for (uint32_t i = 0; i < 10 && ok; i++)
-      ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
+      ok = core_hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
                         scratch, false, nullptr);
     if (hipEventRecord(a, nullptr) != hipSuccess) return 1;
     for (uint32_t i = 0; i < iters && ok; i++)
-      ok = hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
+      ok = core_hy4_mla_attn(qa, cache, s.slots, false, sinks, s.heads, lat, rope, s.window, nullptr, nullptr, 0, 0, 0.05f, pos, 1, o,
                         scratch, false, nullptr);
     float ms = 0;
     if (!ok || hipEventRecord(b, nullptr) != hipSuccess || hipEventSynchronize(b) != hipSuccess ||

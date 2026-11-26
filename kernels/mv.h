@@ -41,9 +41,10 @@ __device__ inline void step(const uint8_t* const* base, const uint32_t* rid, uin
     }
 }
 
-// WPB: a block's waves (each its own R rows)
+// WPB: a block's waves (each its own R rows). always inlined: a second kernel calling one instance (group_tok_exact_kernel)
+// otherwise moved its registers - Q3_K's one-token group kernel 122 -> 152 VGPRs, 123 -> 186 us
 template <quant::Type T, int NT, int R, int U, int WPB = kWavesPerBlock>
-__device__ inline void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
+__device__ inline __attribute__((always_inline)) void rows_of(const uint8_t* __restrict__ w, uint32_t rows, uint32_t cols, const float* __restrict__ x,
                                uint32_t xs, float* __restrict__ y, uint32_t ys, uint32_t live = NT) {
   const uint32_t row0 = (blockIdx.x * WPB + threadIdx.x / kWave) * R;
   const int lane = threadIdx.x % kWave;
@@ -226,6 +227,23 @@ __global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_kernel(const 
   if (!cnt[m]) return;  // an entry past a table's live ones (q4x_expert_groups' bound)
   const uint64_t r0 = (uint64_t) xrow[m];
   rows_of<T, NT, R, U>(w[m], rows, cols, x + r0 * xs, xs, y + r0 * ys, ys, (uint32_t) cnt[m]);
+}
+
+// group_tok_kernel's matrices of exactly NT tokens alone (the rest another launch's: mv_group_tok splits a table by
+// count, so a matrix of one token does not pay for the table's most) - a kernel of its own, group_tok_kernel's code
+// untouched (its registers: a template parameter added there moved Q3_K's one-token kernel 122 -> 152 VGPRs, 123 ->
+// 186 us)
+template <quant::Type T, int NT, int R, int U>
+__global__ __launch_bounds__(kWave* kWavesPerBlock) void group_tok_exact_kernel(const uint8_t* const* __restrict__ w,
+                                                                                 const int32_t* __restrict__ cnt,
+                                                                                 const int32_t* __restrict__ xrow,
+                                                                                 uint32_t rows, uint32_t cols,
+                                                                                 const float* __restrict__ x, uint32_t xs,
+                                                                                 float* __restrict__ y, uint32_t ys) {
+  const uint32_t m = blockIdx.y;
+  if (cnt[m] != NT) return;
+  const uint64_t r0 = (uint64_t) xrow[m];
+  rows_of<T, NT, R, U>(w[m], rows, cols, x + r0 * xs, xs, y + r0 * ys, ys, (uint32_t) NT);
 }
 
 template <quant::Type T, int NT, int R, int U, int WPB = kWavesPerBlock>

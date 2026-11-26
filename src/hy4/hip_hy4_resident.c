@@ -10,6 +10,7 @@
 #include <hip/hip_runtime_api.h>
 #include "osmos/model/tensor.h"
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/route.h"
 #include "osmos/gpu/mm.h"
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
@@ -64,7 +65,7 @@ static bool copy_host(void *dst, const void *src, uint64_t bytes, void *ctx)
 
 /* the routed experts behind the membrane: the MoE layers' units (expert_units), the warm set an expert of every layer
    at a time, sized to the budget (experts_plan: 0 every one), read in (experts_create); every one resident: their
-   addresses' device table for the decode's GPU tables (hy4_route) */
+   addresses' device table for the decode's GPU tables (route_tok) */
 bool hy4_experts(Hy4Forward *f, uint64_t budget, char *err)
 {
   const Hy4Weights *w = f->w;
@@ -243,8 +244,10 @@ bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err)
   f->eg_fd = fds[t->file];
   f->eg_row_bytes = t->bytes / t->dims[1];
   const uint64_t rows = (uint64_t)f->max_tokens * g->n_engram * cols;
-  return ((f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
-          hy4_pinned(&f->bufs, &f->eg_stage, rows * f->eg_row_bytes) &&
-          hy4_alloc(&f->bufs, &f->eg_raw, rows * f->eg_row_bytes) && hy4_alloc(&f->bufs, &f->eg_rows, rows * g->engram_dim * F)) ||
-         osmos_fail(err, "out of memory (the Engram rows' buffers)");
+  const bool ok = (f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
+                  hy4_pinned(&f->bufs, &f->eg_stage, rows * f->eg_row_bytes) &&
+                  hy4_alloc(&f->bufs, &f->eg_raw, rows * f->eg_row_bytes) &&
+                  hy4_alloc(&f->bufs, &f->eg_rows, rows * g->engram_dim * F);
+  f->eg_rs = (RowStream){f->eg_read, f->eg_fd, f->eg_off, f->eg_stage, f->eg_row_bytes, 0, 0, false};
+  return ok || osmos_fail(err, "out of memory (the Engram rows' buffers)");
 }

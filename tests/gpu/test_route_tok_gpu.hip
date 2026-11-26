@@ -1,4 +1,4 @@
-// hy4_route (osmos/gpu/hy4_ops.h): a decode's expert tables built on the GPU, against the host's grouping (the step's
+// route_tok (osmos/gpu/route.h): a decode's expert tables built on the GPU, against the host's grouping (the step's
 // until now: experts ascending, an expert's tokens ascending, its rows in chunks): random picks (each token's k
 // distinct) at Hy4-flash's shape (512 experts, 16 picks) and others, every table bit for bit, the padding count 0 to
 // n_tok x k; the experts' matrices from a table of their addresses (the membrane's); a pick out of range or twice in
@@ -16,6 +16,7 @@
 
 extern "C" {
 #include "osmos/gpu/hy4_ops.h"
+#include "osmos/gpu/route.h"
 }
 
 #define CHECK(x)                                                           \
@@ -100,7 +101,7 @@ static void check(std::mt19937& rng, uint32_t n, uint32_t k, uint32_t E, uint32_
     for (uint32_t e = 0; e < E; e++) tab_h[(size_t) q * E + e] = (const void*) (base[q] + (uint64_t) e * bytes[q]);
   const void** tab = dev<const void*>(3 * (size_t) E);
   CHECK(hipMemcpy(tab, tab_h.data(), tab_h.size() * sizeof(void*), hipMemcpyHostToDevice) == hipSuccess);
-  CHECK(hy4_route(d_idx, d_w, n, k, E, chunk, tab, gidx, sidx, wsel, cnt, xrow, wptr, fault, nullptr));
+  CHECK(route_tok(d_idx, d_w, n, k, E, chunk, tab, gidx, sidx, wsel, cnt, xrow, wptr, fault, nullptr));
   CHECK(hipDeviceSynchronize() == hipSuccess);
   const int32_t f = down(fault, 1)[0];
   if (fault_kind) {
@@ -127,16 +128,16 @@ static void check(std::mt19937& rng, uint32_t n, uint32_t k, uint32_t E, uint32_
 int main() {
   int devs = 0;
   if (hipGetDeviceCount(&devs) != hipSuccess || devs == 0) {
-    std::printf("[test_hy4_route_gpu] skipped: no GPU\n");
+    std::printf("[test_route_tok_gpu] skipped: no GPU\n");
     return 77;
   }
   const void** t = nullptr;
   int32_t* p = nullptr;
-  CHECK(!hy4_route(p, nullptr, 1, 0, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, HY4_ROUTE_MAX_K + 1, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, 16, HY4_ROUTE_MAX_EXPERTS + 1, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 1, 16, 512, 0, t, p, p, nullptr, p, p, nullptr, p, nullptr));
-  CHECK(!hy4_route(p, nullptr, 0, 16, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 1, 0, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 1, ROUTE_MAX_K + 1, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 1, 16, ROUTE_MAX_EXPERTS + 1, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 1, 16, 512, 0, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 0, 16, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
   std::mt19937 rng(20261118);
   uint32_t cases = 0;
   for (uint32_t n : {1u, 2u, 3u, 9u, 64u, 65u, 300u, 2600u})
@@ -145,7 +146,7 @@ int main() {
         check(rng, n, k, E, chunk, 0), cases++;
   for (int kind : {1, 2})
     for (uint32_t n : {1u, 7u, 300u}) check(rng, n, 16, 512, 4, kind), cases++;
-  std::printf("[test_hy4_route_gpu] %u cases: the host's tables bit for bit; a bad pick faults\n", cases);
-  std::printf("[test_hy4_route_gpu] ok\n");
+  std::printf("[test_route_tok_gpu] %u cases: the host's tables bit for bit; a bad pick faults\n", cases);
+  std::printf("[test_route_tok_gpu] ok\n");
   return 0;
 }
