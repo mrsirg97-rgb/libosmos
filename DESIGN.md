@@ -7413,3 +7413,21 @@ prose, two passes reversed: uncapped 45.3 / 41.6 tok/s, 5 44.5 / 41.8, 4 44.3 / 
 0.2). Its experts' verify near-linear in tokens (180 / 165 / 155 us a token at 1 / 4 / 7), yet a round's own costs -
 its drafter's pass, attention, the dense weights - are its deep drafts' worth. int8 at 4: 42.2 / 42.8 (its answers'
 own acceptance: code harder, prose easier). Mini keeps its block, f16; the cap not shipped.
+
+### 0.18.0: Small's verify trimmed - neither kept (2026-11-25, low-power)
+
+osmos-evo-inkling drafted barely past plain (16.4 / 15.9 tok/s, performance; 0.17.0: 14.5 / 12.6): its step ~80% the
+routed experts, each token's its own (a 1-token step 65 ms, then +21 / +29 / +27 ms a token; ~63% of 541 drafts
+accepted, 2.4 tokens a round). Its drafts capped (2 / 3 / 4) or their confidence product's floor raised (0.3 / 0.5 /
+0.7) against today's (0.1, its drafter's block), two passes reversed: today 16.3 / 15.7, the best of the rest floor
+0.3's 16.3 / 15.6 - every cap slower (2: 14.9 / 15.6). The same answers throughout. Neither shipped.
+
+### 0.18.0: Inkling's verify, f16 against int8 - the drafter not the limit (2026-11-25, low-power, profiled)
+
+A step's cost by its tokens (ink2's profile): Mini 36.8 ms at 1, +5-6 ms a token after (67 at 8: ~15% of a step a
+token - its shared attention and BF16 dense the step's); Small 75 at 1, +22-30 a token (~35-40%: its routed experts
+~80% of a step, each token's its own, the SSD's cold ones among them). Their drafters alike: ~61% / ~63% of drafts
+accepted, a draft 22% / 17% of a step. int8 against f16 on Small: faster at every size (1: 75 / 90 ms, 4: 157 / 202,
+8: 287 / 309) - drafted 17.1 / 16.7 against 13.8 / 13.9 tok/s. Small's drafting is its experts' (0.18.1: the
+membrane's resident set, its reads under the compute). The matvec's exact mode as one launch, each matrix its own
+count: Mini's layer 1,107 -> 1,090 us at 7 tokens, 681 -> 699 at 4 (f16 1,091 / 663) - not kept.
