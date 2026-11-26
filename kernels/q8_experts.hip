@@ -33,20 +33,20 @@ extern "C" bool q8_experts(const Q8Experts* e, void* stream) {
     ok = ok && each([&](uint32_t a, uint32_t n, uint32_t c, bool exact) {
            const q8::GateUp g = {e->wg + a, e->wu + a, e->cnt + a, e->xrow + a, e->xin, n, e->ff, e->d,
                                  e->xq,     e->xqd,    act,         args,         e->h,   e->ff};
-           return q8::gate_up(e->gate_type, g, c, exact, s);
+           return q8::gate_up(e->gate_type, g, c, exact, e->by_count, s);
          });
   else
     ok = ok &&
          each([&](uint32_t a, uint32_t n, uint32_t c, bool exact) {
            return q8::group(e->gate_type, e->wg + a, e->cnt + a, e->xrow + a, e->xin, n, c, e->ff, e->d, e->xq,
-                            e->xqd, e->ga, e->ff, exact, s) &&
+                            e->xqd, e->ga, e->ff, exact, e->by_count, s) &&
                   q8::group(e->up_type, e->wu + a, e->cnt + a, e->xrow + a, e->xin, n, c, e->ff, e->d, e->xq,
-                            e->xqd, e->up, e->ff, exact, s);
+                            e->xqd, e->up, e->ff, exact, e->by_count, s);
          }) &&
          ops_swiglu_lane(e->ga, e->up, e->ff, e->lim, e->scale, e->h_rows, e->h, stream);
   ok = ok && q8_round(e->h, e->h_rows, e->ff, e->ff, e->hq, e->hqd, stream);
   return ok && each([&](uint32_t a, uint32_t n, uint32_t c, bool exact) {
            return q8::group(e->down_type, e->wd + a, e->cnt + a, e->xrow + a, NULL, n, c, e->d, e->ff, e->hq, e->hqd,
-                            e->y, e->d, exact, s);
+                            e->y, e->d, exact, e->by_count, s);
          });
 }

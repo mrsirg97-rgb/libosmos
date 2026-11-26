@@ -179,7 +179,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
                                         b->q_cnt, b->q_xrow, b->q_wptr, b->overflow, NULL)
                             : host_q8(f, (int)(L - f->w->layer), e, &entries);
     Q8Experts q8n = q8;
-    q8n.n = entries;
+    q8n.n = entries, q8n.by_count = tab; /* (route_tok's tables by count; the host's in its runs' order) */
     return tables && q8_experts(&q8n, NULL) &&
            (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
            q4x_moe_sum(b->y, b->q_sidx, b->w, n, k, D, b->sh, b->sl, b->out, NULL);

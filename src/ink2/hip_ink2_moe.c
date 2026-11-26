@@ -143,7 +143,7 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
     const uint32_t chunk = n;
     const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = t[0]->type, .up_type = t[1]->type, .down_type = t[2]->type,
                           .wg = f->q_wptr, .wu = f->q_wptr + P, .wd = f->q_wptr + 2 * (uint64_t)P, .cnt = f->q_cnt,
-                          .xrow = f->q_xrow, .xin = f->q_gidx, .n = P, .max_cnt = chunk, .d = C, .ff = F, .x = f->xn,
+                          .xrow = f->q_xrow, .xin = f->q_gidx, .n = P, .max_cnt = chunk, .by_count = true, .d = C, .ff = F, .x = f->xn,
                           .x_rows = n, .xq = f->q_x, .xqd = f->q_xd, .sg = f->t_sg, .su = f->t_su,
                           .gcap = g->gate_softcap, .ucap = g->up_softcap, .h = f->eg, .h_rows = P, .hq = f->q_h,
                           .hqd = f->q_hd, .y = f->ed};

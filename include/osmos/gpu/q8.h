@@ -26,6 +26,8 @@ typedef struct Q8Experts
   const int32_t *xin;                            /* an entry row's input row (NULL: its own) */
   uint32_t n, max_cnt;                           /* the entries, the most rows an entry */
   const int32_t *h_cnt; /* the counts on the host in runs of one count (a launch a run), or NULL: exact */
+  bool by_count;        /* exact's table by count, the most first, its counts' sum at most n (route_tok's): a launch a
+                           range of counts, each over the entries that can hold it (0.18.1) */
   uint32_t d, ff;       /* the input's width (down's rows), an expert's width (gate / up's rows) */
   const float *x;       /* x_rows rows of d floats rounded first into xq / xqd, or NULL: xq / xqd already */
   uint32_t x_rows;
@@ -93,8 +95,9 @@ q8_experts
   activation (one launch for both, q8_gate_up's, when they are one type; else each, then ops_swiglu_lane over h_rows
   rows), h_rows rows of h rounded, then down into y. each role over the table either by h_cnt's runs (a launch a run of
   one count, at it: the caller's table in runs) or exact - a launch a count 1 .. max_cnt, each its entries of exactly
-  that count, a table in any order with counts of 0 (nothing read for them). a token's sums its own either way: the
-  same bits. a decode's or a verify's experts (max_cnt <= MV_MAX_TOKENS): a family's prompt its own path (its
+  that count, a table in any order with counts of 0 (nothing read for them); with by_count (route_tok's tables: by
+  count, the most first) a launch each of the counts 1, 2, 3 .. 4 and 5 .. max_cnt at that range's most, over the first
+  n / (its least) entries alone. a token's sums its own any of these ways: the same bits. a decode's or a verify's experts (max_cnt <= MV_MAX_TOKENS): a family's prompt its own path (its
   matrix cores, f16) - the two computed apart, as Hy4's and DeepSeek's. false, perhaps part queued, for max_cnt past
   MV_MAX_TOKENS, a type q8_takes refuses, an argument missing, or a launch refused.
 */

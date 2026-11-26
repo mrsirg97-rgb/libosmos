@@ -96,6 +96,8 @@ int main(int argc, char** argv) {
     std::fclose(rf);
   }
   const bool replay = std::getenv("REPLAY") != nullptr;
+  // BY_COUNT=0: exact's two launches over every entry (the tables' order unused), else route_tok's by count (the engine's)
+  const bool by_count = !std::getenv("BY_COUNT") || std::atoi(std::getenv("BY_COUNT"));
   CHECK(q8_takes(F->gate_up_type) && q8_takes(F->down_type));
   const uint32_t E = F->n_exp, K = F->k, D = F->d, FF = F->ff, NT = MV_MAX_TOKENS, NK = NT * K;
   // the pools: kCopies of gate, up, down; each copy's device table [3][E] of their addresses
@@ -152,7 +154,8 @@ int main(int argc, char** argv) {
       const int c = (it + 2) % kCopies;
       const Q8Experts e = {.act = Q8_ACT_LANE, .gate_type = F->gate_up_type, .up_type = F->gate_up_type,
                            .down_type = F->down_type, .wg = wptr, .wu = wptr + nk, .wd = wptr + 2 * nk, .cnt = cnt,
-                           .xrow = xrow, .xin = gidx, .n = nk, .max_cnt = chunk, .h_cnt = nullptr, .d = D, .ff = FF,
+                           .xrow = xrow, .xin = gidx, .n = nk, .max_cnt = chunk, .h_cnt = nullptr, .by_count = by_count,
+                           .d = D, .ff = FF,
                            .x = x, .x_rows = n, .xq = xq, .xqd = xqd, .scale = wsel, .win = nullptr, .lim = 7.0f,
                            .h = h, .h_rows = nk, .hq = hq, .hqd = hqd, .y = y};
       CHECK(hipStreamSynchronize(st) == hipSuccess);
