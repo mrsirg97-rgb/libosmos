@@ -8,10 +8,11 @@ own dialect, it does not loop, the same answer twice (--twice: a second replay),
 second replay with the drafter off), the GPU's memory where it started.
 
     python tools/serve/session_bench.py --fixture rig-resume-oneshot.json --config ~/Models/osmos/<pack>/osmos.json \\
-        [--api bin/osmos-api] [--max-tokens 192] [--steps 0] [--twice] [--plain] [--answers OUT.json] [--against BASE.json]
+        [--api bin/osmos-api] [--max-tokens 192] [--steps 0] [--twice] [--plain] [--sampled] [--answers OUT.json] [--against BASE.json]
 
-the fixture: tools/serve/rig_session.py's (a rig session, sanitized). each step greedy (temperature 0), at most
---max-tokens; a fresh slot folder a run (nothing from an earlier one). --answers: each run's answers saved (a
+the fixture: tools/serve/rig_session.py's (a rig session, sanitized). each step greedy (temperature 0), or with
+--sampled the pack's own sampling (a pack that samples by default - Mini, which loops greedy) under a fixed seed a
+step, at most --max-tokens; a fresh slot folder a run (nothing from an earlier one). --answers: each run's answers saved (a
 baseline); --against: the replay's answers each step the baseline's (a change meant to keep the bits - a kernel moved
 - needs only the drafted replay against a baseline that was drafted == plain; a change of bits, drafted and --plain,
 its answers the new baseline). exit 0: every step answered and parsed, and the same as asked.
@@ -30,6 +31,7 @@ import time
 import urllib.request
 
 GPU = "/sys/class/drm/card0/device"
+SEED = 180  # --sampled: step i draws under seed SEED + i
 
 
 def gpu_mib():
@@ -129,10 +131,13 @@ def last_call(messages):
     return None
 
 
-def replay(fx, api, max_tokens, steps):
+def replay(fx, api, max_tokens, steps, sampled):
     rows, held = [], 0  # held: the last step's prompt (what the engine keeps of it, at least)
     for i, at in enumerate(steps):
-        body = {"messages": fx["messages"][:at], "tools": fx["tools"], "max_tokens": max_tokens, "temperature": 0,
+        # greedy, or the pack's own sampling (its temperature / top_p from its settings) under a seed a step: draws
+        # keyed by position, so drafted == plain and a second replay hold as greedy's do
+        how = {"seed": SEED + i} if sampled else {"temperature": 0}
+        body = {"messages": fx["messages"][:at], "tools": fx["tools"], "max_tokens": max_tokens, **how,
                 "stream": True, "stream_options": {"include_usage": True}, **fx.get("request", {})}
         out, first, total, usage, t, _ = api.step(body)
         before = last_call(fx["messages"][:at])
@@ -182,6 +187,8 @@ def main():
     ap.add_argument("--steps", type=int, default=0, help="the first N steps (0: all)")
     ap.add_argument("--twice", action="store_true", help="a second replay: every step's answer the same")
     ap.add_argument("--plain", action="store_true", help="a second replay drafter off: every step's answer the same")
+    ap.add_argument("--sampled", action="store_true",
+                    help="the pack's own sampling (its settings' temperature / top_p), a fixed seed a step - not greedy")
     ap.add_argument("--log", default=None)
     ap.add_argument("--answers", help="each run's answers saved here (JSON: run -> step -> answer)")
     ap.add_argument("--against", help="a saved --answers: the replay's every step its replay's answer")
@@ -197,7 +204,8 @@ def main():
         if a.pack not in packs:
             sys.exit(f"session_bench: no pack {a.pack!r} in {a.packs}")
         settings = packs[a.pack]["settings"]
-    print(f"session_bench: {fx['source']} - {len(steps)} steps, {a.config}" + (f" with {a.pack}'s settings {settings}" if a.pack else ""))
+    print(f"session_bench: {fx['source']} - {len(steps)} steps, {a.config}" + (f" with {a.pack}'s settings {settings}" if a.pack else "")
+          + (f"; sampled (the pack's settings, seed {SEED} + step)" if a.sampled else "; greedy"))
     runs = [("replay", False)] + ([("again", False)] if a.twice else []) + ([("plain", True)] if a.plain else [])
     base = json.load(open(a.against)) if a.against else None
     def stop_on(sig, _):  # (a background job's SIGINT is ignored: SIGTERM too) - finally stops the server
@@ -211,7 +219,7 @@ def main():
         try:
             api.wait_ready(log)
             mem0, t0 = gpu_mib(), time.monotonic()
-            rows = replay(fx, api, a.max_tokens, steps)
+            rows = replay(fx, api, a.max_tokens, steps, a.sampled)
             mem1 = gpu_mib()
         finally:
             api.stop()
@@ -232,7 +240,7 @@ def main():
               + ("" if len(was) == len(steps) else f" - the baseline {len(was)} steps, this {len(steps)}"))
         ok &= not diff and len(was) == len(steps)
     if a.answers:
-        json.dump({"fixture": fx["source"], "config": a.config, "pack": a.pack,
+        json.dump({"fixture": fx["source"], "config": a.config, "pack": a.pack, "sampled": a.sampled,
                    **{k: [r["answer"] for r in v] for k, v in results.items()}}, open(a.answers, "w"), indent=0)
         print(f"  answers saved: {a.answers}")
     print("every step answered and parsed" + (" and as asked" if a.against or a.twice or a.plain else "")
