@@ -168,8 +168,9 @@ bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff)
 /* the down's parts packed from b.xe16's slots (the swiglu's, queued before) - before the GPU's down is queued */
 bool q4x_npu_pack_down(Q4xForward *f, uint32_t ff)
 {
-  return !*f->npu_nsel || /* none taken: nothing to pack */
-         (npu_pack_a_x16(f->b.xe16, ff, f->npu_slot, f->npu_want, true, npu_a(f->npu), NULL) &&
+  const uint32_t nsel = *f->npu_nsel;
+  return !nsel || /* none taken: nothing to pack */
+         (npu_pack_a_x16(f->b.xe16, ff, f->npu_slot, nsel, true, npu_a(f->npu), NULL) &&
           hipEventRecord(f->npu_packed, NULL) == hipSuccess);
 }
 

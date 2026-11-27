@@ -105,13 +105,12 @@ static uint64_t mla_scratch(const Hy4Forward *f, uint32_t heads)
 static bool head_tables(Hy4Forward *f)
 {
   const Hy4Geometry *g = &f->w->geo;
-  const uint32_t L = (uint32_t)g->n_layers, M = HY4_MAX_HEADS, nope = (uint32_t)g->nope_dim, rd = (uint32_t)g->rope_dim;
-  const uint32_t qk = nope + rd, lat = (uint32_t)g->kv_lora, vd = (uint32_t)g->v_dim, row = lat + rd;
-  const void **kb = calloc((size_t)L * M, sizeof *kb), **vb = calloc((size_t)L * M, sizeof *vb);
-  uint32_t xo[2][HY4_MAX_HEADS], yo[2][HY4_MAX_HEADS];
+  const uint32_t L = (uint32_t)g->n_layers, M = HY4_MAX_HEADS, lat = (uint32_t)g->kv_lora, vd = (uint32_t)g->v_dim;
+  const void **vb = calloc((size_t)L * M, sizeof *vb);
+  uint32_t xo[HY4_MAX_HEADS], yo[HY4_MAX_HEADS];
   for (uint32_t h = 0; h < M; h++)
-    xo[0][h] = h * qk * MM_TILE, yo[0][h] = h * row, xo[1][h] = h * lat * MM_TILE, yo[1][h] = h * vd;
-  bool ok = kb && vb;
+    xo[h] = h * lat * MM_TILE, yo[h] = h * vd;
+  bool ok = vb != NULL;
   for (uint32_t l = 0; ok && l < L; l++)
   {
     const Hy4Layer *Ly = &f->w->layer[l];
@@ -122,21 +121,16 @@ static bool head_tables(Hy4Forward *f)
       break;
     }
     for (uint32_t h = 0; h < (uint32_t)g->n_heads[l]; h++)
-      kb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->k_b) + (uint64_t)h * lat * nope / 32 * 34,
       vb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->v_b) + (uint64_t)h * vd * lat / 32 * 34;
   }
-  const uint64_t tb = (uint64_t)L * M * sizeof *kb;
-  ok = ok && hy4_alloc(&f->bufs, &f->kb_tab, tb) && hy4_alloc(&f->bufs, &f->vb_tab, tb) &&
-       hy4_alloc(&f->bufs, &f->kb_xo, M * 4) && hy4_alloc(&f->bufs, &f->kb_yo, M * 4) &&
+  const uint64_t tb = (uint64_t)L * M * sizeof *vb;
+  ok = ok && hy4_alloc(&f->bufs, &f->vb_tab, tb) &&
        hy4_alloc(&f->bufs, &f->vb_xo, M * 4) && hy4_alloc(&f->bufs, &f->vb_yo, M * 4) &&
        hy4_alloc(&f->bufs, &f->hcnt, M * 4) &&
-       hipMemcpy(f->kb_tab, kb, tb, hipMemcpyHostToDevice) == hipSuccess &&
        hipMemcpy(f->vb_tab, vb, tb, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(f->kb_xo, xo[0], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(f->kb_yo, yo[0], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(f->vb_xo, xo[1], M * 4, hipMemcpyHostToDevice) == hipSuccess &&
-       hipMemcpy(f->vb_yo, yo[1], M * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(kb), free(vb);
+       hipMemcpy(f->vb_xo, xo, M * 4, hipMemcpyHostToDevice) == hipSuccess &&
+       hipMemcpy(f->vb_yo, yo, M * 4, hipMemcpyHostToDevice) == hipSuccess;
+  free(vb);
   return ok;
 }
 
@@ -208,23 +202,19 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
       {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2}, {&f->xe16, scap * xe * 2}, {&f->overflow, 8},
       {&f->moe_dev, f->moe_cap},
   };
+  f->skip_output = o->head_q8 && w->output->type == QTYPE_BF16;
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || osmos_fail(err, "more heads than this build's tables");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || osmos_fail(err, "the step's stream not made"));
   ok = ok && hy4_upload(f, err);
   if (ok)
     ok = head_tables(f) || osmos_fail(err, "a GPU allocation refused (the heads' tables)");
-  if (ok && o->head_q8 && f->w->output->type == QTYPE_BF16)
-  { /* the head's Q8_0 copy (Hy4Options' head_q8): its BF16 freed */
+  if (ok && f->skip_output)
+  { /* the head's Q8_0 copy (Hy4Options' head_q8): BF16 output.weight was never uploaded */
     const GgufTensor *out = f->w->output;
     float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
     ok = (x && hy4_q8_up(&f->bufs, x, out->dims[1], (uint32_t)out->dims[0], &f->head8)) ||
          osmos_fail(err, "the head's Q8_0 copy not made");
     free(x);
-    if (ok)
-    {
-      const size_t i = (size_t)(out - f->w->model->tensors);
-      ledger_free(f->ledger, f->dev[i]), f->dev[i] = NULL;
-    }
   }
   uint32_t joint_most = 0;
   ok = ok && (((f->in_joint = calloc(w->model->n_tensors, sizeof *f->in_joint)) && hy4_joints_make(f, &joint_most) &&
@@ -254,8 +244,8 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hy4_pinned(&f->bufs, &f->pin_tok, n * 4) && hy4_pinned(&f->bufs, &f->pin_pos, n * 4) &&
-       hy4_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && (f->slot = malloc(n * 4)) &&
-       (f->h_sidx = malloc(n * K * 4)) && (f->h_by = malloc(n * K * 4)) && hipDeviceSynchronize() == hipSuccess;
+       (f->slot = malloc(n * 4)) && (f->h_sidx = malloc(n * K * 4)) && (f->h_by = malloc(n * K * 4)) &&
+       hipDeviceSynchronize() == hipSuccess;
   for (int l = 0; ok && l < g->n_layers; l++)
   { /* a layer's MLA core: its heads, a sliding one's window over the ring, a sparse one's groups of ix_pool */
     const AttnCoreDesc d = mla_desc(f, l);

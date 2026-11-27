@@ -231,6 +231,26 @@ bool fwd_moe(Forward *f, int l, char *err)
   for (uint32_t m = 0; m < P; m++)
     f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
   const uint32_t nd = rt.runs, slots = rt.slots, *base = rt.start, *slot0 = rt.slot0, *row_of = rt.row;
+  uint32_t unit_of[OPS_MAX_EXPERTS];
+  for (uint32_t j = 0; j < nd; j++)
+  {
+    const uint32_t unit = (uint32_t)l * E + rt.expert[j];
+    unit_of[j] = unit;
+    if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane begun
+                                      and held, not waited for (in memory at a later visit) */
+      f->on_cpu[unit] = membrane_clock(f->mem), (void)membrane_begin(f->mem, unit);
+    else if (!membrane_hold(f->mem, unit, err)) /* once for the sub-batches */
+      return false;
+  }
+  prefetch(f, l, P);
+  if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_ds4_lane.c) */
+  {
+    if (!fwd_lane_experts(f, l, ids, P, err))
+      return false;
+    membrane_settle(f->mem);
+    fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
+    return true;
+  }
   uint32_t ne = 0; /* the tables' entries: an expert a part of at most MM_MAX_TOKENS of its pairs (mm_group's) */
   for (uint32_t j = 0; j < nd; j++)
     ne += (rt.count[j] + MM_MAX_TOKENS - 1) / MM_MAX_TOKENS;
@@ -255,26 +275,6 @@ bool fwd_moe(Forward *f, int l, char *err)
   memcpy(gidx, rt.gidx, slots * 4), memcpy(hidx, rt.hidx, slots * 4);
   for (uint32_t r = 0; r < P; r++)
     pidx[r] = (int32_t)rt.by[r];
-  uint32_t unit_of[OPS_MAX_EXPERTS];
-  for (uint32_t j = 0; j < nd; j++)
-  {
-    const uint32_t unit = (uint32_t)l * E + rt.expert[j];
-    unit_of[j] = unit;
-    if (fwd_cpu_takes(f, unit, P)) /* the lane's CPU half computes it from the files; its read into the membrane begun
-                                      and held, not waited for (in memory at a later visit) */
-      f->on_cpu[unit] = membrane_clock(f->mem), (void)membrane_begin(f->mem, unit);
-    else if (!membrane_hold(f->mem, unit, err)) /* once for the sub-batches */
-      return false;
-  }
-  prefetch(f, l, P);
-  if (fwd_small(f, P)) /* the lane's small step: every expert in the matvec's order (hip_ds4_lane.c) */
-  {
-    if (!fwd_lane_experts(f, l, ids, P, err))
-      return false;
-    membrane_settle(f->mem);
-    fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
-    return true;
-  }
   /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];

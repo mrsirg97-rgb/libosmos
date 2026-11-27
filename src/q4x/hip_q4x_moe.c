@@ -19,12 +19,12 @@
 
 /* an expert tensor over the tables' runs, a launch each (mm_group: a part's slab decoded once for its 16 << r tokens) */
 static bool experts(const GgufTensor *t, const void **ptr, const int32_t *cnt, const Q4xBuf *b,
-                    const Q4xExpertBounds *bd, uint32_t rows, uint32_t cols, const uint32_t *xo, float *y,
+                    const Q4xExpertBounds *bd, uint32_t n, uint32_t rows, uint32_t cols, const uint32_t *xo, float *y,
                     const uint32_t *yo)
 {
   bool ok = true;
   for (int r = 0; ok && r < Q4X_TILE_RUNS; r++)
-    if (bd->count[r])
+    if (bd->count[r] && (r == 0 || n > (uint32_t)MM_TILE << (r - 1)))
     {
       const uint32_t at = bd->first[r];
       ok = mm_group(TY(t), ptr + at, cnt + at, bd->count[r], MM_TILE << r, rows, cols, b->xe16, xo + at, cols, y,
@@ -226,12 +226,12 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   const bool wait_sh = f->moe_side;
   f->moe_side = false;
   return mm_x16_rows(b->mixed, D, et.gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
-         experts(t[0], et.ptr[0], et.cnt, b, &bd, ff, D, et.xg, b->ga, et.yg) &&
-         experts(t[1], et.ptr[1], et.cnt, b, &bd, ff, D, et.xg, b->up, et.yg) &&
+         experts(t[0], et.ptr[0], et.cnt, b, &bd, n, ff, D, et.xg, b->ga, et.yg) &&
+         experts(t[1], et.ptr[1], et.cnt, b, &bd, n, ff, D, et.xg, b->up, et.yg) &&
          (!npu || q4x_npu_gate_up(f, L, D, ff)) &&
          q4x_swiglu_rows(b->ga, b->up, ff, et.hidx, bd.slots, b->xe16, b->overflow, NULL) &&
          (!npu || q4x_npu_pack_down(f, ff)) &&
-         experts(t[2], et.ptr[2], et.cnt, b, &bd, D, ff, et.xd, b->y, et.yd) &&
+         experts(t[2], et.ptr[2], et.cnt, b, &bd, n, D, ff, et.xd, b->y, et.yd) &&
          (!npu || q4x_npu_down(f, L, D, ff)) &&
          (!wait_sh || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
          q4x_moe_sum(b->y, et.where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);

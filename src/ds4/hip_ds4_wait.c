@@ -18,3 +18,13 @@ bool fwd_wait(Forward *f, hipEvent_t ev)
 }
 
 bool fwd_settle(Forward *f) { return hipEventRecord(f->passed, NULL) == hipSuccess && fwd_wait(f, f->passed); }
+
+bool fwd_settle_spin(Forward *f)
+{
+  if (hipEventRecord(f->passed, NULL) != hipSuccess)
+    return false;
+  hipError_t e;
+  while ((e = hipEventQuery(f->passed)) == hipErrorNotReady)
+    ;
+  return e == hipSuccess;
+}

@@ -333,6 +333,7 @@ bool fwd_pinned(GpuBufs *b, void *host, uint64_t bytes);
 bool fwd_mapped(GpuBufs *b, void *host, uint64_t bytes);
 bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a decode-sized step, slept on in a prompt's */
 bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
+bool fwd_settle_spin(Forward *f);         /* short-wait spin settle (drafter rounds after large prompt steps) */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,
    or taps are on already at other layers */
 /* the taps planned (the target layers at[]: f->tapped, tap_of, n_tap), before the step's buffers are made (taps' with

@@ -51,10 +51,9 @@ bool hy4_engram_layer(Hy4Forward *f, int e, uint32_t n)
   if (ok && e + 1 < g->n_engram)
     ok = rowstream_issue(&f->eg_rs, at + count, (uint32_t)count, f->eg_row_bytes);
   const double t1 = f->pf.on ? hy4_now() : 0;
-  ok = ok && hipMemcpyAsync((uint8_t *)f->eg_raw + at * f->eg_row_bytes, rowstream_rows(&f->eg_rs, at),
-                            count * f->eg_row_bytes, hipMemcpyHostToDevice, (hipStream_t)f->st) == hipSuccess &&
-       quant_dequant(t->type, (uint8_t *)f->eg_raw + at * f->eg_row_bytes, count * (uint64_t)g->engram_dim,
-                     f->eg_rows + at * (uint64_t)g->engram_dim, f->st);
+  ok = ok && hipMemcpyAsync(f->eg_raw, rowstream_rows(&f->eg_rs, at), count * f->eg_row_bytes,
+                            hipMemcpyHostToDevice, (hipStream_t)f->st) == hipSuccess &&
+       quant_dequant(t->type, f->eg_raw, count * (uint64_t)g->engram_dim, f->eg_rows, f->st);
   if (f->pf.on)
     f->pf.rowread_s += t1 - t0, f->pf.copy_s += hy4_now() - t1, f->pf.rows += count, f->pf.bytes += count * f->eg_row_bytes;
   return ok;

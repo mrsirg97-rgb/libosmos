@@ -336,6 +336,8 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
   const uint32_t C = (uint32_t)m->n_embd, B = (uint32_t)m->block, R = (uint32_t)m->rank, K = (uint32_t)m->n_taps,
                  VR = (uint32_t)f->w->output->dims[1], V = (uint32_t)f->w->geo.n_vocab;
   const uint32_t steps = max < B - 1 ? max : B - 1;
+  if (!steps)
+    return 0;
   const int32_t pos = s->pos;
   bool held = false;
   /* the block: the anchor's normed embedding (the target's), then mask rows */
@@ -346,19 +348,19 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     ok = hipMemcpyAsync(d->x + (uint64_t)r * C, d->mask, (uint64_t)C * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess;
   for (int l = 0; ok && l < m->n_layers; l++)
     ok = layer(f, s, l, B, pos);
-  /* the final norm, the head on rows 1 .. (uncapped), the features: the last context position's taps mixed */
+  /* the final norm, the head on rows 1 .. steps (uncapped), the features: the last context position's taps mixed */
   ok = ok && ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&
        ops_rms(d->res, C, C, d->norm, m->eps, B, d->nrm, C, NULL) &&
-       dmat(f, f->w->output, f->output, d->base, NULL, NULL, NULL, d->nrm + C, B - 1, &held) &&
+       dmat(f, f->w->output, f->output, d->base, NULL, NULL, NULL, d->nrm + C, steps, &held) &&
        ink2_mtp_mix(s->mlast, K, d->alpha + (size_t)m->n_layers * K, 1, C, d->f_rnn, NULL) &&
        ops_rms(d->f_rnn, C, C, d->m_dflare, m->eps, 1, d->f_rnn, C, NULL);
   /* the steps' invariant: rnn_proj's [hidden | features] columns on each row's (bias added in the step) */
-  for (uint32_t r = 0; ok && r < B - 1; r++)
+  for (uint32_t r = 0; ok && r < steps; r++)
     ok = hipMemcpyAsync(d->hf + (uint64_t)r * 2 * C, d->nrm + (uint64_t)(r + 1) * C, (uint64_t)C * 4,
                         hipMemcpyDeviceToDevice, NULL) == hipSuccess &&
          hipMemcpyAsync(d->hf + (uint64_t)r * 2 * C + C, d->f_rnn, (uint64_t)C * 4, hipMemcpyDeviceToDevice, NULL) ==
              hipSuccess;
-  ok = ok && mv_run(T_F32, d->w_hf, 3 * R, 2 * C, d->hf, B - 1 > MV_MAX_TOKENS ? MV_MAX_TOKENS : B - 1, d->inv, NULL) &&
+  ok = ok && mv_run(T_F32, d->w_hf, 3 * R, 2 * C, d->hf, steps > MV_MAX_TOKENS ? MV_MAX_TOKENS : steps, d->inv, NULL) &&
        hipMemsetAsync(d->state, 0, R * 4, NULL) == hipSuccess;
   for (uint32_t st = 0; ok && st < steps; st++)
   {

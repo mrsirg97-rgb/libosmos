@@ -107,13 +107,16 @@ bool fwd_head(Forward *f, char *err)
   }
   if (f->n_layers == g->n_layers)
   {
-    ok = ops_hc_pre_rms(b->h, b->f_pre, hc, D, fv(f, f->w->output_norm), g->rms_eps, n, b->x, NULL);
     /* the rows kept: the step's last logit_rows (every row without it), row r at slot r - base */
     const uint32_t base = f->logit_rows && f->n_all > f->logit_rows ? f->n_all - f->logit_rows : 0;
     const uint32_t first = f->cur * FWD_MAX_BATCH; /* the sub-batch's first row of the batch */
     memset(f->slot, 0xff, f->step_n * sizeof *f->slot); /* (the head's rows this sub-batch's alone: b.vocab its) */
     bool any = false;
-    for (uint32_t k = 0; ok && k < n;)
+    for (uint32_t k = 0; k < n && !any; k++)
+      any = f->want[k] && (uint32_t)f->row[k] >= base;
+    if (any)
+      ok = ops_hc_pre_rms(b->h, b->f_pre, hc, D, fv(f, f->w->output_norm), g->rms_eps, n, b->x, NULL);
+    for (uint32_t k = 0; ok && any && k < n;)
     {
       if (!f->want[k] || (uint32_t)f->row[k] < base)
       {
@@ -125,7 +128,6 @@ bool fwd_head(Forward *f, char *err)
         e++;
       for (uint32_t r = k; r < e; r++) /* the rows computed: kept, at their slots */
         f->slot[first + (uint32_t)f->row[r]] = (int32_t)((uint32_t)f->row[r] - base);
-      any = true;
       ok = fwd_mat(f, f->w->output, fwd_dev(f, f->w->output), V, D, b->x + (uint64_t)k * D, D, e - k,
                    b->vocab + (uint64_t)((uint32_t)f->row[k] - base) * V, V);
       k = e;

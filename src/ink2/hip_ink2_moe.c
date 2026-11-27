@@ -303,7 +303,7 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
   float *pw = (float *)(f->pick + P), *hw = (float *)(f->hpick + P);
   if (!ink2_mat2(f, L->router, d->router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) ||
       !ops_router_scored(f->logit, d->router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n, f->pick, pw, f->st) ||
-      (next && (!ink2_mat(f, L1->router, f->L[l + 1].router, f->xn, n, f->logit) ||
+      (next && (!ink2_mat2(f, L1->router, f->L[l + 1].router, f->logit, NULL, NULL, NULL, f->xn, n, f->router16) ||
                 !ops_router_scored(f->logit, f->L[l + 1].router_bias, E, K, g->route_scale, OPS_SCORE_SIGMOID, n,
                                    f->gpick, f->gw, f->st) ||
                 hipMemcpyAsync(f->hgpick, f->gpick, P * 4, hipMemcpyDeviceToHost, f->st) != hipSuccess)) ||

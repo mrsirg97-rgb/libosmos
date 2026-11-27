@@ -173,9 +173,11 @@ bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint3
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
+  if (!f->pin_logits && !hy4_pinned(&f->bufs, &f->pin_logits, (uint64_t)f->logit_rows * V * F))
+    return osmos_fail(err, "out of memory (the logits' pinned buffer)");
   if (!step(f, &s, &n, 1, tokens, n > HY4_MV_TOKENS, n - rows, err))
     return false;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
          osmos_fail(err, "a GPU call failed (the logits' copy)");
 }

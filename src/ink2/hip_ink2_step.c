@@ -235,11 +235,6 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   }
   ink2_pf(f, PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
-  GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
-                    f->st));
-  GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, f->st));
-  if (f->mtp) /* the final normed hidden: the last tap */
-    GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));
   const uint32_t VR = (uint32_t)W->output->dims[1], V = f->vocab;
   uint32_t first = 0;
   if (s->prompt_end && s->prompt_end - 1 > pos)
@@ -250,12 +245,26 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   for (uint32_t t = 0; t < n; t++)
     f->slot[row0 + t] = t >= first ? (int32_t)(slot0 + t - first) : -1;
   f->n_slots += n - first;
+  if (first < n || f->mtp)
+  {
+    GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
+                      f->st));
+    GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, f->st));
+    if (f->mtp) /* the final normed hidden: the last tap */
+      GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));
+  }
   for (uint32_t at = first; at < n; at += f->head_rows)
   {
     const uint32_t k = n - at < f->head_rows ? n - at : f->head_rows;
-    GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, f->head));
-    GPU(hipMemcpy2DAsync(f->logits + (uint64_t)(slot0 + at - first) * V, (uint64_t)V * 4, f->head, (uint64_t)VR * 4,
-                         (uint64_t)V * 4, k, hipMemcpyDeviceToDevice, f->st) == hipSuccess);
+    float *dst = f->logits + (uint64_t)(slot0 + at - first) * V;
+    if (VR == V)
+      GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, dst));
+    else
+    {
+      GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, f->head));
+      GPU(hipMemcpy2DAsync(dst, (uint64_t)V * 4, f->head, (uint64_t)VR * 4, (uint64_t)V * 4, k,
+                           hipMemcpyDeviceToDevice, f->st) == hipSuccess);
+    }
   }
   if (first < n)
     GPU(ink2_softcap(f->logits + (uint64_t)slot0 * V, (uint64_t)(n - first) * V, g->logit_softcap, f->st));

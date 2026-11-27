@@ -270,8 +270,8 @@ bool hy4_moe(Hy4Forward *f, uint32_t n, int l, bool read)
   double t = f->pf.on > 1 ? hy4_now() : 0;
   const bool on_x = joint ? hy4_joint(f, J, D, f->xn, f->jo_ffn)
                           : hy4_mat(f, L->router, E, D, f->xn, n, logit, read) &&
-                                hy4_mat_pair(f, L->routed_down, lat, rin, L->sh_gate, sh, ga, f->xn, D, n, read, &on_xn) &&
-                                hy4_mat_pair(f, L->sh_up, sh, up, NULL, 0, NULL, f->xn, D, n, read, &on_xn);
+                                hy4_mat_pair(f, L->routed_down, lat, rin, NULL, 0, NULL, f->xn, D, n, read, &on_xn) &&
+                                hy4_mat_pair(f, L->sh_gate, sh, ga, L->sh_up, sh, up, f->xn, D, n, read, &on_xn);
   const int32_t *sidx = f->sidx;
   return on_x && hy4_part_done(f, 15, &t) &&
          ops_router_scored(logit, hy4_fv(f, L->router_bias), E, K, g->expert_scale, OPS_SCORE_SIGMOID, n, f->idx,

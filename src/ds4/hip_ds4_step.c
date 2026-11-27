@@ -329,9 +329,9 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
       leave(f, k);
     }
   }
-  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); the last
-     sub-batch's rows the ones left */
-  for (uint32_t k = 0; ok && k < f->n_sub; k++)
+  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); only the last
+     sub-batch's logits survive unless probing */
+  for (uint32_t k = f->probe ? 0 : f->n_sub - 1; ok && k < f->n_sub; k++)
   {
     enter(f, k);
     ok = fwd_head(f, err);

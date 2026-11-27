@@ -150,7 +150,7 @@ static void test_layout(int fd)
   for (int i = 0; i < BIG; i++)
     big[i] = (PoolUnit){.part = {{fd, 0, FILE_BYTES}}, .n_parts = 1};
   r = resident_create(big, BIG, (Slots){fake_alloc, fake_free, &m}, 4, err);
-  assert(r && m.n == 2 && resident_bytes(r) == 2 * RESIDENT_ARENA);
+  assert(r && m.n == 2 && resident_bytes(r) == (uint64_t)BIG * FILE_BYTES);
   verify(r, big, BIG, &m);
   resident_destroy(r);
   assert(m.n == 0);

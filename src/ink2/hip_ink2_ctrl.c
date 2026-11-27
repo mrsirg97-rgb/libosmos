@@ -106,7 +106,7 @@ bool ink2_control(Ink2Forward *f, const Ink2Layer *L, const Ink2Dev *d, int c, c
   const uint32_t G = (uint32_t)f->w->geo.loop.gate_rank;
   const GgufTensor *gf[2] = {L->ctrl_gain[c], L->ctrl_forget[c]};
   void *g16 = bx16_at(f, 5);
-  if (r16 && batchable(f, gf, 2, G))
+  if (r16 && n <= MM_SILU_MAX_TOKENS && batchable(f, gf, 2, G))
   {
     const OpsRmsPart norms16[2] = {{x, NULL, NULL, f->x16, C, 2 * C, 2 * C, 0}, {m, NULL, NULL, f->x16, C, 2 * C, 2 * C, C}};
     if (!ops_rms_x16_many(norms16, 2, C, eps, n, f->overflow, f->st))

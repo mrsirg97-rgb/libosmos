@@ -319,8 +319,10 @@ bool q4x_buffers(Q4xForward *f, char *err)
       {&b->x16b, (uint64_t)MM_SILU_MAX_TOKENS * g->hc_rank * 2, 0},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
-      {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
-      {&b->ple_sbuf, n * g->ple_heads * ple_row_bytes(f), 1},          {&b->ple_iota, n * g->ple_heads * 4, 0},
+      {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},
+      {&b->ple_rows, f->stream_ngram ? 0 : n * g->ple_heads * 4, 1},
+      {&b->ple_sbuf, f->stream_ngram ? n * g->ple_heads * ple_row_bytes(f) : 0, 1},
+      {&b->ple_iota, f->stream_ngram ? n * g->ple_heads * 4 : 0, 0},
       {&b->taps, n * f->n_taps * D * F, 0},
       {&b->tok, n * 4, 1},             {&b->top_part, ops_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
@@ -339,13 +341,16 @@ bool q4x_buffers(Q4xForward *f, char *err)
   f->ovf = (OverflowFlag){b->overflow, 4, false, NULL};
   if (!overflow_reset(&f->ovf, err))
     return false;
-  int32_t *iota = malloc(n * g->ple_heads * 4);
-  for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
-    iota[i] = (int32_t)i;
-  const bool put = iota && hipMemcpy(b->ple_iota, iota, n * g->ple_heads * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(iota);
-  if (!put)
-    return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  if (f->stream_ngram)
+  {
+    int32_t *iota = malloc(n * g->ple_heads * 4);
+    for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
+      iota[i] = (int32_t)i;
+    const bool put = iota && hipMemcpy(b->ple_iota, iota, n * g->ple_heads * 4, hipMemcpyHostToDevice) == hipSuccess;
+    free(iota);
+    if (!put)
+      return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  }
   /* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
      q4x_attn's bits), over b.fa */
   const AttnCoreDesc ad = attn_desc(f);

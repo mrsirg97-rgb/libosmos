@@ -47,9 +47,10 @@ struct Hy4Forward
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
+  bool skip_output;                               /* skip uploading BF16 output.weight when head_q8 replaces it */
   void *head8;                                    /* Hy4Options' head_q8: the head's Q8_0 copy (NULL: the file's) */
-  const void **kb_tab, **vb_tab;                  /* a read's k_b / v_b: each layer's heads' matrices (mm_group's) */
-  uint32_t *kb_xo, *kb_yo, *vb_xo, *vb_yo;        /* a head's x16 and y offsets (head h's slice of the rows) */
+  const void **vb_tab;                            /* a read's v_b: each layer's heads' matrices (mm_group's) */
+  uint32_t *vb_xo, *vb_yo;                        /* a head's x16 and y offsets (head h's slice of the rows) */
   int32_t *hcnt;                                  /* every head's token count (a chunk's) */
   uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
                         read only when its group completes) */
