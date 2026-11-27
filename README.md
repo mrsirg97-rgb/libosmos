@@ -73,12 +73,11 @@ at temperature 1.0 / top_p 1.0, inkling-2-mini and osmos-evo-inkling at 1.0, osm
 hy4-flash decode greedily (they did not loop greedy, and draft faster). Each token is drawn from (seed, position)
 alone, so a seed reproduces an answer, drafted or not; without one a seed is drawn and returned in `x-osmos-seed`.
 
-**Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop`
-header - turns since the last tool call, the most repeated recent call, how many times in a row the last call was
-made again after the same result, orphaned calls and results (a client's history compaction can drop one side), and
-`stuck`. Nothing the model reads changes; `"osmos": {"fill_orphans":
-true}` puts a placeholder after an orphaned call. Context length: the pack's own (DeepSeek 1M, Qwen 512K, Inkling-2-Small 256K, Inkling-2-Mini 1M, Hy4-flash 1M, osmos1.7b 256K), or
-`--ctx` (installer or osmos-api: `512k`, `1m`, ...).
+**Loop signals for agent harnesses** (#47): every answer carries an `osmos.loop` object and an `x-osmos-loop` header:
+turns since the last tool call, the most repeated recent call, how many times in a row the last call came back after
+the same result, orphaned calls and results (a client's compaction can drop one side), and `stuck`. Nothing the model
+reads changes; `"osmos": {"fill_orphans": true}` puts a placeholder after an orphaned call. Each pack runs at its own
+context (the table below), or `--ctx` (installer or osmos-api: `512k`, `1m`, ...).
 
 ## The packs
 
@@ -97,23 +96,41 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.18.1 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+osmos 0.18.2 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
 and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
 
 | Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain: code / prose |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 1,252 tok/s | **45.7** / **42.3** tok/s | 28.8 / 28.9 tok/s |
-| `qwen38-ud-iq3_xxs` | 958 | **51.0** / **43.8** | 30.7 / 30.8 |
-| `osmos-evo-1017` | 384 | **29.0** / **24.2** | 18.1 / 19.3 |
-| `hy4-flash` | 465 | **27.0** / **24.8** | 18.7 / 18.8 |
-| `osmos-evo-inkling` | 370 | **21.5** / **20.2** | 16.5 / 17.3 |
-| `osmos1.7b` (no drafter) | **5,780** | | **95.4** / **95.0** |
+| `inkling-2-mini` | 1,253 tok/s | **45.9** / **42.4** tok/s | 28.9 / 29.0 tok/s |
+| `qwen38-ud-iq3_xxs` | 954 | **51.1** / **43.8** | 30.7 / 30.7 |
+| `osmos-evo-1017` | 377 | **28.4** / **24.2** | 18.5 / 19.2 |
+| `hy4-flash` | 480 | **27.0** / **24.8** | 18.8 / 18.8 |
+| `osmos-evo-inkling` | 370 | **22.2** / **20.6** | 16.5 / 17.3 |
+| `osmos1.7b` (no drafter) | **5,782** | | **95.3** / **95.4** |
 
-Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
+Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0
+(`osmos-evo-1017`'s drafted code: the median of nine runs, 24.2-28.9).
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
 45.5 tok/s drafted (28.6 plain, 0.15.0).
+
+**Time to first token** (osmos 0.18.2, the `performance` profile): from launching `osmos-api` on the pack's
+`osmos.json` to the first token of a first, short request. A pack's first start on a version sizes itself to the
+machine in a few whole builds and keeps what it found beside the model (`.osmos-fit-<hash>`); every later start builds
+once (`--no-fit-hint` on osmos-serve sizes from cold each time).
+
+| Pack | First start | Later starts | osmos 0.18.1 |
+| --- | ---: | ---: | ---: |
+| `inkling-2-mini` | 5.0 s | **3.9 s** | 19.2 s |
+| `qwen38-ud-iq3_xxs` | 17.7 | **13.9** | 75.0 |
+| `osmos-evo-1017` | 27.3 | **20.2** | 28.8 |
+| `hy4-flash` | 18.7 | **15.7** | 104.5 |
+| `osmos-evo-inkling` | 37.5 | **19.3** | 38-55 |
+| `osmos1.7b` | 0.8 | **0.8** | 1.1 |
+
+What a later start waits on is the SSD: the experts it holds, read once (Hy4's 66 GB in ~12.5 s), and DeepSeek's
+read at its first step (~15 s of its 20).
 
 **A recorded agent session** (osmos 0.18.0, new then; `tools/serve/session_bench.py`): a real 122-step rig session
 (Inkling-2-Small fixing a bug and opening a PR: 3 user turns, 130 tool calls) replayed through each pack's `osmos-
@@ -131,18 +148,6 @@ Sampled is the pack's own temperature / top_p with a fixed seed a step; **bold**
 | `hy4-flash` | greedy | **33.0** / **17.7** | | 5.8 / 8.4 |
 | `osmos-evo-inkling` | sampled, 1.0 | 17.7 / 13.7 | (not run) | 12.2 / 14.3 (greedy) |
 | `osmos1.7b` (no drafter) | sampled, 0.1 | 82.5 | **71.6** | 2.3 |
-
-**Maya's three bench questions** (osmos 0.15.0; a CSV parser, photosynthesis for a student, a bouncing-ball web page;
-256 tokens, temperature 0, drafted / plain):
-
-| Pack | Code | Explanation | Web page | Plain |
-| --- | ---: | ---: | ---: | ---: |
-| `inkling-2-mini` | **57.5** | 36.9 | 38.7 | 28.9 |
-| `qwen38-ud-iq3_xxs` | **57.3** | **51.2** | **45.2** | 29.1 |
-| `osmos-evo-1017` | 31.4 | 25.3 | 30.9 | 18.3-18.5 |
-| `hy4-flash` | 21.4 | 21.4 | 20.2 | 17.5 |
-| `osmos-evo-inkling` (0.15.2) | 15.6 | 12.7 | 13.5 | 12.0-12.6 |
-| `osmos1.7b` (v-r10, Q4_0) | 126.1 | 126.4 | 122.4 | |
 
 **Agents** (osmos 0.18.0; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
 prompt and task, then tool results of 150-2,000 tokens (one in ten a 5K-20K file read) and 0.5-5 s of tool time
@@ -172,10 +177,9 @@ RAM free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: t
 DeepSeek streams its experts from the SSD, so the drive is part of its numbers: a prompt reads at ~7.1 GB/s (near
 the PCIe 4.0 x4 ceiling); decode reads experts a few MB at a time (`O_DIRECT`), where random-read latency counts.
 
-**NOTE - let your Strix breathe.** On a warm table beside another machine, a sustained
-DeepSeek run took the GPU to 102 °C and its clock down to 925 MHz, and drafted decode after a 64K prompt read 17 tok/s
-against 29 raised in open air (the same code, the same tokens). These numbers are from a warm room: under sustained
-load the GPU still runs 95-100 °C with its clock near 2.6 GHz.
+**Let your Strix breathe.** On a warm table beside another machine, a sustained DeepSeek run took the GPU to 102 °C
+and its clock to 925 MHz: drafted decode after a 64K prompt fell to 17 tok/s, against 29 raised in open air (the same
+code, the same tokens). Under sustained load in open air the GPU still runs 95-100 °C, its clock near 2.6 GHz.
 
 The `low-power` profile costs decode little - it is bound by memory, not clocks (inkling-2-mini's plain decode 28.1
 tok/s there against 28.8) - and prompts more.
@@ -407,11 +411,10 @@ no-drafter speed here, and its DeepSeek engine is not shipped for Strix Halo on 
   CPU lane needs AVX-512 VNNI and VBMI.
 - GPU memory: every number here is from a 128 GB machine with its GPU memory raised to ~113 GiB (`options ttm
   pages_limit=29637704` in `/etc/modprobe.d/ttm.conf`; a system setting, so it's yours to make). Less runs: every
-  engine sizes itself to the machine (osmos-serve's `--budget auto`, 8 GB of RAM kept free), the experts it cannot hold
-  streamed from the SSD - slower. A pack starts in its engine's smallest build (measured: osmos1.7b and osmos-evo-1017
-  ~7 GiB, ud-iq1_m ~8, inkling-2-mini ~10, hy4-flash ~17, osmos-evo-inkling ~21, qwen38-ud-iq3_xxs ~40), a
-  conversation's cache on top (inkling-2-mini: ~17 GiB at 1M tokens). The installer checks a pack's own need, and the
-  measured machine's for a pack not measured.
+  engine sizes itself to the machine (8 GB of RAM kept free), streaming from the SSD the experts it cannot hold -
+  slower. A pack's smallest build: osmos1.7b and osmos-evo-1017 ~7 GiB, ud-iq1_m ~8, inkling-2-mini ~10, hy4-flash
+  ~17, osmos-evo-inkling ~21, qwen38-ud-iq3_xxs ~40, a conversation's cache on top (inkling-2-mini: ~17 GiB at 1M
+  tokens). The installer checks a pack's own need, and the measured machine's for a pack not measured.
 - The model on an NVMe SSD, on a filesystem that takes `O_DIRECT` reads (ext4, btrfs and xfs do; osmos refuses one that
   doesn't, and names it). The faster the SSD's random reads, the faster DeepSeek decodes. The numbers here are from a
   Micron 4600 on a PCIe 4.0 x4 link ("The machine", above).

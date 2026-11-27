@@ -68,8 +68,34 @@ bool serve_build(Server *sv, Conv *conv, int lanes, const OsmosModel *m, OsmosOp
   Sizing z = {sv, conv, lanes, m, o};
   uint64_t budget = 0, room = 0;
   char ferr[OSMOS_ERR] = "";
-  if (!fit_sized(sized_build, sized_unbuild, &z, FIT_HEADROOM, &budget, ferr))
+  FitHint hint = {0, 0, 0, 0, false};
+  uint64_t start_room = 0; /* the room before any build: the hint's build alone, no dense one (fit_sized_hint) */
+  if (!osmos_machine_room(sv->ram_kept, &start_room))
+    start_room = 0;
+  FILE *hf = sv->fit_hint[0] ? fopen(sv->fit_hint, "r") : NULL;
+  unsigned long long dr = 0, hb = 0, sr = 0, kr = 0;
+  int cap = 0;
+  if (hf && fscanf(hf, "%llu %llu %llu %llu %d", &dr, &hb, &sr, &kr, &cap) == 5)
+    hint = (FitHint){dr, hb, sr, kr, cap != 0};
+  if (hf)
+    fclose(hf);
+  if (hint.budget)
+    out("NOTE sizing: the last start's budget first (%.2f GiB, %s)\n", (double)hint.budget / (1ull << 30), sv->fit_hint);
+  if (!fit_sized_hint(sized_build, sized_unbuild, &z, FIT_HEADROOM, start_room, &hint, &budget, ferr))
     return osmos_fail(err, "%s; the smallest build does not fit (a smaller --fill, pack or --max-context)", ferr);
+  if (sv->fit_hint[0]) /* (not kept: the next start sizes as this one did) */
+  {
+    char tmp[sizeof sv->fit_hint + 8];
+    snprintf(tmp, sizeof tmp, "%s.tmp", sv->fit_hint);
+    FILE *w = fopen(tmp, "w");
+    const bool ok =
+        w && fprintf(w, "%llu %llu %llu %llu %d\n", (unsigned long long)hint.dense_room,
+                     (unsigned long long)hint.budget, (unsigned long long)hint.start_room,
+                     (unsigned long long)hint.room, hint.capped ? 1 : 0) > 0;
+    const bool kept = w && !fclose(w) && ok && !rename(tmp, sv->fit_hint);
+    if (!kept)
+      remove(tmp), out("NOTE sizing: the hint not kept (%s)\n", sv->fit_hint);
+  }
   osmos_room(sv->e, &room);
   out("NOTE the budget sized to this GPU: %.2f GiB (%.2f GiB left free; %.2f GiB of RAM kept free, --fill)\n",
       (double)budget / (1ull << 30), (double)room / (1ull << 30), (double)sv->ram_kept / (1ull << 30));

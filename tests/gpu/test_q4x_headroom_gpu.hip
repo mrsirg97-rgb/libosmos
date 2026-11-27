@@ -62,13 +62,19 @@ static uint64_t device_free() {
   return f;
 }
 
-// the GPU's memory taken until `leave` is free (one allocation, then smaller ones to close in)
+// the GPU's memory taken until `leave` is free (one allocation, then smaller ones to close in), then again once the
+// measure has settled: memory the system counts free a moment later (an earlier test's, a build's just given back)
+// would leave the edge that much wider (0.18.2's gate: a sequence built that the edge meant to refuse)
 struct Hog {
-  void* p[64] = {};
+  void* p[128] = {};
   int n = 0;
+  void take(uint64_t leave) {
+    for (uint64_t piece = 1ull << 34; piece >= (1ull << 20) && n < 128; piece >>= 1)
+      while (n < 128 && gpu_free() > leave + piece && hipMalloc(&p[n], piece) == hipSuccess) n++;
+  }
   explicit Hog(uint64_t leave) {
-    for (uint64_t piece = 1ull << 34; piece >= (1ull << 20) && n < 64; piece >>= 1)
-      while (n < 64 && gpu_free() > leave + piece && hipMalloc(&p[n], piece) == hipSuccess) n++;
+    take(leave);
+    for (int i = 0; i < 5 && settled() > leave + (1ull << 26); i++) take(leave);
   }
   ~Hog() {
     for (int i = 0; i < n; i++) CHECK(hipFree(p[i]) == hipSuccess);
