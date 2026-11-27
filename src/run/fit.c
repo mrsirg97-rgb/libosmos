@@ -96,6 +96,9 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
       ok = built > ok ? built : ok;
     else
       over = built < over ? built : over;
+    if (room >= headroom && built + FIT_SLACK < want)
+      break; /* took less than it was given, the headroom left: every expert resident, nothing more to take (Hy4,
+                Mini: four or five more whole builds at the same size) */
   }
   if (!live || (room < headroom && built != ok)) /* never kept short of the headroom when a build that left it is known */
   {
