@@ -198,10 +198,44 @@ int main(void)
       printf("  every expert fits (%llu GiB dense, %llu of experts): budget %.2f GiB in %d builds\n",
              (unsigned long long)whole[k][2], (unsigned long long)whole[k][3], (double)budget / GIB, q.builds);
       assert(budget == q.dense + q.experts && build_room(&q, budget) >= GIB);
+      FitHint h = {0, 0};
+      unbuild(&q), q.builds = 0;
+      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live); /* cold: learns the hint */
+      const int cold = q.builds;
+      unbuild(&q), q.builds = 0;
+      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live && budget == q.dense + q.experts);
+      assert(q.builds == 2 && q.builds <= cold); /* the hint capped again on its first step, not a step past it */
       if (build_room(&q, q.dense + q.experts) >= 2 * GIB + q.experts / 8) /* room to spare past the first step */
         assert(q.builds == 2);
     }
   }
+  /* a hint, the last start's: the same build again lands in the window on its first step - two builds (the dense one
+     and that); with 3 GiB more or less of the machine taken since, still the headroom, in a few builds */
+  for (uint64_t w = 0; w <= 200; w += 100)
+  for (size_t k = 0; k < sizeof shapes / sizeof *shapes; k++)
+    for (int shift = -3; shift <= 3; shift += 3)
+    {
+      Engine q = {shapes[k][0] * GIB, shapes[k][1] * GIB, shapes[k][2] * GIB, shapes[k][3] * GIB, shapes[k][4],
+                  shapes[k][5], 0, 0, 0, 0, w * GIB / 1000, INT64_MAX, 0};
+      FitHint h = {0, 0};
+      uint64_t first = 0;
+      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &first, err) && q.live && h.budget == first);
+      const int cold = q.builds;
+      unbuild(&q);
+      q.builds = 0, q.least = INT64_MAX;
+      q.other = (uint64_t)((int64_t)q.other + shift * (int64_t)GIB);
+      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live);
+      const uint64_t left = build_room(&q, budget);
+      if (!shift && !w)
+        assert(q.builds == 2 && budget == first);
+      const int64_t wob = 2 * (int64_t)q.wobble;
+      assert(left + wob >= GIB && left <= GIB + 2 * FIT_SLACK + wob &&
+             q.least >= (int64_t)GIB - (int64_t)FIT_SLACK - wob);
+      assert(q.builds <= cold + (w ? 1 : 0));
+      if (k == 4 && !w)
+        printf("  a hint (UD-IQ1_S-like, %+d GiB taken since): %d builds, not %d; %.3f GiB left\n", shift, q.builds,
+               cold, (double)left / GIB);
+    }
   printf("[test_fit] ok\n");
   return 0;
 }

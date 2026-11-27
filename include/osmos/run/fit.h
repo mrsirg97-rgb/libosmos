@@ -31,6 +31,15 @@ uint64_t fit_ram_available(void);
 bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget,
                char err[OSMOS_ERR]);
 
+/* what a sizing learned, for the next start of the same build: the dense build's room and the budget kept (a capped
+   build's: what it was given) - budget 0: none known */
+typedef struct FitHint
+{
+  uint64_t dense_room, budget;
+} FitHint;
+bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, FitHint *hint, uint64_t *budget,
+                    char err[OSMOS_ERR]);
+
 #endif
 
 /*
@@ -59,4 +68,10 @@ fit_sized
   (one more build, at the largest that did, if the last fell short), else the floor. false with why: the dense build
   failed, or the largest that fit did not again (unbuild has run for every build before; a failed one cleans up
   after itself).
+
+fit_sized_hint
+  fit_sized with what an earlier start learned: its first step the hint's budget moved by how far this dense build's
+  room is from that one's (down by all of a shrink, up by a growth over FIT_FIRST_COST) - the same build on the same machine lands in the window at once,
+  and anything else is a first step like any, checked and stepped from as fit_sized's. *hint is rewritten with what
+  this sizing learned (a hint's budget 0: fit_sized's own first step).
 */

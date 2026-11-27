@@ -38,6 +38,12 @@ static uint64_t next(uint64_t built, uint64_t room, uint64_t target, double cost
 
 bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[OSMOS_ERR])
 {
+  return fit_sized_hint(build, unbuild, ctx, headroom, NULL, budget, err);
+}
+
+bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, FitHint *hint, uint64_t *budget,
+                    char err[OSMOS_ERR])
+{
   const uint64_t target = headroom + FIT_SLACK / 2; /* the window's middle: a step's error either side stays in it */
   uint64_t built = 0, room = 0;
   if (!build(ctx, 0, &built, &room, err))
@@ -51,6 +57,10 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
      units' padding has been, so the first step, the longest, lands short of the target, not past it into the RAM
      kept free */
   double cost = FIT_FIRST_COST;
+  const bool hinted = hint && hint->budget > dense;
+  const uint64_t dense_room = room;
+  uint64_t asked = 0; /* a capped build's budget (every expert resident in less): the hint's, so the next start's
+                         first step is capped again, not taken as all it may hold */
   bool live = true;
   for (int i = 1; i < FIT_BUILDS; i++)
   {
@@ -59,6 +69,15 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
     if (live && room < headroom && built <= dense)
       break; /* short at the floor: nothing smaller */
     uint64_t want = next(last, last_room, target, cost);
+    if (i == 1 && hinted) /* the last start's budget, moved by this machine's room against that start's: down by all
+                             of a room that shrank, up by a grown one over the first step's cost - either way short of
+                             the memory, not past it (a cost measured between close builds is the room's wobble) */
+    {
+      const double d = (double)dense_room - (double)hint->dense_room;
+      const double moved = d < 0 ? d : d / FIT_FIRST_COST;
+      want = moved >= 0 ? hint->budget + (uint64_t)moved
+                        : (-moved < (double)(hint->budget - dense) ? hint->budget - (uint64_t)-moved : dense);
+    }
     /* on a flat short of the headroom - two budgets, the room moved less than half as far (a byte of budget costs at
        least a byte off a flat: only the streamed pool's drift moves it there) - the room moves in steps, not with the
        budget, so the shortfall says nothing of how far: stepped below the flat by one step, not crept across it a
@@ -97,8 +116,14 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
     else
       over = built < over ? built : over;
     if (room >= headroom && built + FIT_SLACK < want)
-      break; /* took less than it was given, the headroom left: every expert resident, nothing more to take (Hy4,
-                Mini: four or five more whole builds at the same size) */
+    {
+      asked = want; /* took less than it was given, the headroom left: every expert resident, nothing more to take
+                       (Hy4, Mini: four or five more whole builds at the same size) */
+      break;
+    }
+    if (i == 1 && hinted && room >= headroom && room <= headroom + 2 * FIT_SLACK)
+      break; /* the hint's step a little past the window (the room's wobble between starts): kept, not one more
+                whole build for a few experts */
   }
   if (!live || (room < headroom && built != ok)) /* never kept short of the headroom when a build that left it is known */
   {
@@ -108,5 +133,7 @@ bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom,
       return false;
   }
   *budget = built;
+  if (hint)
+    *hint = (FitHint){dense_room, asked && built == ok ? asked : built};
   return true;
 }

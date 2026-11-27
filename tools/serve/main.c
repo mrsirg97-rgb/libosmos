@@ -5,6 +5,7 @@
                      [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] [--no-guess]
                      [--stream-ngram] [--kv-q8] [--no-int8] [--overlay <gguf>] [--lsa <maps>] [--answer-after <text>]
                      [--profile] [--rope-stages <from:factor,...>] [--npu <dir> [--npu-share S]] [--stats]
+                     [--no-fit-hint]
                      [--no-slots | --slot-cap N --slot-dir <dir> --slot-gb GB --slot-min N --slot-ram-gb GB
                       --slot-days D] [--serve]
      osmos-serve --version
@@ -18,6 +19,8 @@
 
    one conversation (single.c), or --parallel N at once (multi.c: GEN then needs rid=, every line carries it).
    with --dspark a GEN drafts unless it says spec=0 (maya's default: as the engine was started).
+   --budget auto (the default) sizes to this machine in whole builds, its first step the last start's budget for the
+   same flags, model and version (a hint beside the model, .osmos-fit-<hash>: build.c); --no-fit-hint sizes from cold.
    --no-guess: no experts guessed a layer ahead (OsmosOptions' no_guess - a model whose misses are few).
    --overlay: a GGUF whose tensors stand in for the model's of their names (an abliteration patch: weights.h).
    --lsa: latent sparse attention's maps (LFM3's: osmos1.7b-lsa-maps.safetensors) - a decode's full layers read them.
@@ -50,6 +53,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include "serve.h"
 #include "osmos/run/fit.h"
@@ -153,6 +157,28 @@ static bool answer_of(Server *sv, const char *model, const char *after, char err
   return ok;
 }
 
+/* the sized build's hint's file (build.c): beside the model, named by what decides the build - this version, the
+   model file's size and time, every flag - so another build of it, or another version, never takes this one's */
+static void fit_hint_path(Server *sv, const char *model, int argc, char **argv)
+{
+  struct stat st;
+  if (stat(model, &st))
+    return;
+  uint64_t h = 1469598103934665603ull;
+  char head[96];
+  snprintf(head, sizeof head, "%s %lld %lld", OSMOS_VERSION, (long long)st.st_size, (long long)st.st_mtime);
+  for (int i = -1; i < argc; i++)
+    for (const char *c = i < 0 ? head : argv[i];; c++)
+    {
+      h = (h ^ (unsigned char)*c) * 1099511628211ull;
+      if (!*c)
+        break;
+    }
+  const char *slash = strrchr(model, '/');
+  snprintf(sv->fit_hint, sizeof sv->fit_hint, "%.*s/.osmos-fit-%016llx", slash ? (int)(slash - model) : 1,
+           slash ? model : ".", (unsigned long long)h);
+}
+
 int main(int argc, char **argv)
 {
   if (argc == 2 && !strcmp(argv[1], "--version"))
@@ -164,7 +190,7 @@ int main(int argc, char **argv)
     return die("usage: osmos-serve --model <first shard> [--engram <gguf>] [--picks <file>] [--dspark <dir>] "
                "[--max-context N] [--budget GiB|auto] [--fill GiB] [--max-tokens N] [--eos id,id] [--parallel N] "
                "[--no-guess] [--stream-ngram] [--kv-q8] [--no-int8] [--npu <dir> [--npu-share F]] "
-               "[--overlay <gguf>] [--lsa <maps>] [--profile] [--rope-stages <from:factor,...>] [--serve]");
+               "[--overlay <gguf>] [--lsa <maps>] [--profile] [--rope-stages <from:factor,...>] [--no-fit-hint] [--serve]");
   SlotFlags sf = {opt(argc, argv, "--slot-dir", NULL), 0, 0, 0, 0, 0}; /* (read first: a bad one refused before a build) */
   if (!flag_num(argc, argv, "--slot-cap", 4, 1, 1e6, &sf.cap) || !flag_num(argc, argv, "--slot-gb", 16, 0.001, 1e6, &sf.gb) ||
       !flag_num(argc, argv, "--slot-ram-gb", -1, 0, 1e6, &sf.ram_gb) ||
@@ -216,6 +242,8 @@ int main(int argc, char **argv)
                           opt(argc, argv, "--npu", NULL), npu_share, has(argc, argv, "--kv-q8"),
                           has(argc, argv, "--profile"), opt(argc, argv, "--rope-stages", NULL),
                           has(argc, argv, "--no-int8")};
+  if (!has(argc, argv, "--no-fit-hint"))
+    fit_hint_path(&sv, model, argc, argv);
   Conv *conv = calloc((size_t)lanes, sizeof *conv);
   if (!conv)
     return die("out of memory");
