@@ -99,18 +99,30 @@ static void run(CpuLane *c, int id)
   const CpuLaneJob *j = &c->job;
   const uint32_t D = j->dim, F = j->ff;
   uint64_t a, b;
-  for (uint32_t r = (uint32_t)id; r < j->n_rows; r += (uint32_t)c->n) /* x's rows to int8 */
-    if (!cpu_q8_round(j->x + (uint64_t)r * D, 1, D, D, c->q + (uint64_t)r * D,
-                      c->qd + (uint64_t)r * (D / LANE_Q8_VALUES)))
-      fail(c);
+  uint32_t idx = 0;
+  for (uint32_t k = 0; k < j->n_e; k++) /* only rows owned by this job's experts: x to int8 */
+    for (uint32_t t = 0; t < j->e[k].cnt; t++, idx++)
+      if (idx % (uint32_t)c->n == (uint32_t)id)
+      {
+        const uint32_t r = j->e[k].row0 + t;
+        if (!cpu_q8_round(j->x + (uint64_t)r * D, 1, D, D, c->q + (uint64_t)r * D,
+                          c->qd + (uint64_t)r * (D / LANE_Q8_VALUES)))
+          fail(c);
+      }
   barrier(c);
   share(id, c->n, (uint64_t)j->n_e * F, &a, &b);
   parts(c, F, a, b, gate_up);
   barrier(c);
-  for (uint32_t r = (uint32_t)id; r < j->n_rows; r += (uint32_t)c->n) /* the activations to int8 */
-    if (!cpu_q8_round(c->h + (uint64_t)r * F, 1, F, F, c->qh + (uint64_t)r * F,
-                      c->qhd + (uint64_t)r * (F / LANE_Q8_VALUES)))
-      fail(c);
+  idx = 0;
+  for (uint32_t k = 0; k < j->n_e; k++) /* only rows written by gate_up: activations to int8 */
+    for (uint32_t t = 0; t < j->e[k].cnt; t++, idx++)
+      if (idx % (uint32_t)c->n == (uint32_t)id)
+      {
+        const uint32_t r = j->e[k].row0 + t;
+        if (!cpu_q8_round(c->h + (uint64_t)r * F, 1, F, F, c->qh + (uint64_t)r * F,
+                          c->qhd + (uint64_t)r * (F / LANE_Q8_VALUES)))
+          fail(c);
+      }
   barrier(c);
   share(id, c->n, (uint64_t)j->n_e * D, &a, &b);
   parts(c, D, a, b, down);
@@ -220,7 +232,8 @@ static bool valid(const CpuLane *c, const CpuLaneJob *j)
       !j->scale || !j->e || !j->n_e || !j->y || !j->seq || !j->n_rows || j->n_rows > c->max_rows)
     return false;
   for (uint32_t k = 0; k < j->n_e; k++)
-    if (!j->e[k].gate || !j->e[k].up || !j->e[k].down || !j->e[k].cnt || j->e[k].row0 + j->e[k].cnt > j->n_rows)
+    if (!j->e[k].gate || !j->e[k].up || !j->e[k].down || !j->e[k].cnt || j->e[k].row0 > j->n_rows ||
+        j->e[k].cnt > j->n_rows - j->e[k].row0)
       return false;
   return true;
 }

@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
@@ -40,8 +41,22 @@ static void read_rows(Rowread *r)
       return;
     const uint32_t z = a + r->take < r->n ? a + r->take : r->n;
     for (uint32_t i = a; i < z; i++)
-      if (pread(r->fd, r->dst + (uint64_t)i * r->bytes, r->bytes, (off_t)r->offset[i]) != (ssize_t)r->bytes)
-        atomic_store(&r->failed, true);
+    {
+      uint32_t got = 0;
+      while (got < r->bytes)
+      {
+        const ssize_t n = pread(r->fd, r->dst + (uint64_t)i * r->bytes + got, r->bytes - got,
+                                (off_t)(r->offset[i] + got));
+        if (n < 0 && errno == EINTR)
+          continue;
+        if (n <= 0)
+        {
+          atomic_store(&r->failed, true);
+          break;
+        }
+        got += (uint32_t)n;
+      }
+    }
   }
 }
 

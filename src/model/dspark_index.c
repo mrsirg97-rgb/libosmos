@@ -94,7 +94,7 @@ static bool entry(Cur *c, DsparkTensor *t, uint64_t file_bytes, char *err)
   } while (eat(c, ','));
   if (!eat(c, ']') || !eat(c, ']'))
     return osmos_fail(err, "dspark.json: a tensor entry it cannot read");
-  if (values % per_block || values / per_block * block_bytes != t->bytes)
+  if (values % per_block || values / per_block > UINT64_MAX / block_bytes || values / per_block * block_bytes != t->bytes)
     return osmos_fail(err, "dspark.json: a tensor's bytes are not its type's for its dims");
   if (t->offset > file_bytes || t->bytes > file_bytes - t->offset)
     return osmos_fail(err, "dspark.json: a tensor past the end of dspark.bin");

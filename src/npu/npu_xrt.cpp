@@ -70,8 +70,10 @@ struct Npu {
 static bool dma(Npu* n, Dma& m, uint64_t bytes, char* err) {
   uint64_t off = 0;
   if (ledger_malloc(n->ledger, &m.d, bytes) != hipSuccess) return say(err, "GPU memory (the ledger's, or HIP's)", nullptr), false;
-  if (hsa_amd_portable_export_dmabuf(m.d, bytes, &m.fd, &off) != HSA_STATUS_SUCCESS || off)
+  if (hsa_amd_portable_export_dmabuf(m.d, bytes, &m.fd, &off) != HSA_STATUS_SUCCESS || off) {
+    if (m.fd >= 0) (void) hsa_amd_portable_close_dmabuf(m.fd), m.fd = -1;
     return say(err, "a dma-buf export", nullptr), false;
+  }
   m.bo = xrt::bo(n->dev, (xrt::bo::export_handle) m.fd);
   return true;
 }
@@ -148,8 +150,10 @@ extern "C" void npu_close(Npu* n) {
 extern "C" bool npu_device(Npu* n, void* dev, uint64_t bytes, char err[OSMOS_ERR]) {
   Dma o;
   uint64_t off = 0;
-  if (hsa_amd_portable_export_dmabuf(dev, bytes, &o.fd, &off) != HSA_STATUS_SUCCESS || off)
+  if (hsa_amd_portable_export_dmabuf(dev, bytes, &o.fd, &off) != HSA_STATUS_SUCCESS || off) {
+    if (o.fd >= 0) (void) hsa_amd_portable_close_dmabuf(o.fd);
     return say(err, "GPU memory's dma-buf export (not a whole hipMalloc)", nullptr), false;
+  }
   try {
     o.d = dev, o.bo = xrt::bo(n->dev, (xrt::bo::export_handle) o.fd);
   } catch (const std::exception& e) {
@@ -177,7 +181,9 @@ static bool dev_view(Npu* n, const void* x, uint64_t bytes, xrt::bo& out) {
   const uint8_t* p = (const uint8_t*) x;
   for (Dma& o : n->devs) {
     const uint8_t* b = (const uint8_t*) o.d;
-    if (p >= b && p + bytes <= b + o.bo.size()) return out = xrt::bo(o.bo, bytes, (size_t) (p - b)), true;
+    const uint64_t sz = (uint64_t) o.bo.size();
+    if (p >= b && (uint64_t) (p - b) <= sz && bytes <= sz - (uint64_t) (p - b))
+      return out = xrt::bo(o.bo, bytes, (size_t) (p - b)), true;
   }
   return false;
 }
@@ -186,7 +192,8 @@ static bool dev_view(Npu* n, const void* x, uint64_t bytes, xrt::bo& out) {
 static bool view(Npu* n, const void* w, uint64_t bytes, xrt::bo& out) {
   const uint8_t* p = (const uint8_t*) w;
   for (Region& r : n->regions)
-    if (p >= r.base && p + bytes <= r.base + r.bytes) return out = xrt::bo(r.bo, bytes, (size_t) (p - r.base)), true;
+    if (p >= r.base && (uint64_t) (p - r.base) <= r.bytes && bytes <= r.bytes - (uint64_t) (p - r.base))
+      return out = xrt::bo(r.bo, bytes, (size_t) (p - r.base)), true;
   return dev_view(n, w, bytes, out);
 }
 
@@ -197,22 +204,37 @@ extern "C" bool npu_run(Npu* n, NpuKind kind, uint32_t qtype, uint32_t parts, co
   if (!kn) return say(err, "no kernel for the kind and format", nullptr), false;
   const double t0 = now_us();
   const uint64_t ab = n->a_bytes[kind], cb = n->c_bytes[kind];
+  struct Prepared {
+    xrt::bo x, y, a, c, d;
+  };
   try {
-    n->runs.clear();
+    std::vector<Prepared> prep;
+    prep.reserve(parts);
     for (uint32_t p = 0; p < parts; p++) {
-      xrt::bo x, y;
-      if (!view(n, w0[p], w_bytes, x) || (kind == NPU_GATE_UP && !view(n, w1[p], w_bytes, y)))
+      Prepared pr;
+      if (!view(n, w0[p], w_bytes, pr.x) || (kind == NPU_GATE_UP && !view(n, w1[p], w_bytes, pr.y)))
         return say(err, "an expert outside its regions", nullptr), false;
-      if (kind == NPU_DOWN) y = x;  // the down kernel's second weight argument is unread
-      xrt::bo a(n->a.bo, ab, p * ab), c, d;
-      if (!dev_view(n, c0[p], cb, c) || (kind == NPU_GATE_UP && !dev_view(n, c1[p], cb, d)))
+      if (kind == NPU_DOWN) pr.y = pr.x;  // the down kernel's second weight argument is unread
+      pr.a = xrt::bo(n->a.bo, ab, p * ab);
+      if (!dev_view(n, c0[p], cb, pr.c) || (kind == NPU_GATE_UP && !dev_view(n, c1[p], cb, pr.d)))
         return say(err, "a part's rows outside the outputs", nullptr), false;
-      if (kind == NPU_DOWN) d = c;  // the down kernel's second output is unwritten
-      n->runs.push_back(kn->k(3u, kn->instr, kn->ninstr, x, y, a, c, d));
+      if (kind == NPU_DOWN) pr.d = pr.c;  // the down kernel's second output is unwritten
+      prep.push_back(std::move(pr));
     }
+    n->runs.clear();
+    for (uint32_t p = 0; p < parts; p++)
+      n->runs.push_back(kn->k(3u, kn->instr, kn->ninstr, prep[p].x, prep[p].y, prep[p].a, prep[p].c, prep[p].d));
+    bool ok = true;
     for (xrt::run& r : n->runs)
-      if (r.wait() != ERT_CMD_STATE_COMPLETED) return say(err, "a launch did not complete", nullptr), false;
+      if (r.wait() != ERT_CMD_STATE_COMPLETED) ok = false;
+    if (!ok) return say(err, "a launch did not complete", nullptr), false;
   } catch (const std::exception& e) {
+    for (xrt::run& r : n->runs) {
+      try {
+        (void) r.wait();
+      } catch (...) {
+      }
+    }
     return say(err, "a launch", e.what()), false;
   }
   n->st.calls++, n->st.parts += parts, n->st.wait_us += now_us() - t0;

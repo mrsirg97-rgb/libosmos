@@ -147,6 +147,7 @@ bool oseq_draft_all(OsmosSeq *const *s, const int32_t *y, uint32_t n, float conf
                     int32_t (*drafts)[OSMOS_MAX_BLOCK], float (*conf)[OSMOS_MAX_BLOCK], int *counts,
                     char err[OSMOS_ERR])
 {
+  osmos_clear(err);
   if (!s || !y || !n || !drafts || !conf || !counts || !s[0] || !osmos_block(s[0]->e))
     return osmos_fail(err, "no sequences, room or drafter");
   Osmos *e = s[0]->e;

@@ -1,6 +1,7 @@
 /* a tensor read from its file (osmos/model/tensor.h) */
 #include "osmos/model/tensor.h"
 
+#include <errno.h>
 #include <fcntl.h>
 #include <math.h>
 #include <stdlib.h>
@@ -17,6 +18,8 @@ bool tensor_read_fd(int fd, const GgufTensor *t, void *out)
   for (uint64_t at = 0; at < t->bytes;)
   {
     const ssize_t n = pread(fd, (uint8_t *)out + at, t->bytes - at, (off_t)(t->offset + at));
+    if (n < 0 && errno == EINTR)
+      continue;
     if (n <= 0)
       return false;
     at += (uint64_t)n;
@@ -79,9 +82,17 @@ float *tensor_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
   if (!es)
     return NULL;
   *n = t->bytes / es;
-  uint8_t *b = malloc(t->bytes ? t->bytes : 1);
   float *v = malloc(*n * 4 + 4);
-  if (!b || !v || !tensor_read(g, t, b))
+  if (!v)
+    return NULL;
+  if (es == 4)
+  {
+    if (!tensor_read(g, t, v))
+      return free(v), NULL;
+    return v;
+  }
+  uint8_t *b = malloc(t->bytes ? t->bytes : 1);
+  if (!b || !tensor_read(g, t, b))
     return free(b), free(v), NULL;
   cpu_par_rows(*n, 1u << 20, to_f32, &(ToF32){b, v, es, t->type}); /* (each value alone: the serial loop's) */
   free(b);

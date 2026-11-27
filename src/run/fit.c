@@ -116,7 +116,8 @@ static bool sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headro
   bool live = true;
   for (int i = 1; i < FIT_BUILDS; i++)
   {
-    if (live && room >= headroom && (room <= headroom + FIT_SLACK || (over != UINT64_MAX && over - built <= FIT_SLACK)))
+    if (live && room >= headroom &&
+        (room <= headroom + FIT_SLACK || (over != UINT64_MAX && over > built && over - built <= FIT_SLACK)))
       break; /* in the window, or as close as the memory's steps allow */
     if (live && room < headroom && built <= dense)
       break; /* short at the floor: nothing smaller */
@@ -134,10 +135,15 @@ static bool sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headro
       const uint64_t low = prev < last ? prev : last;
       want = low > dense + FIT_CHUNK ? low - FIT_CHUNK : dense;
     }
-    if (over != UINT64_MAX && (want >= over || want <= ok))
-      want = ok + (over - ok) / 2; /* outside the bracket: its middle */
-    if (over != UINT64_MAX && over - ok <= FIT_SLACK)
-      want = ok; /* the bracket closed: the largest that left the headroom */
+    if (over != UINT64_MAX && over > ok)
+    {
+      if (want >= over || want <= ok)
+        want = ok + (over - ok) / 2; /* outside the bracket: its middle */
+      if (over - ok <= FIT_SLACK)
+        want = ok; /* the bracket closed: the largest that left the headroom */
+    }
+    else if (over != UINT64_MAX) /* MemAvailable wobble inverted the bracket (over <= ok): step below over */
+      want = over > dense + FIT_SLACK ? over - FIT_SLACK : dense;
     if (live)
       unbuild(ctx);
     live = build(ctx, want, &built, &room, err);

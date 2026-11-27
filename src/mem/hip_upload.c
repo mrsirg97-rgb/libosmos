@@ -1,4 +1,5 @@
 /* osmos/gpu/upload.h: a tensor read into GPU memory through a pinned piece */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -20,9 +21,20 @@ const char *gpu_read_tensor(OsmosLedger *l, const Gguf *g, const GgufTensor *t, 
   for (uint64_t at = 0; !why && at < t->bytes; at += piece)
   {
     const size_t n = t->bytes - at < piece ? (size_t)(t->bytes - at) : (size_t)piece;
-    if (pread(fd, pin, n, (off_t)(t->offset + at)) != (ssize_t)n)
-      why = "its file's read failed";
-    else if (hipMemcpy((uint8_t *)*dev + at, pin, n, hipMemcpyHostToDevice) != hipSuccess)
+    size_t got = 0;
+    while (got < n)
+    {
+      const ssize_t k = pread(fd, (uint8_t *)pin + got, n - got, (off_t)(t->offset + at + got));
+      if (k < 0 && errno == EINTR)
+        continue;
+      if (k <= 0)
+      {
+        why = "its file's read failed";
+        break;
+      }
+      got += (size_t)k;
+    }
+    if (!why && hipMemcpy((uint8_t *)*dev + at, pin, n, hipMemcpyHostToDevice) != hipSuccess)
       why = "the copy to GPU memory failed";
   }
   close(fd);

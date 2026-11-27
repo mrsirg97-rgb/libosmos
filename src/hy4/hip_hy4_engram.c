@@ -18,6 +18,7 @@ bool hy4_engram_offsets(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_
   int32_t last[ENGRAM_MAX_NGRAM];
   if (L * cols > (int)(sizeof rows / sizeof *rows))
     return false;
+  (void)rowstream_wait(&f->eg_rs); /* ensure any aborted step's readers are done before rewriting eg_off */
   for (uint32_t r = 0; r < runs; r++)
     for (uint32_t k = 0; k < run[r].len; k++)
     {

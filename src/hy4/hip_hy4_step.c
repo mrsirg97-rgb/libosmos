@@ -138,6 +138,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   f->rows = ok && !over && !fault ? n : 0;
   if (!ok || over || fault)
   {
+    (void)rowstream_wait(&f->eg_rs);
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
     { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */

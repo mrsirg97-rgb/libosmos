@@ -100,9 +100,13 @@ bool fwd_cpu_submit(Forward *f, int l, uint32_t picks, uint32_t nc, const int32_
   const uint32_t D = f->g->n_embd;
   if (!cpu_lane_wait(f->cpu)) /* (the last job: long posted, the stream past its wait) */
     return osmos_fail(err, "the CPU lane's experts failed");
-  for (uint32_t r = 0; r < picks; r++)
-    memcpy(f->cpu_x + (uint64_t)r * D, f->cpu_xf + (uint64_t)tok[r] * D, D * sizeof(float)),
-        f->cpu_w[r] = f->cpu_rw[pair[r]];
+  for (uint32_t k = 0; k < nc; k++)
+    for (uint32_t t = 0; t < f->cpu_e[k].cnt; t++)
+    {
+      const uint32_t r = f->cpu_e[k].row0 + t;
+      memcpy(f->cpu_x + (uint64_t)r * D, f->cpu_xf + (uint64_t)tok[r] * D, D * sizeof(float)),
+          f->cpu_w[r] = f->cpu_rw[pair[r]];
+    }
   const CpuLaneJob job = {L->exp_gate->type, L->exp_down->type, D, f->g->expert_ff, f->g->clamp_exp[l], f->cpu_x,
                           f->cpu_w, picks, f->cpu_e, nc, f->cpu_y, f->cpu_seq, ++f->cpu_value};
   if (!cpu_lane_submit(f->cpu, &job))

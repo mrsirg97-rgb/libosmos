@@ -204,6 +204,16 @@ static void test_round_trip(void)
     assert(k && k->item == GGUF_UINT32 && k->n == 4 && ((uint32_t *)k->v.items)[3] == 13);
     k = gguf_kv(g, "t.u64");
     assert(k && k->v.u == 1ull << 40);
+    int64_t iv = 0;
+    assert(gguf_int(gguf_kv(g, "t.u8"), 0, &iv) && iv == 200);
+    assert(gguf_int(gguf_kv(g, "t.i32"), 0, &iv) && iv == -7);
+    assert(gguf_int(gguf_kv(g, "t.u64"), 0, &iv) && iv == (int64_t)(1ull << 40));
+    assert(!gguf_int(gguf_kv(g, "t.f32"), 0, &iv));
+    assert(!gguf_int(gguf_kv(g, "t.bool"), 0, &iv));
+    assert(!gguf_int(gguf_kv(g, "t.str"), 0, &iv));
+    assert(!gguf_int(gguf_kv(g, "t.strs"), 0, &iv));
+    assert(gguf_int(gguf_kv(g, "t.u32s"), 3, &iv) && iv == 13);
+    assert(!gguf_int(gguf_kv(g, "t.u32s"), 4, &iv));
     assert(gguf_kv(g, "absent") == NULL && gguf_tensor(g, "absent") == NULL);
     const GgufTensor *t = gguf_tensor(g, "c.iq1_m");
     assert(t && t->type == 29 && t->n_dims == 3 && t->dims[0] == 256 && t->dims[2] == 2 && t->bytes == 112);

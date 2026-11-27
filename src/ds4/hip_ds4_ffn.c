@@ -21,7 +21,8 @@ bool fwd_engram_issue(Forward *f, char *err)
 {
   const Geometry *g = f->g;
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim;
-  uint64_t at = 0, rb = 0; /* (a step that failed or stopped before its Engram layers: rowstream_issue settles it) */
+  (void)rowstream_wait(&f->eg_rs); /* ensure any prior aborted step's readers are done before overwriting eg_off */
+  uint64_t at = 0, rb = 0;
   for (uint32_t k = 0; k < f->n_sub; k++)
     for (int l = 0, nth = 0; l < f->n_layers; l++)
     {

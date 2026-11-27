@@ -112,6 +112,7 @@ bool fwd_head(Forward *f, char *err)
     const uint32_t base = f->logit_rows && f->n_all > f->logit_rows ? f->n_all - f->logit_rows : 0;
     const uint32_t first = f->cur * FWD_MAX_BATCH; /* the sub-batch's first row of the batch */
     memset(f->slot, 0xff, f->step_n * sizeof *f->slot); /* (the head's rows this sub-batch's alone: b.vocab its) */
+    bool any = false;
     for (uint32_t k = 0; ok && k < n;)
     {
       if (!f->want[k] || (uint32_t)f->row[k] < base)
@@ -124,6 +125,7 @@ bool fwd_head(Forward *f, char *err)
         e++;
       for (uint32_t r = k; r < e; r++) /* the rows computed: kept, at their slots */
         f->slot[first + (uint32_t)f->row[r]] = (int32_t)((uint32_t)f->row[r] - base);
+      any = true;
       ok = fwd_mat(f, f->w->output, fwd_dev(f, f->w->output), V, D, b->x + (uint64_t)k * D, D, e - k,
                    b->vocab + (uint64_t)((uint32_t)f->row[k] - base) * V, V);
       k = e;
@@ -131,7 +133,7 @@ bool fwd_head(Forward *f, char *err)
     if (!ok)
       return osmos_fail(err, "a GPU call failed (the head)");
     fwd_probe(f, "logits", -1, f->pin->pos[0], b->vocab, (uint64_t)(f->n_all - base) * V, false);
-    f->vocab_rows = f->n_all - base;
+    f->vocab_rows = any ? f->n_all - base : 0;
   }
   if (n == f->n_all)
     return true;

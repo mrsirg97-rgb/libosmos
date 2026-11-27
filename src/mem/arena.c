@@ -92,7 +92,7 @@ void arena_destroy(Arena *a)
 
 void *arena_alloc(Arena *a, uint64_t bytes)
 {
-  if (!a || !bytes)
+  if (!a || !bytes || bytes > UINT64_MAX - (ARENA_GRAIN - 1))
     return NULL;
   const uint64_t n = (bytes + ARENA_GRAIN - 1) / ARENA_GRAIN;
   for (size_t i = 0; i < a->free.len; i++)

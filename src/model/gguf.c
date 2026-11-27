@@ -19,15 +19,25 @@ static bool gguf_signed(GgufValueType t)
   return t == GGUF_INT8 || t == GGUF_INT16 || t == GGUF_INT32 || t == GGUF_INT64;
 }
 
+static bool gguf_unsigned(GgufValueType t)
+{
+  return t == GGUF_UINT8 || t == GGUF_UINT16 || t == GGUF_UINT32 || t == GGUF_UINT64;
+}
+
 bool gguf_int(const GgufKv *kv, size_t i, int64_t *out)
 {
+  if (!kv || !out)
+    return false;
   if (kv->type != GGUF_ARRAY)
   {
-    if (!gguf_signed(kv->type) && kv->v.u > INT64_MAX)
-      return false;
-    *out = gguf_signed(kv->type) ? kv->v.i : (int64_t)kv->v.u;
-    return true;
+    if (gguf_signed(kv->type))
+      return *out = kv->v.i, true;
+    if (gguf_unsigned(kv->type) && kv->v.u <= (uint64_t)INT64_MAX)
+      return *out = (int64_t)kv->v.u, true;
+    return false;
   }
+  if (i >= kv->n || !kv->v.items)
+    return false;
   const void *p = kv->v.items;
   switch (kv->item)
   {
