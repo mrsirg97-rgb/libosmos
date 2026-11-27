@@ -1,5 +1,58 @@
 # Changelog
 
+## [0.19.0]: runtime audit — structural cleanup, correctness fixes, and hot-path optimizations
+
+A full runtime audit across the serving layer, host memory/loading/text paths, all six model families, and core GPU
+kernels: shared infrastructure replaces duplicated family code, correctness and safety gaps fail closed, and wasted
+work is trimmed without altering model math.
+
+- **Shared runtime primitives:**
+  - `osmos/run/draft.h` (`draft_accept`): NaN-safe speculative cutoff shared across all five drafters, plus Q4x MTP
+    vocab-size validation and a single-sync pinned `OverflowFlag` read across all six families.
+  - `osmos/mem/moe_stage.h` (`MoeStage`): shared compact async pinned routing-table staging replacing per-family
+    staging in DS4, Ink2, Hy4, and streamed Q4x.
+  - **Family parity:** Q4x gathers only kept LM-head rows into dead `b->ga` before projection; LFM3 defers trailing
+    LSA `close_blocks` and respects `honor_prompt`; Q35 gains `LsaCloser`, batched block closing, dense bypass below
+    `sparse_from`, YaRN bounds validation, and exact `q35_lsa_rollback`.
+- **Correctness, concurrency, and memory safety:**
+  - **API, serve, slots:** fixed `engine_run()` heap overflow, mutex races on `e->dead` / `e->in_fd` / `max_ctx`,
+    `SO_RCVTIMEO` `EDOM` handling, NULL/empty answer buffers, `ctx_of()` overflow, `request_tools()` error propagation,
+    speculative decode +1 over-generation at `max_ctx - 1`, `multi.c` duplicate `rid` and error handling,
+    `conv_cancel_read()` stale prompt clearing, and content-hashed slot filenames in `slots_put.c`.
+  - **Memory, CPU, NPU, model, text:** fixed `membrane_end` leaked holds, `pool.c` O(N) pinned scans / `now == 0`
+    stale pass / dead-spare eviction order / `fstat` caching, `cpu/lane.c` quantization overflow, `cpu/q8.c`
+    `pthread_once` init, DS4/Hy4 `rowstream_wait` and `tap_n`/`vocab_rows` checks, `gguf_int` type and bounds checks,
+    `weights.c` overlay slice bounds, `arena.c`/`dspark_index.c` overflow guards, `EINTR`/short-read I/O loops,
+    `npu_xrt.cpp` dmabuf leak and safe BO launch/wait, BPE stack fast-path and OOM propagation, `fit.c` bracket
+    inversion guard, and `oseq_draft_all` error clearing.
+  - **Model families and kernels:** fixed Q4x `q4x_kept_view` / `moe_side` stream race / `q4x_npu_take` error return /
+    expert type checks / `pend_pos` validation; Ink2 reset/rollback/seed state and `ink2_moe_prep` bounds; Hy4 Q8_0
+    type validation, F32 drafter weights, and error sync; LFM3/Q35 YaRN overflow and `lsa_closer_queue` error sync;
+    `mv_fp4` alignment gate; `MXFP8` unaligned-safe loads; `attn_core` `FA(8,4)` and static LDS accounting; NaN-safe
+    `order()`/`order_key()` in `attn.hip`/`hy4.hip` and `bf16_rn` in `mm_fp4.hip`; `ops_index_score_rows` FMA dispatch;
+    `q8.h` `kSelAll` count guard; `round.h` non-finite `ue8m0_code`; wave-shuffle `route.hip` scan; and CUDA
+    compatibility (`!osmos_cuda` guard, `hipDeviceAttributeMultiprocessorCount`, `__shfl_up`).
+- **Wasted work and hot-path optimizations:**
+  - **GPU kernels:** skip idle waves in `attn_core_heads.h`; halve `v_dot4` calls for zero-offset quant formats in
+    `q8.h`; gate `select.h` `cand[]` gather on `bin_n <= kCandCap`; size sparse MLA `splits` by `sel_cap * pool`;
+    early-exit `hy4` indexer counts/selection and `attn_core_q35.h` unused splits; drop 3 barriers in `moe_tiles.h` and
+    a duplicate barrier in `attn_core_draft.h`; bisect `top_k` in raw logit space in `ops.hip` with one `expf` pass.
+  - **Serving and engine:** stop draft sampling on the first mismatch; skip `oseq_draft_all` with 0 slack and
+    `osmos_greedy` when all lanes sample; stream-local `ops_sample` without `hipDeviceSynchronize()`; direct host-state
+    slot save via `oseq_mark_is_state()` without a GPU round-trip; read-only `tokenizer_has_special()` fast path in
+    `osmos-api` to avoid deep JSON clones on clean requests.
+  - **Model families and loading:** skip non-last DS4 LM head, zero-row `ops_hc_pre_rms`, unused prefill `MoeStage`
+    tables, redundant compressor kernels, whole-resident `fwd_guess`, empty 64 MiB repack stage, and layer-0 guess
+    routers, plus spin-wait in DS4 drafter rounds; hoist Hy4 MLA Q/RoPE out of the `runs` loop, pair `sh_gate` +
+    `sh_up`, drop ~560 MB unused DFly2 `head8`, skip BF16 `output.weight` upload when Q8_0 head replaces it, lazily
+    allocate `pin_logits`, free converted `f->dev` tensors, and size Engram scratch for one layer; trim Ink2 double
+    `ops_rms_x16_many`, full-vocab logits copy, and padded drafter rows; trim Q4x `experts()` redundant launch, NPU
+    down-pack size, MTP seed inject, unused PLE buffers, and padded DFlash rows; clamp the final `resident.c` arena to
+    exact remaining bytes; keep one open shard fd with `POSIX_FADV_DONTNEED` during upload; single-pass Q8_0 LM head
+    quantization via `q4x_kv_put(v=NULL)`.
+- **Tests:** added `test_draft`, `test_moe_stage`, `test_slots`, plus regression coverage in `test_gguf`, `test_pool`,
+  `test_fit`, and `test_resident`.
+
 ## [0.18.2]: time to first token - a pack starts in one build
 
 Every pack's answers are unchanged, token for token (hashed against 0.18.1's), drafted == plain for every pack;
