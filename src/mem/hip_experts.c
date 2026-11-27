@@ -45,5 +45,6 @@ uint64_t experts_fit_now(OsmosLedger *l, uint64_t fixed)
     return 1;
   const uint64_t left = ledger_left_settled(l ? l : own);
   ledger_destroy(own);
-  return left ? fixed + left : 1;
+  /* leave FIT_SLACK past FIT_HEADROOM: hipHostRegister page tables (~5 MiB/GiB) plus MemAvailable wobble */
+  return left > FIT_SLACK ? fixed + (left - FIT_SLACK) : 1;
 }

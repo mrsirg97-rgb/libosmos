@@ -133,7 +133,14 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
   ExpertsPlan plan;
   Experts ex;
   char merr[OSMOS_ERR] = "";
-  if (ok && !experts_plan(units, L, E, warm, 0, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
+  const uint64_t P = (uint64_t)f->max_tokens * K;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds((uint32_t)P, E, &bd);
+  const uint64_t moe_cap = (5 * (uint64_t)bd.entries + 2 * (uint64_t)bd.slots + P) * 4 +
+                           Q4X_GROUP_TENSORS * (uint64_t)bd.entries * sizeof(void *) + 16 * MOE_STAGE_ALIGN;
+  const uint64_t tab_bytes = n * Q4X_GROUP_TENSORS * sizeof(void *);
+  const uint64_t post = P * 4 + 2 * moe_cap > tab_bytes ? P * 4 + 2 * moe_cap : tab_bytes;
+  if (ok && !experts_plan(units, L, E, warm, 0, budget, f->fixed_bytes + post, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
   if (ok && !experts_create(f->ledger, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
                             merr))
@@ -143,7 +150,7 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
     f->pinned_bytes = host_slots_bytes(ex.slots) + host_slots_bytes(ex.stream);
   if (ok && membrane_whole(f->mem))
   {
-    const void **tab = malloc(n * Q4X_GROUP_TENSORS * sizeof *tab);
+    const void **tab = malloc(tab_bytes);
     ok = tab != NULL;
     for (size_t u = 0; ok && u < n; u++) /* [layer][tensor][expert]: a layer's tensor's E addresses side by side */
     {
@@ -152,18 +159,14 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
       for (int k = 0; ok && k < Q4X_GROUP_TENSORS; k++)
         tab[((u / E) * Q4X_GROUP_TENSORS + (size_t)k) * E + u % E] = dev[k];
     }
-    ok = ok && ((alloc(f, &f->exp_tab, n * Q4X_GROUP_TENSORS * sizeof *tab) &&
-                 hipMemcpy(f->exp_tab, tab, n * Q4X_GROUP_TENSORS * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
+    ok = ok && ((alloc(f, &f->exp_tab, tab_bytes) &&
+                 hipMemcpy(f->exp_tab, tab, tab_bytes, hipMemcpyHostToDevice) == hipSuccess) ||
                 osmos_fail(err, "GPU memory refused (the experts' table)"));
     free(tab);
   }
   else if (ok) /* streamed: a step's tables the host's (q4x_moe), staged compact via MoeStage */
   {
-    const uint64_t P = (uint64_t)f->max_tokens * K;
-    Q4xExpertBounds bd;
-    q4x_expert_bounds((uint32_t)P, E, &bd);
-    f->moe_cap = (5 * (uint64_t)bd.entries + 2 * (uint64_t)bd.slots + P) * 4 +
-                 Q4X_GROUP_TENSORS * (uint64_t)bd.entries * sizeof(void *) + 16 * MOE_STAGE_ALIGN;
+    f->moe_cap = moe_cap;
     ok = (f->h_ex = malloc(E * sizeof *f->h_ex)) && (f->h_by = malloc(P * 4)) && (f->h_row = malloc(P * 4)) &&
          (f->h_run = malloc(4 * (size_t)E * 4)) && (f->h_est = malloc(((size_t)E + 1) * 4)) &&
          (f->h_gidx = malloc(bd.slots * 4)) && (f->h_hidx = malloc(bd.slots * 4)) &&
