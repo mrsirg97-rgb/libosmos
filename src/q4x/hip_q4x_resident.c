@@ -326,7 +326,7 @@ bool q4x_buffers(Q4xForward *f, char *err)
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (want[i].per_token)
       f->rows[f->n_rows].p = want[i].p, f->rows[f->n_rows++].row = want[i].bytes / n;
-  f->ovf = (OverflowFlag){b->overflow, 4, false};
+  f->ovf = (OverflowFlag){b->overflow, 4, false, NULL};
   if (!overflow_reset(&f->ovf, err))
     return false;
   int32_t *iota = malloc(n * g->ple_heads * 4);
@@ -342,7 +342,7 @@ bool q4x_buffers(Q4xForward *f, char *err)
   if (!(f->attn = attn_core_create(&ad, b->fa, attn_core_scratch(&ad), err)))
     return false;
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
-          pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
+          pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) && (f->ovf.pin = b->pin_overflow) &&
           (b->slot = malloc(n * sizeof *b->slot)) && memset(b->slot, 0xff, n * sizeof *b->slot)) ||
          osmos_fail(err, "pinned memory refused (a step's tokens)");
 }

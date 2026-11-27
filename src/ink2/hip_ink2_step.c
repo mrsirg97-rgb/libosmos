@@ -41,7 +41,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       return osmos_fail(err, "a GPU call failed: " #x);                                                       \
   } while (0)
   ink2_pf(f, -1);
-  GPU(hipMemcpy(f->ids_d, tok, n * 4, hipMemcpyHostToDevice) == hipSuccess);
+  memcpy(f->pin_tok + row0, tok, (size_t)n * 4);
+  GPU(hipMemcpyAsync(f->ids_d, f->pin_tok + row0, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess);
   GPU(ops_embed(W->embed->type, f->embed, C, f->ids_d, n, 1, f->h, f->st));
   GPU(ops_rms(f->h, C, C, f->embed_norm, g->rms_eps, n, f->h, C, f->st));
   for (int c = 0; c < INK2_CONVS; c++) /* every tail's room first: the step's reads and writes in one place */
@@ -312,12 +313,12 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
   bool ok = true;
   for (uint32_t i = 0, at = 0; ok && i < runs; at += lens[i++])
     ok = run(f, seqs[i], tokens + at, lens[i], at, err);
-  ok = ok && (hipDeviceSynchronize() == hipSuccess || osmos_fail(err, "a GPU call failed"));
-  hipDeviceSynchronize();
+  ok = ok && ((overflow_read(&f->ovf, f->st) && hipStreamSynchronize(f->st) == hipSuccess) ||
+              osmos_fail(err, "a GPU call failed"));
+  if (!ok)
+    (void)hipDeviceSynchronize();
   membrane_end(f->mem);
-  int32_t overflow = 0;
-  if (ok && hipMemcpy(&overflow, f->overflow, 4, hipMemcpyDeviceToHost) != hipSuccess)
-    ok = osmos_fail(err, "a GPU call failed (the step's overflow flag)");
+  const int32_t overflow = ok ? *f->pin_overflow : 0;
   if (ok && overflow)
     ok = osmos_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   if (!ok) /* what the failed step may have set: not the next step's to answer for */

@@ -273,16 +273,14 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
   if (ok && kept)
     ok = ops_rms(f->hx, D, D, fv(f, f->w->out_norm), g->rms_eps, kept, f->xn, D, NULL) &&
          mat_typed(f, f->head_type, dev(f, f->w->output), f->w->s_output, V, D, f->xn, kept, f->logits, read, false);
-  ok = ok && hipStreamSynchronize(NULL) == hipSuccess;
-  int32_t over = 0;
-  ok = ok && hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  ok = ok && overflow_read(&f->ovf, NULL) && hipStreamSynchronize(NULL) == hipSuccess;
+  const int32_t over = ok ? *f->pin_overflow : 0;
   f->rows = ok && !over ? n : 0;
   if (!ok || over)
   {
     for (uint32_t r = 0; r < runs; r++) /* their rings part written: never read on */
       run[r].s->broken = true;
-    if (over) /* the flag this step's: the next step's from zero */
-      { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
+    { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
     return osmos_fail(err, "%s", over ? "an activation past f16's range (the step refused)" : "a GPU call failed in the step");
   }
   for (uint32_t r = 0; r < runs; r++)

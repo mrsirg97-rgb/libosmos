@@ -13,6 +13,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "dflash_core.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 #define F sizeof(float)
@@ -181,8 +182,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
     if (c == K)
       return osmos_fail(err, "the selector's pick not one of its candidates"), -1;
     const float p = d->pin_p[kept] * expf(val[c] - val[0]);
-    cum *= p;
-    if (p < conf_min || cum < cum_min)
+    if (!draft_accept(p, conf_min, cum_min, &cum))
       break;
     drafts[kept] = d->pin_path[kept], conf[kept] = p;
   }

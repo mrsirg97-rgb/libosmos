@@ -165,7 +165,8 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && (f->attn = attn_core_create(&ad, f->fa, scratch, err)) != NULL;
   f->head_type = w->output->type;
-  ok = ok && head_q8(f, err) && (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) &&
+  ok = ok && head_q8(f, err) && q35_pinned(&f->bufs, &f->pin_overflow, 4) && !(*f->pin_overflow = 0) &&
+       (f->ovf = (OverflowFlag){f->overflow, 4, false, f->pin_overflow}, overflow_reset(&f->ovf, err)) &&
        q35_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && q35_pinned(&f->bufs, &f->pin_tok, n * 4) &&
        (f->slot = malloc(n * 4));
   if (!ok)

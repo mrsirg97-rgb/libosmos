@@ -344,8 +344,10 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && gpu_bufs_host(&f->bufs, f->ledger, &f->pin_tok, n * 4) &&
        gpu_bufs_host(&f->bufs, f->ledger, &f->pin_logits, lr * g->n_vocab * F) &&
+       gpu_bufs_host(&f->bufs, f->ledger, &f->pin_overflow, 4) && !(*f->pin_overflow = 0) &&
        (f->slot = malloc(n * 4)) &&
-       (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) && hipDeviceSynchronize() == hipSuccess;
+       (f->ovf = (OverflowFlag){f->overflow, 4, false, f->pin_overflow}, overflow_reset(&f->ovf, err)) &&
+       hipDeviceSynchronize() == hipSuccess;
   for (int s = 0; ok && s < 2; s++)
     ok = (f->attn[s] = attn_core_create(&ad[s], f->fa_scratch, scratch, err)) != NULL;
   if (!ok)

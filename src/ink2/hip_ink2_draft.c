@@ -19,6 +19,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 #define T_F32 0u
@@ -176,7 +177,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     if (!(d->attn[l] = attn_core_create(&ld, d->scr, attn_core_scratch(&ad), err)))
       return false;
   }
-  d->ovf = (OverflowFlag){d->overflow, 4, false};
+  d->ovf = (OverflowFlag){d->overflow, 4, false, NULL};
   return overflow_reset(&d->ovf, err);
 }
 
@@ -382,8 +383,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
   float cum = 1.0f;
   for (; k < (int)steps; k++)
   {
-    cum *= p[k];
-    if (p[k] < conf_min || cum < cum_min)
+    if (!draft_accept(p[k], conf_min, cum_min, &cum))
       break;
     drafts[k] = ids[k], conf[k] = p[k];
   }

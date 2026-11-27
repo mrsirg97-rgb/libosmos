@@ -334,15 +334,15 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   if (ok && kept)
     ok = ops_rms(f->hk, D, D, lfm3_fv(f, f->w->out_norm), g->rms_eps, kept, f->xf, D, f->st) &&
          mv_strided(f->head_type, f->head, V, D, f->xf, D, kept, f->logits, V, f->st);
-  int32_t over = 0;
-  ok = ok && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess &&
-       hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  /* f->overflow is only written by mm_x16 during reads: skip its D2H on decode steps */
+  ok = ok && (!read || overflow_read(&f->ovf, f->st)) && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const int32_t over = ok && read ? *f->pin_overflow : 0;
   f->rows = ok && !over ? n : 0;
   if (!ok || over)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    if (over)
+    if (read)
       { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
     return osmos_fail(err, "%s", over ? "an activation past f16's range in a read (the step refused)"
                                        : "a GPU call failed in the step (its sequences refused until a load)");

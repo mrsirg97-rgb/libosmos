@@ -35,7 +35,7 @@ struct Q35Forward
   int32_t *slot;            /* the last step's row -> its logits' slot, or -1 (host, max_tokens) */
   uint32_t rows;            /* the last step's rows */
   int32_t *ids, *argmax;    /* q35_greedy's ids (device, logit_rows) and its scratch */
-  int32_t *tok, *pin_tok, *overflow;
+  int32_t *tok, *pin_tok, *overflow, *pin_overflow;
   OverflowFlag ovf; /* the flag's reset (osmos/gpu/overflow.h): owed when one failed */
   void *x16;
   const float *x16_x; /* the activations x16 holds as f16 (the last matrix's, on the matmul), or NULL */

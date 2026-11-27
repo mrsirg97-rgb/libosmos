@@ -68,7 +68,7 @@ const Q4xX16 *q4x_side(Q4xForward *f, uint32_t n, uint32_t cols, Q4xX16 *s)
 
 bool q4x_overflow_read(Q4xForward *f)
 {
-  return hipMemcpyAsync(f->b.pin_overflow, f->b.overflow, 4, hipMemcpyDeviceToHost, NULL) == hipSuccess;
+  return overflow_read(&f->ovf, NULL);
 }
 
 bool q4x_overflow_ok(Q4xForward *f, char *err)

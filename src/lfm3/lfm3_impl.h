@@ -65,8 +65,8 @@ struct Lfm3Forward
   float *h_ik, *h_cent; /* close_max blocks of each (close_blocks: a layer's closed blocks a copy, one wait) */
   uint32_t close_max;
   int32_t *h_mem;
-  OverflowFlag ovf;   /* its reset (osmos/gpu/overflow.h): owed when one failed */
-  int32_t *overflow;  /* an activation past f16's range in a read (mm_x16's): the step refused */
+  OverflowFlag ovf;              /* its reset (osmos/gpu/overflow.h): owed when one failed */
+  int32_t *overflow, *pin_overflow; /* an activation past f16's range in a read (mm_x16's): the step refused */
   void *st;
   /* a step's buffers: max_tokens rows each */
   int32_t *tok, *pin_tok;

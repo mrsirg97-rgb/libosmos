@@ -12,3 +12,9 @@ bool overflow_reset(OverflowFlag *o, char err[OSMOS_ERR])
 }
 
 bool overflow_settle(OverflowFlag *o, char err[OSMOS_ERR]) { return !o->owed || overflow_reset(o, err); }
+
+bool overflow_read(const OverflowFlag *o, void *stream)
+{
+  return o && o->pin &&
+         hipMemcpyAsync(o->pin, o->dev, o->bytes, hipMemcpyDeviceToHost, (hipStream_t)stream) == hipSuccess;
+}

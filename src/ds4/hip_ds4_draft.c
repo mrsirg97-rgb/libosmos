@@ -9,6 +9,7 @@
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/model/qtype.h"
 #include "osmos/mem/hip_slots.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_ds4_draft.c)
@@ -348,8 +349,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     if (!quant_dequant(DRAFTER_BF16, e_row, d->rank, d->cat + D, NULL) ||
         !confidence(d, (uint32_t)n, &conf[n]))
       return osmos_fail(err, "a GPU call failed (the drafter's confidence)"), -1;
-    cum *= conf[n];
-    if (conf[n] < conf_min || cum < cum_min)
+    if (!draft_accept(conf[n], conf_min, cum_min, &cum))
       break;
     if (!head) /* the head for every row at once, the first time a row passes: the head read once */
     {

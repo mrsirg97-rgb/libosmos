@@ -144,14 +144,15 @@ static bool buffers(Ink2Forward *f)
   for (int k = 0; k < 2; k++) /* (the down rows' buffer, ed_bytes: the cores' scratch) */
     if (!(f->attn[k] = attn_core_create(k ? &full : &win, f->ed, ed_bytes, why)))
       return fprintf(stderr, "ink2: %s\n", why), false;
-  f->ovf = (OverflowFlag){f->overflow, 4, false};
-  if (!overflow_reset(&f->ovf, NULL))
-    return false;
-  /* the router's picks and weights and the experts' tables through pinned host memory: copies queued on the stream,
-     one synchronize a layer for the picks, none for the tables (the next layer's picks' wait is past them) */
   if (!gpu_bufs_host(&f->bufs, f->ledger, &f->hpick, 2 * T * K * 4) ||
       !gpu_bufs_host(&f->bufs, f->ledger, &f->hgpick, T * K * 4) ||
-      !gpu_bufs_host(&f->bufs, f->ledger, &f->m_host, ink2_table_bytes(T * K, E)))
+      !gpu_bufs_host(&f->bufs, f->ledger, &f->m_host, ink2_table_bytes(T * K, E)) ||
+      !gpu_bufs_host(&f->bufs, f->ledger, &f->pin_tok, T * 4) ||
+      !gpu_bufs_host(&f->bufs, f->ledger, &f->pin_overflow, 4))
+    return false;
+  *f->pin_overflow = 0;
+  f->ovf = (OverflowFlag){f->overflow, 4, false, f->pin_overflow};
+  if (!overflow_reset(&f->ovf, NULL))
     return false;
   f->slot = malloc(T * sizeof *f->slot);
   f->m_at = malloc((E + 1) * sizeof *f->m_at), f->m_by = malloc(T * K * sizeof *f->m_by);

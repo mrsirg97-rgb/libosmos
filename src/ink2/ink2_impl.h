@@ -158,7 +158,7 @@ struct Ink2Forward
   HostSlots *slots, *stream;
   Membrane *mem;
   /* the step's buffers (max_tokens rows) */
-  int32_t *ids_d;
+  int32_t *ids_d, *pin_tok;
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
       *tmp, *res_sc, *eg, *eu, *ed, *head, *logits;
   /* the picks, their weights after them (pick + the step's pairs); the next layer's guessed (gw their weights) */
@@ -168,7 +168,7 @@ struct Ink2Forward
   const int32_t *m_row;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
   OverflowFlag ovf;  /* the step flag's reset (osmos/gpu/overflow.h): owed when one failed */
-  int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
+  int32_t *overflow, *pin_overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
   AttnCore *attn[2]; /* a sliding layer's attention, a full layer's (attn_core: their scratch ed, borrowed) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */

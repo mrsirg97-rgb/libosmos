@@ -18,6 +18,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/run/draft.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/model/qtype.h"
 #include "osmos/model/safetensors.h"
@@ -458,8 +459,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
   float cum = 1.0f;
   for (; k < (int)most; k++)
   {
-    cum *= d->pin_prob[k];
-    if (d->pin_prob[k] < conf_min || cum < cum_min)
+    if (!draft_accept(d->pin_prob[k], conf_min, cum_min, &cum))
       break;
     drafts[k] = d->pin_pick[k], conf[k] = d->pin_prob[k];
   }

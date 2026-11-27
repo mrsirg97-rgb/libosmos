@@ -220,39 +220,51 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
     if (seqs[i] && seqs[i]->broken)
       return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   const uint32_t n = runs_of(f, seqs, lens, runs, r);
-  f->steps++;
   if (!n || (uint64_t)row0 + n > f->max_tokens)
     return osmos_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
                          "past the forward's max_tokens");
+  f->steps++;
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
   for (uint32_t i = 0; i < runs; i++) /* from here a failure leaves the rings part written: advance clears it */
     r[i].s->broken = true;
   memset(b->slot + row0, 0xff, n * sizeof *b->slot); /* the step's rows: none kept until it is whole (-1) */
-  if (!embed(f, r, runs, tokens, n))
-    return osmos_fail(err, "a GPU call failed (the embedding)");
+  const char *stage = "the embedding";
+  bool ok = embed(f, r, runs, tokens, n);
   bool pending = false;
-  for (int l = 0; l < g->n_layers; l++)
+  for (int l = 0; ok && l < g->n_layers; l++)
   {
-    if (!layer(f, r, runs, l, n, &pending))
-      return osmos_fail(err, "a GPU call failed (a layer)");
-    q4x_seen(f, "l_last", l, b->h, n * hd);
+    stage = "a layer";
+    ok = layer(f, r, runs, l, n, &pending);
+    if (ok)
+      q4x_seen(f, "l_last", l, b->h, n * hd);
   }
   const Q4xWeights *w = f->w;
-  if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending)) /* the last MoE's into b.h */
-    return osmos_fail(err, "a GPU call failed (the end mixer)");
+  if (ok)
+    stage = "the end mixer", ok = q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending);
   /* the head's h: the residual the end mixer read, at the step's rows (each sequence's place: advance) */
-  if (f->mtp && hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float),
-                               hipMemcpyDeviceToDevice, NULL) != hipSuccess)
-    return osmos_fail(err, "a GPU call failed (the MTP head's rows)");
-  q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
-  const bool done = head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
-  hipDeviceSynchronize();
+  if (ok && f->mtp)
+    stage = "the MTP head's rows",
+    ok = hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float), hipMemcpyDeviceToDevice,
+                        NULL) == hipSuccess;
+  if (ok)
+    q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd), stage = "the logits";
+  const bool done = ok && head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
+  if (!done)
+  {
+    (void)hipDeviceSynchronize(); /* drain any side-stream work before releasing membrane holds */
+    f->inj_side = false;
+    f->st = NULL;
+  }
   if (f->mem)
     membrane_end(f->mem); /* the step's holds ended (its experts' kernels done) */
   if (!done)
-    return osmos_fail(err, "a GPU call failed (the logits)");
+  {
+    char rerr[OSMOS_ERR] = "";
+    overflow_reset(&f->ovf, rerr);
+    return osmos_fail(err, "a GPU call failed (%s)", stage);
+  }
   if (!q4x_overflow_ok(f, err))
     return false;
   for (uint32_t i = 0; i < runs; i++)

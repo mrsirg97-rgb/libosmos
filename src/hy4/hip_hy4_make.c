@@ -226,8 +226,9 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
                           err, HY4_IX_SPREAD); /* (whole: SCOPE.md) */
   for (size_t i = 0; ok && i < sizeof read_want / sizeof *read_want; i++)
     ok = hy4_alloc(&f->bufs, read_want[i].p, read_want[i].bytes) || osmos_fail(err, "GPU memory refused (the read's buffers)");
-  ok = ok && (f->ovf = (OverflowFlag){f->overflow, 8, false}, overflow_reset(&f->ovf, err)) && (f->fault = f->overflow + 1) &&
-       hy4_pinned(&f->bufs, &f->pin_flags, 8) && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
+  ok = ok && hy4_pinned(&f->bufs, &f->pin_flags, 8) &&
+       (f->ovf = (OverflowFlag){f->overflow, 8, false, f->pin_flags}, overflow_reset(&f->ovf, err)) &&
+       (f->fault = f->overflow + 1) && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
        (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
        (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&

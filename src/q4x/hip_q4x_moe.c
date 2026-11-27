@@ -219,7 +219,10 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   if (side_stream)
     f->st = f->s2;
   if (side_stream && f->side_spin && !q4x_spin(f->side_spin, f->s2)) /* side_spin: the shared expert last */
+  {
+    f->st = NULL;
     return false;
+  }
   const bool ok = q4x_mat2(f, L->sh_gate, sff, b->shg, sff, L->sh_up, sff, b->shu, sff, D, b->mixed, D, n,
                            n <= MM_MAX_TOKENS) &&
                   q4x_swiglu(b->shg, b->shu, (uint64_t)n * sff, b->shg, q4x_side(f, n, sff, &sd), f->st) &&
