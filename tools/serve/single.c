@@ -140,9 +140,13 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   if (!osmos_batch(sv->e, ss, toks, (uint32_t)k + 1, c->err) ||
       !server_greedy(sv, a->samp, 0, (uint32_t)k + 1, picks, c->err))
     return -1;
-  for (int i = 0; i <= k; i++) /* row i: the held, then toks[0 .. i] */
+  for (int i = 0; i <= k; i++) /* row i: the held, then toks[0 .. i]; stop at first draft mismatch */
+  {
     if (!server_answer(sv, a->samp, &c->held, toks, (uint32_t)i + 1, (uint32_t)i, &picks[i], c->err))
       return -1;
+    if (i < k && picks[i] != dr[i])
+      break;
+  }
   int m = 0;
   while (m < k && picks[m] == dr[m])
     m++;

@@ -118,6 +118,7 @@ int32_t oseq_position(const OsmosSeq *s);
 uint64_t oseq_state_bytes(const OsmosSeq *s);
 bool oseq_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);
 bool oseq_load(OsmosSeq *s, const void *in, uint64_t bytes, char err[OSMOS_ERR]);
+bool oseq_mark_is_state(const OsmosSeq *s);
 bool oseq_save_to(const OsmosSeq *s, StateSink sink, void *ctx, char err[OSMOS_ERR]);
 uint64_t oseq_mark_bytes(const OsmosSeq *s);
 bool oseq_mark_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR]);

@@ -246,6 +246,20 @@ int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool 
   return (int64_t)n;
 }
 
+bool tokenizer_has_special(const Tokenizer *t, const char *s, size_t len)
+{
+  if (!t || !s || !len)
+    return false;
+  for (int32_t k = 0; k < t->n_special; k++)
+  {
+    const char *x = t->text[t->special[k]];
+    const size_t xl = strlen(x);
+    if (xl && xl <= len && memmem(s, len, x, xl))
+      return true;
+  }
+  return false;
+}
+
 size_t tokenizer_defuse(const Tokenizer *t, char *s, size_t len)
 {
   size_t changed = 0;

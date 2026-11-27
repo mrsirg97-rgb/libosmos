@@ -108,6 +108,11 @@ uint64_t oseq_mark_bytes(const OsmosSeq *s)
   return !s ? 0 : s->e->fam->mark_bytes ? s->e->fam->mark_bytes(s->impl) : oseq_state_bytes(s);
 }
 
+bool oseq_mark_is_state(const OsmosSeq *s)
+{
+  return s && !s->e->fam->mark_save;
+}
+
 bool oseq_mark_save(const OsmosSeq *s, void *out, uint64_t bytes, char err[OSMOS_ERR])
 {
   osmos_clear(err); /* (osmos/err.h: an earlier failure's cause never reported as this one's) */

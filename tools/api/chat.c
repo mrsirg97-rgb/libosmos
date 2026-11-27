@@ -104,6 +104,37 @@ static size_t defuse(Json *j, const Tokenizer *t)
   return changed;
 }
 
+/* read-only pre-check: whether j may contain any special token text (or multi-part text / escaped tool arguments
+   that need full copy+defuse); skips deep-cloning messages/tools in the common clean case */
+static bool needs_defuse(const Json *j, const Tokenizer *t)
+{
+  if (!j)
+    return false;
+  if (j->type == JSON_STRING)
+    return tokenizer_has_special(t, j->s, j->len);
+  if (j->type == JSON_ARRAY)
+  {
+    size_t parts = 0;
+    for (size_t i = 0; i < j->n; i++)
+    {
+      const Json *x = json_get(j->item[i], "text");
+      if (x && x->type == JSON_STRING && ++parts > 1)
+        return true;
+    }
+  }
+  for (size_t i = 0; i < j->n; i++)
+  {
+    const Json *v = j->item[i];
+    if (j->key && tokenizer_has_special(t, j->key[i], j->klen[i]))
+      return true;
+    if (j->key && !strcmp(j->key[i], "arguments") && v->type == JSON_STRING && memchr(v->s, '\\', v->len))
+      return true;
+    if (needs_defuse(v, t))
+      return true;
+  }
+  return false;
+}
+
 /* the prompt's ids: the rendered messages, a special token only where the template put one. a client's string that
    holds a special token's text (a tool's result quoting a chat's markup) is that text: the request rendered again
    from its strings defused is the shape (tokenizer_encode_shaped), and the two renders must differ only in the
@@ -116,19 +147,25 @@ static int32_t *prompt_ids(Api *a, const Request *rq, size_t *n, char err[OSMOS_
     return free(text.p), osmos_fail(err, "%s", cerr), NULL;
   size_t changed = 0;
   bool oom = text.oom;
-  Request sh = *rq;
-  sh.messages = copy(rq->messages, &oom), sh.tools = copy(rq->tools, &oom);
-  sh.branch = rq->messages; /* the template's choices the text's (a defused string reads otherwise) */
-  if (sh.messages)
-    changed += defuse(sh.messages, a->tok);
-  if (sh.tools)
-    changed += defuse(sh.tools, a->tok);
-  const char *why = oom ? "out of memory" : NULL;
-  if (!why && changed && !a->d->render(&sh, &shape, cerr))
-    why = "the request's strings defused, its prompt refused";
-  if (!why && changed && (shape.oom || shape.n != text.n))
-    why = shape.oom ? "out of memory" : "the prompt's own special tokens could not be told from its strings' text";
-  json_free(sh.messages), json_free(sh.tools);
+  if (!oom && (needs_defuse(rq->messages, a->tok) || needs_defuse(rq->tools, a->tok)))
+  {
+    Request sh = *rq;
+    sh.messages = copy(rq->messages, &oom), sh.tools = copy(rq->tools, &oom);
+    sh.branch = rq->messages; /* the template's choices the text's (a defused string reads otherwise) */
+    if (sh.messages)
+      changed += defuse(sh.messages, a->tok);
+    if (sh.tools)
+      changed += defuse(sh.tools, a->tok);
+    if (!oom && changed && !a->d->render(&sh, &shape, cerr))
+      oom = false, changed = 0, shape.oom = false, free(shape.p), shape.p = NULL, shape.n = (size_t)-1; /* flagged below */
+    json_free(sh.messages), json_free(sh.tools);
+  }
+  const char *why = oom ? "out of memory"
+                        : shape.n == (size_t)-1 ? "the request's strings defused, its prompt refused"
+                        : changed && (shape.oom || shape.n != text.n)
+                            ? (shape.oom ? "out of memory"
+                                         : "the prompt's own special tokens could not be told from its strings' text")
+                            : NULL;
   int32_t *ids = why ? NULL : malloc((text.n + 1) * sizeof *ids); /* a token is a byte or more */
   const int64_t k = !ids ? -1 : changed ? tokenizer_encode_shaped(a->tok, text.p, shape.p, text.n, ids, text.n + 1)
                                         : tokenizer_encode(a->tok, text.p, text.n, true, ids, text.n + 1);
