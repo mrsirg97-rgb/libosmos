@@ -76,10 +76,7 @@ bool gpu_upload_table(OsmosLedger *l, const Gguf *g, uint64_t piece, gpu_upload_
   }
   for (int f = 0; f < g->n_files; f++)
     if (fds[f] >= 0)
-    {
-      (void)posix_fadvise(fds[f], 0, 0, POSIX_FADV_DONTNEED);
       close(fds[f]);
-    }
   free(fds);
   ledger_host_free(l, pin);
   return ok;
