@@ -317,18 +317,9 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
     return false;
   for (uint32_t m = 0; P < E && m < P; m++) /* a decode's picks counted: in memory or not (the stats') */
     membrane_score(f->mem, (uint32_t)l * E + (uint32_t)f->hpick[m]);
-  /* the tables, one region sent in one copy, each table's place fixed by the step's most pairs: the entries' gate, up
-     and down pointers, counts, their slots' and rows' offsets (gate and up's x and y, down's); each slot's token and
-     sorted row (-1: a tile's padding); each pair's sorted row and weight, each sorted row's scales */
-  const uint64_t ecap = ink2_table_entries((uint64_t)f->max_tokens * K, E), scap = ink2_table_slots((uint64_t)f->max_tokens * K, E);
-  uint8_t *h = f->m_build; /* (cached: built here, then one copy into the pinned) */
-  const void **tg = (const void **)h, **tu = tg + ecap, **td = tu + ecap;
-  int32_t *cnt = (int32_t *)(td + ecap);
-  uint32_t *xg = (uint32_t *)(cnt + ecap), *yg = xg + ecap, *xd = yg + ecap, *yd = xd + ecap;
-  int32_t *gidx = (int32_t *)(yd + ecap), *hidx = gidx + scap, *row = hidx + scap;
-  float *a = (float *)(row + P), *sg = a + P, *su = sg + P;
   /* the pairs by expert, then pair order (moe_route: sorted row r is pair by[r]), each slot's token and row */
-  MoeRoute rt = {f->m_by, (uint32_t *)row, f->m_run, f->m_run + E, f->m_run + 2 * E, f->m_run + 3 * E, gidx, hidx,
+  uint32_t *row_tmp = (uint32_t *)f->m_build;
+  MoeRoute rt = {f->m_by, row_tmp, f->m_run, f->m_run + E, f->m_run + 2 * E, f->m_run + 3 * E, f->m_gidx, f->m_hidx,
                  f->m_at, 0, 0};
   if (!moe_route(f->hpick, P, K, E, MM_TILE, &rt))
     return osmos_fail(err, "the router picked an expert the model does not have");
@@ -347,9 +338,37 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
   /* a decode's or a verify's experts on int8 (q8_experts): moe_q8, its own waits */
   if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(L->exp_gate->type) &&
       q8_takes(L->exp_up->type) && q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
-    return moe_q8(f, l, n, &rt, hw, h, err);
-  /* each run's expert in memory (its parts' addresses), its rows' scales; the entries by count (moe_entries: group's
-     runs of the same column tiles contiguous, each count's in build order) */
+    return moe_q8(f, l, n, &rt, hw, f->m_build + moe_stage_align((uint64_t)P * 4), err);
+  uint32_t ne = 0;
+  if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))
+    return osmos_fail(err, "the experts' entries refused");
+  const uint32_t slots = rt.slots;
+  /* compact staging: only the step's live ne, slots and P bytes packed via MoeStage (not max_tokens-strided) */
+  MoeStage st = {f->m_build, (uint8_t *)f->m_dev, 0, ink2_table_bytes((uint64_t)f->max_tokens * K, E)};
+  int32_t *row, *drow, *cnt, *dcnt, *gidx, *dgidx, *hidx, *dhidx;
+  const void **tg, **tu, **td, **dg, **du, **dd;
+  uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
+  float *a, *da, *sg, *dsg, *su, *dsu;
+  /* carve row first at offset 0: row_tmp already holds rt.row[0..P-1] right at f->m_build[0] */
+  row = moe_stage_carve(&st, (uint64_t)P * 4, (void **)&drow);
+  tg = moe_stage_carve(&st, (uint64_t)ne * sizeof *tg, (void **)&dg);
+  tu = moe_stage_carve(&st, (uint64_t)ne * sizeof *tu, (void **)&du);
+  td = moe_stage_carve(&st, (uint64_t)ne * sizeof *td, (void **)&dd);
+  cnt = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&dcnt);
+  xg = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&dxg);
+  yg = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&dyg);
+  xd = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&dxd);
+  yd = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&dyd);
+  gidx = moe_stage_carve(&st, (uint64_t)slots * 4, (void **)&dgidx);
+  hidx = moe_stage_carve(&st, (uint64_t)slots * 4, (void **)&dhidx);
+  a = moe_stage_carve(&st, (uint64_t)P * 4, (void **)&da);
+  sg = moe_stage_carve(&st, (uint64_t)P * 4, (void **)&dsg);
+  su = moe_stage_carve(&st, (uint64_t)P * 4, (void **)&dsu);
+  if (!row || !tg || !tu || !td || !cnt || !xg || !yg || !xd || !yd || !gidx || !hidx || !a || !sg || !su)
+    return osmos_fail(err, "the experts' staging buffer overflowed");
+  memcpy(gidx, f->m_gidx, (uint64_t)slots * 4);
+  memcpy(hidx, f->m_hidx, (uint64_t)slots * 4);
+  /* each run's expert in memory (its parts' addresses), its rows' scales */
   for (uint32_t j = 0; j < rt.runs; j++)
   {
     const uint32_t e = rt.expert[j], unit = (uint32_t)l * E + e;
@@ -364,9 +383,6 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       sg[q] = d->scale[0][e], su[q] = d->scale[1][e], a[m] = hw[m] * d->scale[2][e];
     }
   }
-  uint32_t ne = 0;
-  if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))
-    return osmos_fail(err, "the experts' entries refused");
   for (uint32_t k = 0; k < ne; k++)
   {
     const MoeEntry *en = &f->m_ent[k];
@@ -374,18 +390,10 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
     tg[k] = f->m_ex[en->run][0], tu[k] = f->m_ex[en->run][1], td[k] = f->m_ex[en->run][2], cnt[k] = (int32_t)en->cnt;
     xg[k] = s0 * C, yg[k] = q * F, xd[k] = s0 * F, yd[k] = q * C;
   }
-  const uint32_t slots = rt.slots;
-  const uint64_t bytes = (uint64_t)((uint8_t *)(su + P) - h);
-  uint8_t *dv = f->m_dev;
-  const void **dg = (const void **)dv, **du = dg + ecap, **dd = du + ecap;
-  const int32_t *dcnt = (const int32_t *)(dd + ecap);
-  const uint32_t *dxg = (const uint32_t *)(dcnt + ecap), *dyg = dxg + ecap, *dxd = dyg + ecap, *dyd = dxd + ecap;
-  const int32_t *dgidx = (const int32_t *)(dyd + ecap), *dhidx = dgidx + scap, *drow = dhidx + scap;
-  const float *da = (const float *)(drow + P), *dsg = da + P, *dsu = dsg + P;
   const double x0 = f->pf.on ? ink2_pf_now() : 0;
-  memcpy(f->m_host, h, bytes);
+  memcpy(f->m_host, f->m_build, st.used);
   const bool ok =
-      hipMemcpyAsync(dv, f->m_host, bytes, hipMemcpyHostToDevice, f->st) == hipSuccess &&
+      hipMemcpyAsync(f->m_dev, f->m_host, st.used, hipMemcpyHostToDevice, f->st) == hipSuccess &&
       mm_x16_rows(f->xn, C, dgidx, slots, C, f->xe16, f->overflow, f->st) &&
       group(L->exp_gate->type, dg, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eg, dyg, F, f->st) &&
       group(L->exp_up->type, du, cnt, dcnt, ne, F, C, f->xe16, dxg, f->eu, dyg, F, f->st) &&

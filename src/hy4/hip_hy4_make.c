@@ -70,10 +70,9 @@ void hy4_forward_destroy(Hy4Forward *f)
                                   table, whose slots it NULLs) */
   free(f->joints), free(f->in_joint);
   engram_destroy(f->eg);
-  free(f->eg_off), free(f->slot), free(f->h_idx), free(f->h_gidx), free(f->h_sidx);
-  free(f->h_w), free(f->h_wsel);
-  free(f->h_rx), free(f->h_ry), free(f->h_rxd), free(f->h_ryd), free(f->h_rcnt), free(f->h_rw), free(f->rkey);
-  free(f->h_rgidx), free(f->h_rhidx), free(f->h_stage), free(f->h_estart), free(f->h_by), free(f->h_run), free(f->h_ent);
+  free(f->eg_off), free(f->slot), free(f->h_sidx);
+  free(f->h_rcnt), free(f->rkey);
+  free(f->h_rgidx), free(f->h_rhidx), free(f->moe_build), free(f->h_estart), free(f->h_by), free(f->h_run), free(f->h_ent);
   free(f);
 }
 
@@ -189,15 +188,15 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   wide = wide > H * qk ? wide : H * qk, wide = wide > H * g->kv_lora ? wide : H * g->kv_lora;
   const uint64_t ecap = hy4_read_entries(n, g), scap = hy4_read_slots(n, g);
   const uint64_t xe = L > ffe ? L : ffe;
+  /* compact MoE staging capacity: covers prefill (2*nk + 3*ecap ptrs + 5*ecap u32 + 2*scap u32) and decode */
+  f->moe_cap = (3 * n * K + 2 * scap + 5 * ecap) * 4 + 3 * ecap * sizeof(void *) + 16 * MOE_STAGE_ALIGN;
   const struct
   {
     void *p;
     uint64_t bytes;
   } read_want[] = {
       {&f->x16, (uint64_t)MM_MAX_TOKENS * wide * 2}, {&f->xe16, scap * xe * 2}, {&f->overflow, 8},
-      {&f->rx, ecap * 4}, {&f->ry, ecap * 4}, {&f->rxd, ecap * 4}, {&f->ryd, ecap * 4}, {&f->rcnt, ecap * 4},
-      {&f->rw, 3 * ecap * sizeof(void *)}, {&f->rgidx, scap * 4}, {&f->rhidx, scap * 4},
-
+      {&f->moe_dev, f->moe_cap},
   };
   bool ok = (uint64_t)hmax <= HY4_MAX_HEADS || osmos_fail(err, "more heads than this build's tables");
   ok = ok && (hipStreamCreate((hipStream_t *)&f->st) == hipSuccess || osmos_fail(err, "the step's stream not made"));
@@ -228,11 +227,10 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
     ok = hy4_alloc(&f->bufs, read_want[i].p, read_want[i].bytes) || osmos_fail(err, "GPU memory refused (the read's buffers)");
   ok = ok && hy4_pinned(&f->bufs, &f->pin_flags, 8) &&
        (f->ovf = (OverflowFlag){f->overflow, 8, false, f->pin_flags}, overflow_reset(&f->ovf, err)) &&
-       (f->fault = f->overflow + 1) && (f->h_rx = malloc(ecap * 4)) && (f->h_ry = malloc(ecap * 4)) &&
-       (f->h_rxd = malloc(ecap * 4)) && (f->h_ryd = malloc(ecap * 4)) && (f->h_rcnt = malloc(ecap * 4)) &&
-       (f->h_rw = malloc(3 * ecap * sizeof(void *))) && (f->rkey = malloc(ecap * 8)) &&
+       (f->fault = f->overflow + 1) && (f->h_rcnt = malloc(ecap * 4)) && (f->rkey = malloc(ecap * 8)) &&
        (f->h_rgidx = malloc(scap * 4)) && (f->h_rhidx = malloc(scap * 4)) &&
-       (f->h_stage = malloc(3 * ecap * sizeof(void *) + 5 * ecap * 4)) &&
+       (f->moe_build = malloc(f->moe_cap)) && hy4_pinned(&f->bufs, &f->moe_pin, f->moe_cap) &&
+       hy4_pinned(&f->bufs, &f->pin_idx, n * K * 4) && hy4_pinned(&f->bufs, &f->pin_w, n * K * F) &&
        (f->h_estart = malloc(((size_t)g->n_experts + 1) * 4)) && (f->h_run = malloc((size_t)g->n_experts * 16)) &&
        (f->h_ent = malloc(ecap * sizeof *f->h_ent));
   for (int l = 0; ok && l < g->n_layers; l++)
@@ -247,10 +245,7 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && hy4_pinned(&f->bufs, &f->pin_tok, n * 4) && hy4_pinned(&f->bufs, &f->pin_pos, n * 4) &&
        hy4_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && (f->slot = malloc(n * 4)) &&
-       (f->h_idx = malloc(n * K * 4)) && (f->h_gidx = malloc(n * K * 4)) && (f->h_sidx = malloc(n * K * 4)) &&
-       (f->h_by = malloc(n * K * 4)) &&
-       (f->h_w = malloc(n * K * F)) &&
-       (f->h_wsel = malloc(n * K * F)) && hipDeviceSynchronize() == hipSuccess;
+       (f->h_sidx = malloc(n * K * 4)) && (f->h_by = malloc(n * K * 4)) && hipDeviceSynchronize() == hipSuccess;
   for (int l = 0; ok && l < g->n_layers; l++)
   { /* a layer's MLA core: its heads, a sliding one's window over the ring, a sparse one's groups of ix_pool */
     const AttnCoreDesc d = mla_desc(f, l);

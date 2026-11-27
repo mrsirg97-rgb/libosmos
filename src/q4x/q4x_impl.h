@@ -123,10 +123,11 @@ struct Q4xForward
   const void **exp_tab;         /* every expert resident: their addresses' device table [layer][tensor][expert] */
   bool exp_units;               /* the experts the membrane's (q4x_weights_experts: none an overlay's) */
   const void *(*h_ex)[POOL_PARTS]; /* streamed: a step's runs' experts' addresses (the membrane's) */
-  uint32_t *h_by, *h_row, *h_run, *h_est;   /* their routing (moe_route): picks, rows, runs, the sort's scratch */
-  int32_t *h_ids, *h_gidx, *h_hidx, *h_cnt; /* the step's picks; mm_group's tables on the host (q4x_expert_tiles') */
-  uint32_t *h_xg, *h_yg, *h_xd, *h_yd;
-  const void **h_ptr;
+  uint32_t *h_by, *h_row, *h_run, *h_est; /* their routing (moe_route): picks, rows, runs, the sort's scratch */
+  int32_t *h_gidx, *h_hidx, *h_cnt;       /* moe_route's slot scratch and the step's entry counts */
+  int32_t *h_pin_ids;                     /* pinned D2H router picks (streamed) */
+  uint8_t *moe_build, *moe_pin, *moe_dev; /* compact MoE staging (cached host, pinned host, device) */
+  uint64_t moe_cap;
   uint64_t fixed_bytes, pinned_bytes;
   Rowread *ple_read;
   uint8_t *ple_stage;

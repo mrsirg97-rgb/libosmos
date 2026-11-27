@@ -31,8 +31,8 @@ void q4x_forward_destroy(Q4xForward *f)
     if (f->exp_fds[i] >= 0)
       close(f->exp_fds[i]);
   free(f->exp_fds);
-  free(f->h_ex), free(f->h_by), free(f->h_row), free(f->h_run), free(f->h_est), free(f->h_ids), free(f->h_gidx);
-  free(f->h_hidx), free(f->h_cnt), free(f->h_xg), free(f->h_yg), free(f->h_xd), free(f->h_yd), free(f->h_ptr);
+  free(f->h_ex), free(f->h_by), free(f->h_row), free(f->h_run), free(f->h_est), free(f->h_gidx);
+  free(f->h_hidx), free(f->h_cnt), free(f->moe_build);
   q4x_free_table(f, f->w->model, f->dev);
   if (f->w->overlay)
     q4x_free_table(f, f->w->overlay, f->ov_dev);

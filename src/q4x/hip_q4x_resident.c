@@ -13,6 +13,7 @@
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/experts.h"
 #include "osmos/mem/membrane.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/run/fit.h"
 #include "osmos/gpu/mv.h"
 #include "q4x_impl.h"
@@ -156,17 +157,18 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
                 osmos_fail(err, "GPU memory refused (the experts' table)"));
     free(tab);
   }
-  else if (ok) /* streamed: a step's tables the host's (q4x_moe) */
+  else if (ok) /* streamed: a step's tables the host's (q4x_moe), staged compact via MoeStage */
   {
     const uint64_t P = (uint64_t)f->max_tokens * K;
     Q4xExpertBounds bd;
     q4x_expert_bounds((uint32_t)P, E, &bd);
+    f->moe_cap = (5 * (uint64_t)bd.entries + 2 * (uint64_t)bd.slots + P) * 4 +
+                 Q4X_GROUP_TENSORS * (uint64_t)bd.entries * sizeof(void *) + 16 * MOE_STAGE_ALIGN;
     ok = (f->h_ex = malloc(E * sizeof *f->h_ex)) && (f->h_by = malloc(P * 4)) && (f->h_row = malloc(P * 4)) &&
          (f->h_run = malloc(4 * (size_t)E * 4)) && (f->h_est = malloc(((size_t)E + 1) * 4)) &&
-         (f->h_ids = malloc(P * 4)) && (f->h_gidx = malloc(bd.slots * 4)) && (f->h_hidx = malloc(bd.slots * 4)) &&
-         (f->h_cnt = malloc(bd.entries * 4)) && (f->h_xg = malloc(bd.entries * 4)) && (f->h_yg = malloc(bd.entries * 4)) &&
-         (f->h_xd = malloc(bd.entries * 4)) && (f->h_yd = malloc(bd.entries * 4)) &&
-         (f->h_ptr = malloc(Q4X_GROUP_TENSORS * (size_t)bd.entries * sizeof *f->h_ptr));
+         (f->h_gidx = malloc(bd.slots * 4)) && (f->h_hidx = malloc(bd.slots * 4)) &&
+         (f->h_cnt = malloc(bd.entries * 4)) && (f->moe_build = malloc(f->moe_cap)) &&
+         pinned(f, &f->h_pin_ids, P * 4) && pinned(f, &f->moe_pin, f->moe_cap) && alloc(f, &f->moe_dev, f->moe_cap);
     if (!ok)
       osmos_fail(err, "out of memory (the experts' host tables)");
   }

@@ -159,9 +159,10 @@ static bool buffers(Ink2Forward *f)
   f->m_key = malloc(ink2_table_entries(T * K, E) * sizeof *f->m_key);
   f->m_ent = malloc(ink2_table_entries(T * K, E) * sizeof *f->m_ent), f->m_run = malloc(4 * E * sizeof *f->m_run);
   f->m_ex = malloc(E * sizeof *f->m_ex), f->m_cold = malloc(E * sizeof *f->m_cold);
+  f->m_gidx = malloc(ink2_table_slots(T * K, E) * 4), f->m_hidx = malloc(ink2_table_slots(T * K, E) * 4);
   f->m_build = malloc(ink2_table_bytes(T * K, E)); /* the tables built in cached memory, then one copy into the pinned */
   return f->hpick && f->slot && f->hgpick && f->m_at && f->m_by && f->m_host && f->m_key && f->m_build &&
-         f->m_ent && f->m_run && f->m_ex && f->m_cold;
+         f->m_ent && f->m_run && f->m_ex && f->m_cold && f->m_gidx && f->m_hidx;
 }
 
 Ink2Forward *ink2_forward_create(const Ink2Weights *w, const Ink2Options *o, char err[OSMOS_ERR])
@@ -246,6 +247,7 @@ void ink2_forward_destroy(Ink2Forward *f)
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer, the forward's and its drafter's: from the record */
   free(f->picks), free(f->picks_all), free(f->slot), free(f->m_at), free(f->m_by);
   free(f->m_key), free(f->m_build), free(f->m_ent), free(f->m_run), free(f->m_ex), free(f->m_cold);
+  free(f->m_gidx), free(f->m_hidx);
   free(f);
 }
 

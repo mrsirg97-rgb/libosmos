@@ -13,6 +13,7 @@
 #include "osmos/ink2/mtp.h"
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/gpu/overflow.h"
 
 /* a conv tail's rows past its 2 keep: a step of at most these appended in place (a decode's, a drafted round's); a
@@ -173,6 +174,7 @@ struct Ink2Forward
   AttnCore *attn[2]; /* a sliding layer's attention, a full layer's (attn_core: their scratch ed, borrowed) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
   uint32_t *m_at, *m_by, *m_run; /* the read's routing (moe_route): its scratch, sorted rows' pairs, runs */
+  int32_t *m_gidx, *m_hidx;      /* moe_route's slot scratch (copied compact into m_build via MoeStage) */
   uint64_t *m_key;
   MoeEntry *m_ent;                   /* its entries (moe_entries) */
   const void *(*m_ex)[POOL_PARTS];   /* each run's expert's parts in memory (membrane_wait's) */
@@ -231,7 +233,8 @@ static inline uint64_t ink2_table_entries(uint64_t P, uint64_t E) { return P + E
 static inline uint64_t ink2_table_slots(uint64_t P, uint64_t E) { return P + E * (MM_TILE - 1); }
 static inline uint64_t ink2_table_bytes(uint64_t P, uint64_t E)
 {
-  return ink2_table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + ink2_table_slots(P, E) * 2 * 4 + P * 4 * 4;
+  return ink2_table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + ink2_table_slots(P, E) * 2 * 4 + P * 4 * 4 +
+         16 * MOE_STAGE_ALIGN;
 }
 double ink2_pf_now(void);
 void ink2_pf(Ink2Forward *f, int b);
