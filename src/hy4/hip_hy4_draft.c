@@ -23,6 +23,7 @@
 #include "osmos/model/safetensors.h"
 #include "hy4_impl.h"
 #include "osmos/err.h"
+#include "osmos/cpu/par.h"
 
 /* the release's config.json: dfly_target_kv_layers (= dfly_target_index_layer), dfly_mask_token_id */
 static const int TARGETS[HY4_DFLY_LAYERS] = {25, 29, 33, 37, 41};
@@ -138,12 +139,27 @@ static bool split_kvb(GpuBufs *b, const Gguf *g, const GgufTensor *t, uint32_t H
 }
 
 /* an F32 matrix [rows][cols] as Q8_0 on the GPU */
+typedef struct Q8Up
+{
+  const float *x;
+  uint32_t cols;
+  uint8_t *q;
+} Q8Up;
+
+static void q8_rows(void *ctx, uint64_t r0, uint64_t r1)
+{
+  const Q8Up *u = ctx;
+  const uint64_t rb = u->cols / 32 * 34;
+  for (uint64_t r = r0; r < r1; r++)
+    q8_row(u->x + r * u->cols, u->cols, u->q + r * rb);
+}
+
 bool hy4_q8_up(GpuBufs *b, const float *x, uint64_t rows, uint32_t cols, void **dev)
 {
   const uint64_t rb = cols / 32 * 34;
   uint8_t *q = x && cols % 32 == 0 ? malloc(rows * rb) : NULL;
-  for (uint64_t r = 0; q && r < rows; r++)
-    q8_row(x + r * cols, cols, q + r * rb);
+  if (q) /* (rows apart: the serial loop's bytes) */
+    cpu_par_rows(rows, 256, q8_rows, &(Q8Up){x, cols, q});
   const bool ok = q && hy4_alloc(b, dev, rows * rb) && hipMemcpy(*dev, q, rows * rb, hipMemcpyHostToDevice) == hipSuccess;
   free(q);
   return ok;

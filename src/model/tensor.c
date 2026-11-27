@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "osmos/model/qtype.h"
+#include "osmos/cpu/par.h"
 
 #define TENSOR_F16 1u /* ggml's F16: a file's small vectors (qtype.h has none: no kernel takes it) */
 
@@ -48,6 +49,30 @@ static float half(uint16_t h)
   return v;
 }
 
+typedef struct ToF32
+{
+  const uint8_t *b;
+  float *v;
+  uint32_t es, type;
+} ToF32;
+
+static void to_f32(void *ctx, uint64_t i0, uint64_t i1)
+{
+  const ToF32 *c = ctx;
+  for (uint64_t i = i0; i < i1; i++)
+    if (c->es == 4)
+      memcpy(&c->v[i], c->b + 4 * i, 4);
+    else
+    {
+      const uint16_t h = (uint16_t)(c->b[2 * i] | c->b[2 * i + 1] << 8);
+      const uint32_t u = (uint32_t)h << 16;
+      if (c->type == QTYPE_BF16)
+        memcpy(&c->v[i], &u, 4);
+      else
+        c->v[i] = half(h);
+    }
+}
+
 float *tensor_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
 {
   const uint32_t es = t->type == QTYPE_F32 ? 4 : t->type == TENSOR_F16 || t->type == QTYPE_BF16 ? 2 : 0;
@@ -58,18 +83,7 @@ float *tensor_f32(const Gguf *g, const GgufTensor *t, uint64_t *n)
   float *v = malloc(*n * 4 + 4);
   if (!b || !v || !tensor_read(g, t, b))
     return free(b), free(v), NULL;
-  for (uint64_t i = 0; i < *n; i++)
-    if (es == 4)
-      memcpy(&v[i], b + 4 * i, 4);
-    else
-    {
-      const uint16_t h = (uint16_t)(b[2 * i] | b[2 * i + 1] << 8);
-      const uint32_t u = (uint32_t)h << 16;
-      if (t->type == QTYPE_BF16)
-        memcpy(&v[i], &u, 4);
-      else
-        v[i] = half(h);
-    }
+  cpu_par_rows(*n, 1u << 20, to_f32, &(ToF32){b, v, es, t->type}); /* (each value alone: the serial loop's) */
   free(b);
   return v;
 }
