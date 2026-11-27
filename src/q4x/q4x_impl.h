@@ -106,6 +106,7 @@ struct Q4xForward
   hipEvent_t e_gates;      /* a small step's DeltaNet gates on s2 (alpha, beta, their gates): done */
   hipEvent_t e_ix;         /* a small step's QSA indexer on s2 (its keys and picks): done */
   bool inj_side;           /* an inject on s2 not yet waited for (q4x_inj_wait) */
+  bool moe_side;           /* a shared expert on s2 not yet waited for (q4x_moe) */
   hipEvent_t pin_free; /* the pinned buffers' last copy to the GPU done (q4x_pin_wait, q4x_pin_sent) */
   /* stream_ngram: the n-gram table's file and readers, a step's rows read into ple_stage (pinned) at its embed, copied
      to b.ple_sbuf at the n-gram layer; ple_copied that copy's end (the next step's reads wait for it) */
@@ -230,7 +231,7 @@ bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 /* the NPU's (hip_q4x_npu.c): a layer's share of n tokens' picks taken from its tables and packed (0: none); its gate and
    up, then its down, once the GPU's of each are queued */
-uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff);
+int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff);
 bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
 bool q4x_npu_pack_down(Q4xForward *f, uint32_t ff);
 bool q4x_npu_down(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);

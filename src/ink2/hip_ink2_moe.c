@@ -137,8 +137,8 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
      (ink2_moe_scales through route_tok's where), each token's row rounded once, read by token; Inkling's activation
      on each row's tensor scales; the weights and down's scale at the sum (m_a). a prompt's on the matrix cores (f16,
      below): the two computed apart */
-  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(t[0]->type) && q8_takes(t[1]->type) && q8_takes(t[2]->type) &&
-      C % 32 == 0 && F % 32 == 0)
+  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && t[0]->type == t[1]->type &&
+      q8_takes(t[0]->type) && q8_takes(t[2]->type) && C % 32 == 0 && F % 32 == 0)
   {
     const uint32_t chunk = n;
     const Q8Experts q8 = {.act = Q8_ACT_INK2, .gate_type = t[0]->type, .up_type = t[1]->type, .down_type = t[2]->type,
@@ -156,7 +156,7 @@ static bool moe_whole(Ink2Forward *f, int l, uint32_t n, char *err)
     f->m_a = f->t_a, f->m_row = f->q_sidx;
     return ok || osmos_fail(err, "a GPU call failed (the experts on int8, their tables on the GPU)");
   }
-  if (ok && P <= INK2_MOE_PREP_PICKS) /* a decode's or a verify's: the three in one launch, the same bits */
+  if (ok && P <= INK2_MOE_PREP_PICKS && E <= 256 && K <= OPS_MAX_TOPK) /* a decode's or a verify's: the three in one launch, the same bits */
     ok = ink2_moe_prep(f->logit, d->router_bias, E, K, g->route_scale, n, f->pick, pw, C, F, &et, scales, f->t_sg,
                        f->t_su, f->t_a, picks, f->st);
   else
@@ -336,8 +336,8 @@ bool ink2_moe(Ink2Forward *f, int l, uint32_t n, char *err)
       membrane_ahead(f->mem, unit);
     }
   /* a decode's or a verify's experts on int8 (q8_experts): moe_q8, its own waits */
-  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && q8_takes(L->exp_gate->type) &&
-      q8_takes(L->exp_up->type) && q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
+  if (n <= MV_MAX_TOKENS && !f->reading && !f->no_int8 && q8_enabled() && L->exp_gate->type == L->exp_up->type &&
+      q8_takes(L->exp_gate->type) && q8_takes(L->exp_down->type) && C % 32 == 0 && F % 32 == 0)
     return moe_q8(f, l, n, &rt, hw, f->m_build + moe_stage_align((uint64_t)P * 4), err);
   uint32_t ne = 0;
   if (!moe_entries(&rt, MM_MAX_TOKENS, f->m_ent, f->m_key, &ne))

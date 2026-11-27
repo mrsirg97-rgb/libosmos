@@ -289,12 +289,22 @@ extern "C" bool mv_fp4(const void* w, uint32_t rows, uint32_t cols, const float*
                        uint32_t ys, float scale, void* stream) {
   if (!w || !x || !y || !rows || !cols || cols % kBlock || xs % 4 || n < 1 || n > 4) return false;
   // RDNA (fp4bench SWEEP=1): one token direct R 2 U 2; two R 4 U 1; three R 2 U 1; four fp4_kernel R 1 (direct at NT
-  // 4 short of registers). every one fp4_kernel's bits
+  // 4 short of registers). fp4_kernel's uint4 fetch requires nb % 4 == 0 and 16-byte aligned w; fall back to direct
+  // otherwise. every one fp4_kernel's bits
+  const bool staged = (cols / kBlock) % 4 == 0 && ((uintptr_t) w & 15u) == 0;
   if constexpr (!osmos_cuda) switch (n) {
       case 1: return run_direct<2, 1, 2>(w, rows, cols, x, xs, y, ys, scale, stream);
       case 2: return run_direct<4, 2, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
       case 3: return run_direct<2, 3, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
-      default: return run<1, 4>(w, rows, cols, x, xs, y, ys, scale, stream);
+      default:
+        return staged ? run<1, 4>(w, rows, cols, x, xs, y, ys, scale, stream)
+                      : run_direct<1, 4, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
+    }
+  if (!staged) switch (n) {
+      case 1: return run_direct<2, 1, 2>(w, rows, cols, x, xs, y, ys, scale, stream);
+      case 2: return run_direct<4, 2, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
+      case 3: return run_direct<2, 3, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
+      default: return run_direct<1, 4, 1>(w, rows, cols, x, xs, y, ys, scale, stream);
     }
   switch (n) {  // the 5090's: the LDS stage (a lane's own 36-byte stride slower there)
     case 1: return run<4, 1>(w, rows, cols, x, xs, y, ys, scale, stream);

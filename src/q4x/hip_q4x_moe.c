@@ -194,8 +194,8 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
      streamed the host's (host_q8: the membrane's addresses); each token's row
      rounded once, read by token; the activation unweighted (Qwen's weights at the sum), every row's output where sidx
      puts its pick. a prompt's on the matrix cores (f16, below): the two computed apart */
-  if (n <= MV_MAX_TOKENS && !f->reading && (tab || streamed) && !f->no_int8 && q8_enabled() && q8_takes(TY(t[0])) && q8_takes(TY(t[1])) &&
-      q8_takes(TY(t[2])) && D % 32 == 0 && ff % 32 == 0)
+  if (n <= MV_MAX_TOKENS && !f->reading && (tab || streamed) && !f->no_int8 && q8_enabled() && TY(t[0]) == TY(t[1]) &&
+      q8_takes(TY(t[0])) && q8_takes(TY(t[2])) && D % 32 == 0 && ff % 32 == 0)
   {
     const uint32_t chunk = n;
     Q8Experts q8n = {.gate_type = TY(t[0]), .up_type = TY(t[1]), .down_type = TY(t[2]), .wg = b->q_wptr,
@@ -207,8 +207,10 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
     const bool tables = tab ? route_tok(b->ids, b->w, n, k, E, chunk, et.tab[0], b->q_gidx, b->q_sidx, b->q_wsel,
                                         b->q_cnt, b->q_xrow, b->q_wptr, b->overflow, NULL)
                             : host_q8(f, (int)(L - f->w->layer), n, e, &q8n, &sidx);
+    const bool wait_sh = f->moe_side;
+    f->moe_side = false;
     return tables && q8_experts(&q8n, NULL) &&
-           (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
+           (!wait_sh || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
            q4x_moe_sum(b->y, sidx, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
   }
   /* each expert read once for up to 128 of the step's tokens that picked it (q4x_expert_tiles, mm_group) */
@@ -217,7 +219,12 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
     return false;
   /* the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
      before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
-  const bool npu = q4x_npu_take(f, L, n, &bd, D, ff) > 0;
+  const int npu_res = q4x_npu_take(f, L, n, &bd, D, ff);
+  if (npu_res < 0)
+    return false;
+  const bool npu = npu_res > 0;
+  const bool wait_sh = f->moe_side;
+  f->moe_side = false;
   return mm_x16_rows(b->mixed, D, et.gidx, bd.slots, D, b->xe16, b->overflow, NULL) &&
          experts(t[0], et.ptr[0], et.cnt, b, &bd, ff, D, et.xg, b->ga, et.yg) &&
          experts(t[1], et.ptr[1], et.cnt, b, &bd, ff, D, et.xg, b->up, et.yg) &&
@@ -226,7 +233,7 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
          (!npu || q4x_npu_pack_down(f, ff)) &&
          experts(t[2], et.ptr[2], et.cnt, b, &bd, D, ff, et.xd, b->y, et.yd) &&
          (!npu || q4x_npu_down(f, L, D, ff)) &&
-         (n > Q4X_SIDE_STEP || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
+         (!wait_sh || hipStreamWaitEvent(NULL, f->e_out, 0) == hipSuccess) && /* the shared expert's done */
          q4x_moe_sum(b->y, et.where, b->w, n, k, D, b->sh, b->sl, b->out, NULL);
 }
 
@@ -240,9 +247,11 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   Q4xX16 sd;
   /* a small step's (decode, a draft's verify): the shared expert on the second stream, beside the routed experts -
      both latency-bound at a few tokens, together nearer the memory's bandwidth. it reads the mixer's outputs alone
-     (b.mixed, b.x16) and writes b.sh, b.sl and its own f16 into b.x16, which the routed experts do not touch (theirs
-     b.xe16); q4x_moe_sum waits for it. the same kernels on the same inputs: the same bits */
-  const bool side_stream = n <= Q4X_SIDE_STEP;
+     (b.mixed, b.x16) and writes b.sh, b.sl and its own f16 into b.x16; skip s2 if L->router would also use b.x16
+     via mm_tokens on the main stream */
+  const bool router_uses_x16 = mm_known(TY(L->router)) && mm_fits(TY(L->router), (uint32_t)g->n_experts, D);
+  const bool side_stream = n <= Q4X_SIDE_STEP && !router_uses_x16;
+  f->moe_side = false;
   if (side_stream && (hipEventRecord(f->e_in, NULL) != hipSuccess || hipStreamWaitEvent(f->s2, f->e_in, 0) != hipSuccess))
     return false;
   if (side_stream)
@@ -258,7 +267,13 @@ bool q4x_moe_shared(Q4xForward *f, const Q4xLayer *L, uint32_t n)
                   q4x_mat(f, L->sh_down, D, sff, b->shg, sff, n, b->sh, D, n <= MM_MAX_TOKENS) &&
                   mat(f, L->sh_gate_inp, 1, D, b->mixed, D, n, b->sl, 1);
   f->st = NULL;
-  return ok && (!side_stream || hipEventRecord(f->e_out, f->s2) == hipSuccess);
+  if (ok && side_stream)
+  {
+    if (hipEventRecord(f->e_out, f->s2) != hipSuccess)
+      return false;
+    f->moe_side = true;
+  }
+  return ok;
 }
 
 /* the step's tokens' rows already in b.ple_rows */

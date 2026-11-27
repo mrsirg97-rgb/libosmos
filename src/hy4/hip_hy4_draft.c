@@ -327,14 +327,14 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
   const GgufTensor *out = f->w->output;
   if (ok && q8 && !f->head8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
-    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
+    float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
     ok = (x && hy4_q8_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
-         osmos_fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
+         osmos_fail(err, "DFly2: the head's Q8_0 copy not made");
     free(x);
   }
   if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the engine's (q8) drafts' head Q4_0: a round reads it once a draft */
-    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
+    float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
     ok = (x && q4_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);
   }
@@ -454,7 +454,10 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
        hipMemcpyAsync(d->pin_prob, d->prob, most * F, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipStreamSynchronize(f->st) == hipSuccess;
   if (!ok)
+  {
+    (void)hipStreamSynchronize(f->st);
     return osmos_fail(err, "DFly2: a GPU call failed (a draft)"), -1;
+  }
   int k = 0;
   float cum = 1.0f;
   for (; k < (int)most; k++)

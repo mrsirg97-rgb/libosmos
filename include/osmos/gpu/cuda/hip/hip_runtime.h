@@ -10,6 +10,7 @@
 #include <cuda_fp16.h> /* (before the macros: its own __shfl overloads are declarations, not calls) */
 #define OSMOS_FULL_WARP 0xFFFFFFFFu
 #define __shfl_xor(v, m, ...) __shfl_xor_sync(OSMOS_FULL_WARP, (v), (m), ##__VA_ARGS__)
+#define __shfl_up(v, d, ...) __shfl_up_sync(OSMOS_FULL_WARP, (v), (d), ##__VA_ARGS__)
 #define __shfl(v, s, ...) __shfl_sync(OSMOS_FULL_WARP, (v), (s), ##__VA_ARGS__)
 #define __ballot(p) ((unsigned long long) __ballot_sync(OSMOS_FULL_WARP, (p)))
 #define __all(p) __all_sync(OSMOS_FULL_WARP, (p))

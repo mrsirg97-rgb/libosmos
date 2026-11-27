@@ -291,6 +291,7 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
   {
     (void)hipDeviceSynchronize(); /* drain any side-stream work before releasing membrane holds */
     f->inj_side = false;
+    f->moe_side = false;
     f->st = NULL;
   }
   if (f->mem)
@@ -319,8 +320,8 @@ const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
 void q4x_kept_view(const Q4xForward *f, KeptView *k)
 {
   *k = (KeptView){0};
-  if (f) /* (the picks' scratch: the MoE's table, free between steps) */
-    *k = (KeptView){f->b.slot, f->max_tokens, f->b.logits, (uint32_t)f->w->geo.n_vocab, f->b.cnt, f->b.top_part, NULL,
+  if (f) /* (the picks' scratch: b->tok is always max_tokens * 4 and free between steps) */
+    *k = (KeptView){f->b.slot, f->max_tokens, f->b.logits, (uint32_t)f->w->geo.n_vocab, f->b.tok, f->b.top_part, NULL,
                     NULL, NULL, NULL};
 }
 

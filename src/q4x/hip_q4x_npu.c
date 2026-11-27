@@ -107,7 +107,7 @@ bool q4x_npu_make(Q4xForward *f, const char *dir, float share, char err[OSMOS_ER
   return true;
 }
 
-uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
+int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
 {
   const Q4xGeometry *g = &f->w->geo;
   const int l = (int)(L - f->w->layer);
@@ -125,9 +125,9 @@ uint32_t q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExp
                       b->xd, b->yd, b->gidx, D, ff, f->npu_sel, f->npu_nsel, f->npu_tok, f->npu_slot, NULL) ||
       !npu_pack_a(b->mixed, D, f->npu_tok, want, npu_a(f->npu), NULL) ||
       hipEventRecord(f->npu_packed, NULL) != hipSuccess)
-    return 0;
+    return -1;
   f->npu_want = want, f->npu_wanted += want;
-  return want;
+  return (int)want;
 }
 
 /* the parts' launches of one kind, once their packing is done (the GPU going on with what was queued after it) */

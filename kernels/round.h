@@ -109,7 +109,11 @@ __device__ inline float e2m1_value(uint32_t c) {
   const uint32_t mag = i >= 2 ? ((i >> 1) + 126u) << 23 | (i & 1u) << 22 : i ? 0x3F000000u : 0u;
   return __uint_as_float(sign | mag);
 }
-__device__ inline uint32_t ue8m0_code(float s) { return (uint32_t) (ilogbf(s) + kUe8m0Bias); }
+__device__ inline uint32_t ue8m0_code(float s) {
+  if (!isfinite(s) || s <= 0.0f) return 0xFFu;
+  const int e = ilogbf(s) + kUe8m0Bias;
+  return e < 0 ? 0u : e > 0xFE ? 0xFEu : (uint32_t) e;
+}
 // 2^(c - 127): F32's own exponent field (c 1 .. 254); 0xFF UE8M0's NaN; 0 the one subnormal, 2^-127
 __device__ inline float ue8m0_value(uint32_t c) {
   if (c == 0xFF) return __builtin_nanf("");

@@ -60,7 +60,7 @@ constexpr int8_t kMxfp4Lut[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6
 constexpr Lut16 kIq4nlTab = lut16(kIq4nlLut), kMxfp4Tab = lut16(kMxfp4Lut);
 __device__ inline int table4(uint32_t w, int sh, const Lut16& t) {
   const uint32_t n = (w >> sh) & 0x0F0F0F0Fu, sel = n & 0x07070707u;
-  const uint32_t lo = __builtin_amdgcn_perm(t.w[1], t.w[0], sel), hi = __builtin_amdgcn_perm(t.w[3], t.w[2], sel);
+  const uint32_t lo = osmos_perm(t.w[1], t.w[0], sel), hi = osmos_perm(t.w[3], t.w[2], sel);
   const uint32_t m = ((n >> 3) & 0x01010101u) * 0xFFu;
   return (int) ((hi & m) | (lo & ~m));
 }
@@ -420,8 +420,11 @@ void group_tok_kernel(const uint8_t* const* __restrict__ w,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (LO != kSelAll)
+  if constexpr (LO != kSelAll) {
     if (!selected<LO, NT>(cnt[m])) return;  // the whole block
+  } else if (cnt[m] <= 0) {
+    return;
+  }
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   uint64_t xr[NT];
@@ -464,8 +467,11 @@ void gate_up_kernel(const uint8_t* const* __restrict__ wg,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (LO != kSelAll)
+  if constexpr (LO != kSelAll) {
     if (!selected<LO, NT>(cnt[m])) return;  // the whole block
+  } else if (cnt[m] <= 0) {
+    return;
+  }
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint64_t off = (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;

@@ -173,7 +173,11 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   const uint64_t n = max_tokens, D = (uint64_t)g->n_embd, ff = (uint64_t)g->n_ff, vh = (uint64_t)g->ssm_v_heads;
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2ull * g->ssm_groups * g->ssm_state + in;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
-  const uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down */
+  uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down, attention out, or hidden */
+  if (q > wide)
+    wide = q;
+  if (D > wide)
+    wide = D;
   const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads,
                            .kv_heads = (uint32_t)g->n_kv_heads,
                            .dk = (uint32_t)g->head_dim,

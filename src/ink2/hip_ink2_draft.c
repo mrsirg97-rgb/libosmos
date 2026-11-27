@@ -245,9 +245,8 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, KV = kvw(m), K = (uint32_t)m->n_taps, n = (uint32_t)(to - from);
   const float *taps = d->taps + ((uint64_t)s->tap_row0 + (uint32_t)(from - s->tap_pos0)) * K * C;
-  /* the context: the positions seeded since the last gap (a seed past it starts it over) */
-  if (from > s->mend || from < s->mfrom)
-    s->mfrom = from;
+  /* the context: the positions seeded since the last gap (committed only after GPU work succeeds) */
+  const int32_t new_mfrom = (from > s->mend || from < s->mfrom) ? from : s->mfrom;
   bool ok = true;
   const uint32_t B = (uint32_t)m->block; /* the buffers' rows: the drafter's block (INK2_MTP_BLOCK runs past a block of
                                             2 or 3's buffers) */
@@ -277,6 +276,7 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
     return osmos_fail(err, "a GPU call failed (the drafter's context)");
   if (overflow)
     return overflow_reset(&d->ovf, NULL), osmos_fail(err, "the drafter's context past f16's range");
+  s->mfrom = new_mfrom;
   s->mend = to;
   return true;
 }

@@ -79,8 +79,7 @@ bool launch(const AttnCore& c, const AttnStep& s, const KV* k, const KV* v, hipS
                                                                    pos0, rel_proj, out, 0, nullptr);             \
     return hipGetLastError() == hipSuccess;                                                                      \
   }
-  FA(1, 1) FA(2, 1) FA(3, 1) FA(4, 1) FA(6, 1) FA(8, 1) FA(1, 2) FA(2, 2) FA(3, 2) FA(4, 2) FA(6, 2) FA(8, 2) FA(1, 4)
-  FA(2, 4) FA(3, 4) FA(4, 4) FA(6, 4) FA(3, 8)
+  FA(1, 4) FA(2, 4) FA(3, 8) FA(4, 4) FA(6, 4) FA(8, 4)
 #undef FA
   return false;
 }
@@ -171,7 +170,8 @@ const char* draft_bad(const AttnCoreDesc& d) {
          : mtp && (uint64_t) d.max_tokens * G > attn_mtp::kRows ? "max_tokens: a block's rows past the MTP's 48"
          : !d.slots ? "slots: the ring's rows"
          : !mtp && (!d.window || d.window < d.max_tokens) ? "window: DFlash's at least its block"
-         : !mtp && ((uint64_t) d.slots + d.max_tokens) * sizeof(float) > 65536 ? "slots: past the LDS DFlash's scores take"
+         : !mtp && ((uint64_t) d.slots + d.max_tokens) * sizeof(float) + 1536 > 65536
+               ? "slots: past the LDS DFlash's scores take"
          : d.term != ATTN_TERM_NONE ? "term: a drafter's none"
          : d.sink != ATTN_SINK_NONE ? "sink: a drafter's none"
          : d.gate != ATTN_GATE_NONE ? "gate: a drafter's none"

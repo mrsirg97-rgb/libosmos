@@ -285,6 +285,7 @@ __global__ __launch_bounds__(kThreads) void ix_query_kernel(float* q, float* w, 
 
 // a float's order as an unsigned key (the greater float, the greater key)
 __device__ inline uint32_t order_key(float x) {
+  if (isnan(x)) return 0u;
   const uint32_t u = __float_as_uint(x);
   return u & 0x80000000u ? ~u : u | 0x80000000u;
 }

@@ -115,6 +115,12 @@ static bool head_tables(Hy4Forward *f)
   for (uint32_t l = 0; ok && l < L; l++)
   {
     const Hy4Layer *Ly = &f->w->layer[l];
+    if (Ly->k_b->type != QTYPE_Q8_0 || Ly->v_b->type != QTYPE_Q8_0 ||
+        (!g->sliding[l] && (Ly->ix_pool_value->type != QTYPE_Q8_0 || Ly->ix_pool_gate->type != QTYPE_Q8_0)))
+    {
+      ok = false;
+      break;
+    }
     for (uint32_t h = 0; h < (uint32_t)g->n_heads[l]; h++)
       kb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->k_b) + (uint64_t)h * lat * nope / 32 * 34,
       vb[(size_t)l * M + h] = (const uint8_t *)hy4_dev(f, Ly->v_b) + (uint64_t)h * vd * lat / 32 * 34;
@@ -186,6 +192,10 @@ Hy4Forward *hy4_forward_create(const Hy4Weights *w, const int *fds, const Hy4Opt
   /* the read math's: the widest matrix input an mm reads (o_proj's heads x v_dim, the dense down's n_ff, Engram's) */
   uint64_t wide = (uint64_t)g->n_ff > H * g->v_dim ? (uint64_t)g->n_ff : H * g->v_dim;
   wide = wide > H * qk ? wide : H * qk, wide = wide > H * g->kv_lora ? wide : H * g->kv_lora;
+  if (D > wide)
+    wide = D;
+  if (ffe * (uint64_t)g->n_shexp > wide)
+    wide = ffe * (uint64_t)g->n_shexp;
   const uint64_t ecap = hy4_read_entries(n, g), scap = hy4_read_slots(n, g);
   const uint64_t xe = L > ffe ? L : ffe;
   /* compact MoE staging capacity: covers prefill (2*nk + 3*ecap ptrs + 5*ecap u32 + 2*scap u32) and decode */

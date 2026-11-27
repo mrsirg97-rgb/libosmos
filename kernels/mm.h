@@ -125,7 +125,7 @@ __device__ __attribute__((always_inline)) inline void tile(const uint8_t* __rest
   const _Float16* xb[CT];  // each tile's fragments: a step kFrag on (the lane's column osmos_load_b's)
   for (int ct = 0; ct < CT; ct++) xb[ct] = x16 + x16_at(c0 + ct * kTile, 0, xts);
   f8 acc[CT] = {};
-  if constexpr (CT == 1 && T == quant::kNVFP4 && SL == quant::Block<T>::values) {
+  if constexpr (!osmos_cuda && CT == 1 && T == quant::kNVFP4 && SL == quant::Block<T>::values) {
     // NVFP4 at one tile: a slab one block a row - a lane its row's 36 bytes whole (9 words, lanes l and l + 16 the
     // same), the next slab's in flight under this one's WMMAs, both of a step's chunks decoded where they are
     // (quant::nvfp4_h: decode_h's bits) - A's f16 in kRegA's places, the same sums. a chunk's loads apart (decode_h:

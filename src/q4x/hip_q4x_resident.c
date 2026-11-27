@@ -281,7 +281,15 @@ bool q4x_buffers(Q4xForward *f, char *err)
   q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
   const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
   const uint64_t dk = (uint64_t)MV_MAX_TOKENS * k; /* a decode's picks at most (the int8 experts' tables) */
-  const uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
+  uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
+  if (in > wide)
+    wide = in;
+  if (q > wide)
+    wide = q;
+  if (sff > wide)
+    wide = sff;
+  if (f->df && (uint64_t)f->df->geo.ff > wide)
+    wide = (uint64_t)f->df->geo.ff;
   const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * wide * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
   const struct

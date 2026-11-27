@@ -249,8 +249,10 @@ __global__ __launch_bounds__(kTileThreads) void mm_kernel(const uint8_t* __restr
         if (t < n && row < rows) {
           const float v = d[mt][nt][e] * scale;
           if (bf16) {
-            const uint32_t u = __float_as_uint(v);  // to nearest, ties to even (a finite sum)
-            ((uint16_t*) y)[(uint64_t) t * ys + row] = (uint16_t) ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
+            const uint32_t u = __float_as_uint(v);  // to nearest, ties to even (quiet NaN preserved)
+            ((uint16_t*) y)[(uint64_t) t * ys + row] =
+                (u & 0x7FFFFFFFu) > 0x7F800000u ? (uint16_t) ((u >> 16) | 0x0040u)
+                                                : (uint16_t) ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
           } else {
             ((float*) y)[(uint64_t) t * ys + row] = v;
           }
@@ -279,6 +281,7 @@ constexpr int kBK = 64, kLd = kBK + 8;
 
 __device__ inline uint16_t bf16_rn(float v) {
   const uint32_t u = __float_as_uint(v);
+  if ((u & 0x7FFFFFFFu) > 0x7F800000u) return (uint16_t) ((u >> 16) | 0x0040u);
   return (uint16_t) ((u + 0x7FFFu + ((u >> 16) & 1u)) >> 16);
 }
 
@@ -295,7 +298,7 @@ __global__ __launch_bounds__(kTileThreads) void w2a16_kernel(const uint8_t* __re
                                                              uint32_t cols, const uint16_t* __restrict__ x,
                                                              uint32_t xs, bool bf16, void* __restrict__ y,
                                                              uint32_t ys, Experts ex) {
-  __shared__ uint16_t sa[kBM * kLd], sb[kBN * kLd];
+  __shared__ __align__(16) uint16_t sa[kBM * kLd], sb[kBN * kLd];
   const uint32_t tid = threadIdx.x, lane = tid % 32, warp = tid / 32, g = lane / 4, q = lane % 4;
   const uint32_t wm = warp % 4, wn = warp / 4;
   const uint32_t nout = TRANS ? cols : rows, kdim = TRANS ? rows : cols, n0 = blockIdx.x * kBN;

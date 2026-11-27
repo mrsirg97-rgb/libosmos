@@ -59,6 +59,9 @@ static_assert(Block<kQ8_0>::values == kQ32 && Block<kIQ4_NL>::values == kQ32 && 
 // starts even: 16-bit loads, never wider
 __device__ inline uint32_t ld16(const uint8_t* p) { return *(const uint16_t*) p; }
 __device__ inline uint32_t ld32(const uint8_t* p) { return ld16(p) | ld16(p + 2) << 16; }
+__device__ inline uint32_t ld32_u(const uint8_t* p) {
+  return (uint32_t) p[0] | (uint32_t) p[1] << 8 | (uint32_t) p[2] << 16 | (uint32_t) p[3] << 24;
+}
 __device__ inline float f16(uint32_t bits) { return __half2float(__ushort_as_half((unsigned short) bits)); }
 __device__ inline float mul(float a, float b) { return __fmul_rn(a, b); }
 
@@ -421,7 +424,7 @@ template <> __device__ inline h8 decode_h<kNVFP4>(const uint8_t* b, int k) {
 // NaN code (0x7F, 0xFF), or a scale not a normal f16 (e outside 105 .. 134), the generic's
 template <> __device__ inline h8 decode_h<kMXFP8>(const uint8_t* b, int k) {
   const uint8_t* qs = b + 1 + k * kChunk;
-  const uint32_t q0 = ld32(qs), q1 = ld32(qs + 4), e = b[0];
+  const uint32_t q0 = ld32_u(qs), q1 = ld32_u(qs + 4), e = b[0];
   const uint32_t nan = (((q0 & 0x7F7F7F7Fu) + 0x01010101u) | ((q1 & 0x7F7F7F7Fu) + 0x01010101u)) & 0x80808080u;
   if (nan || e < 105 || e > 134) {
     float v[kChunk];
