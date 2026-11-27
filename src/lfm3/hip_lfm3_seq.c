@@ -51,6 +51,7 @@ void lfm3_seq_destroy(Lfm3Seq *s)
 {
   if (!s)
     return;
+  (void)lsa_closer_join(s->f->closer); /* (no job of its own still writing its buckets) */
   gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s);
 }
@@ -160,6 +161,7 @@ bool lfm3_seq_save_to(const Lfm3Seq *s, StateSink sink, void *ctx, char err[OSMO
 {
   if (!s || !sink)
     return osmos_fail(err, "no sequence or sink");
+  (void)lsa_closer_join(s->f->closer); /* its buckets in place before they are read (a failed job: broken) */
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step (its state part written): load it, or make another");
   Header h = {STATE_MAGIC, STATE_VERSION, lfm3_identity(s->f), s->pos, s->closed, s->stage};
@@ -172,6 +174,8 @@ bool lfm3_seq_reset(Lfm3Seq *s, char err[OSMOS_ERR])
 {
   if (!s)
     return osmos_fail(err, "no sequence");
+  (void)lsa_closer_join(s->f->closer); /* (a job of the old contents done before they are written over: never
+                                          applied to the empty one after) */
   s->pos = 0, s->back = 0, s->prompt_end = 0, s->cur = 0, s->closed = 0, s->broken = false; /* empty */
   s->stage = 0, s->turned = 0, s->step_n = 0, s->df_lo = s->df_pos = 0; /* no step to seed from, no context */
   const Lfm3Geometry *g = &s->f->w->geo;
@@ -193,6 +197,7 @@ bool lfm3_seq_load_from(Lfm3Seq *s, uint64_t bytes, StateSource src, void *ctx, 
 {
   if (!s || !src)
     return osmos_fail(err, "no sequence or source");
+  (void)lsa_closer_join(s->f->closer); /* (the same: a job done before its memory is loaded over) */
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");

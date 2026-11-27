@@ -97,25 +97,25 @@ true}` puts a placeholder after an orphaned call. Context length: the pack's own
 
 ## Speed
 
-osmos 0.18.0 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+osmos 0.18.1 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
 and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
 
 | Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain: code / prose |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 1,250 tok/s | **45.8** / **42.4** tok/s | 28.9 / 29.0 tok/s |
-| `qwen38-ud-iq3_xxs` | 961 | **50.8** / **43.6** | 30.8 / 30.9 |
-| `osmos-evo-1017` | 385 | **28.9** / **24.3** | 18.8 / 19.2 |
-| `hy4-flash` | 474 | **26.9** / **24.8** | 18.8 / 18.8 |
-| `osmos-evo-inkling` | 367 | 16.4 / 17.1 | 15.9 / 16.7 |
-| `osmos1.7b` (no drafter) | **5,362** | | **95.7** / **95.0** |
+| `inkling-2-mini` | 1,252 tok/s | **45.7** / **42.3** tok/s | 28.8 / 28.9 tok/s |
+| `qwen38-ud-iq3_xxs` | 958 | **51.0** / **43.8** | 30.7 / 30.8 |
+| `osmos-evo-1017` | 384 | **29.0** / **24.2** | 18.1 / 19.3 |
+| `hy4-flash` | 465 | **27.0** / **24.8** | 18.7 / 18.8 |
+| `osmos-evo-inkling` | 370 | **21.5** / **20.2** | 16.5 / 17.3 |
+| `osmos1.7b` (no drafter) | **5,780** | | **95.4** / **95.0** |
 
 Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
 45.5 tok/s drafted (28.6 plain, 0.15.0).
 
-**A recorded agent session** (new in 0.18.0; `tools/serve/session_bench.py`): a real 122-step rig session
+**A recorded agent session** (osmos 0.18.0, new then; `tools/serve/session_bench.py`): a real 122-step rig session
 (Inkling-2-Small fixing a bug and opening a PR: 3 user turns, 130 tool calls) replayed through each pack's `osmos-
 api`, step by step - each step given the recording up to it, its answer checked, then dropped. The context grows from
 ~6K to 88K-108K tokens (by the pack's tokenizer). Every pack, both modes: all 122 steps continued in the engine's

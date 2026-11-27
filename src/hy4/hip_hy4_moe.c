@@ -191,7 +191,7 @@ static bool routed(Hy4Forward *f, int l, uint32_t n, bool read, const float *rin
     { /* each token's row rounded once (rin), its picks' rows by gidx; the table exact: experts in any count order */
       const Q8Experts e = {.gate_type = L->exp_gate->type, .up_type = L->exp_up->type, .down_type = L->exp_down->type,
                            .wg = wg, .wu = wu, .wd = wd, .cnt = f->cnt, .xrow = f->xrow, .xin = f->gidx, .n = nk,
-                           .max_cnt = chunk, .d = lat, .ff = ffe, .x = rin, .x_rows = n, .xq = f->xq, .xqd = f->xqd,
+                           .max_cnt = chunk, .by_count = f->whole, .d = lat, .ff = ffe, .x = rin, .x_rows = n, .xq = f->xq, .xqd = f->xqd,
                            .scale = f->wsel, .lim = g->clamp[l], .ga = f->eg_g, .up = f->eg_u, .h = f->eg_h,
                            .h_rows = nk, .hq = f->hq, .hqd = f->hqd, .y = f->eg_y};
       return tables && hy4_part_done(f, 17, &t) && q8_experts(&e, f->st) && hy4_part_done(f, 20, &t);

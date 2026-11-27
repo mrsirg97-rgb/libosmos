@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.18.1]: Small drafted +31% / +18% (its reads under the GPU's work); osmos1.7b prompts +8%
+
+Every pack's answers are unchanged, token for token (hashed against 0.18.0's), drafted == plain for every pack.
+
+- **Speed** (performance profile, ~3K prompt / 256 tokens drafted code / prose / plain; 0.18.0's README in
+  parentheses):
+  - `osmos-evo-inkling` (Small): drafted 21.5 / 20.2 (16.4 / 17.1), plain 16.5 / 17.3 (15.9 / 16.7);
+  - `osmos1.7b`: prompt 5,780 (5,362);
+  - `qwen38-ud-iq3_xxs`, `hy4-flash`, `inkling-2-mini`, `osmos-evo-1017`: the same, within noise.
+- **Small's experts' reads under the GPU's work.** A streamed decode (Small's 148 GB at a ~106 GiB budget) waited
+  ~22% of its step on the experts not in memory (~21 reads of ~8 MB a step), the GPU idle. A decode's or a verify's
+  int8 experts now run in two launches: those in memory at once, the cold ones after their reads, which run under
+  the first. Its tables are sent compact (the int8 path sent a prompt-sized region every layer, ~85 MB a step).
+- **LSA's closed blocks bucketed beside the GPU** (osmos1.7b): Ward's dots cached (4x faster a block, the same
+  buckets), and a step that reads none of the blocks it closes buckets them on a thread, joined before the next step,
+  a save, a load or a reset.
+- **The router's tables by count.** A verify's tokens share experts (at 6 tokens ~57-63% of picks in an expert another
+  token picked): route_tok sorts its tables by count and the int8 experts launch each range of counts at its own width,
+  not the step's. A layer at 5-6 tokens: Hy4 -9 to -11%, Small resident at 8 -19%; served, the speed harness's verifies
+  mostly 1-3 tokens: Hy4 +0.5%, Qwen +1%.
+- **Tests:** `test_q8_experts_gpu` (new: the int8 experts by count, exact and each token alone, byte for byte);
+  `test_lfm3_forward_gpu` runs its 2,048-id reference by default (its sparse read and YaRN sections had been skipped).
+- **Tools:** `tools/bench/q8_verify_bench` (a family's routed experts at 1-8 tokens on the int8 lane; REPLAY= recorded
+  picks, HOST=1 host-mapped pools).
+- **Measured, not kept** (DESIGN.md "0.18.1"): Qwen's DFlash2 drafter against its MTP head (MTP faster at every
+  floor, 0.1-0.7); DeepSeek's DFly2-B6 drafter (a new drafter family; a later release).
+
 ## [0.18.0]: int8 decode for every family's experts; one attention core; Small +13-27%, Hy4 +8-23%
 
 Mini's, DeepSeek's and osmos1.7b's answers are unchanged, token for token (hashed against 0.17.1's). Qwen's,

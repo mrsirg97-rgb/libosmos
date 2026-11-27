@@ -52,20 +52,45 @@ bool by_lanes(const void* const* w, const int32_t* cnt, const int32_t* xrow, con
 
 // at most max_cnt rows a matrix: one launch at max_cnt (every matrix's rows 1 .. max_cnt), or exact - a table in any
 // order, counts 0 among them: the count-1 matrices a launch at 1 (a decode's or a verify's: nearly all), then the
-// rest a launch at max_cnt (few: an expert two tokens picked, three) - not a launch a count, each a grid of every
-// matrix that the others' leave empty (Mini's 7-token verify: 10% of its experts' time). a token's sums its own at any
-// width: the same bits either way
+// rest a launch at max_cnt (an expert two tokens picked, three) - not a launch a count, each a grid of every matrix
+// that the others' leave empty (Mini's 7-token verify: 10% of its experts' time). by_count (exact, the table by count
+// the most first, its counts' sum at most n: route_tok's): a launch a range of counts at the range's most - 1, 2,
+// 3 .. 4, 5 .. max_cnt - each over the first n / (its least) matrices alone (a count past lo among them: the picks are
+// n at most). a shared expert summed at its count's width, not max_cnt's (real verifies share: Hy4's 6-token ones 57%
+// of their picks in shared experts). a token's sums its own at any width: the same bits either way
+template <quant::Type T, int LO>
+bool range(const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n,
+           uint32_t nt, uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y, uint32_t ys,
+           hipStream_t s) {
+  const uint32_t m = n / (LO + 1);
+  if (!m) return true;
+  switch (nt) {
+#define TOK(t) \
+  case t: return by_lanes<T, t, LO>(w, cnt, xrow, xin, m, rows, cols, q, d, y, ys, s);
+    TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+#undef TOK
+    default: return false;
+  }
+}
+
 template <quant::Type T>
 bool by_tokens(const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n, uint32_t max_cnt,
                uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y, uint32_t ys, bool exact,
-               hipStream_t s) {
+               bool by_count, hipStream_t s) {
   if (cols % quant::Block<T>::values) return false;  // whole blocks of the type (Qwen's down: 640 of IQ4_NL)
   bool ok = true;
+  if (exact && by_count) {
+    ok = range<T, 0>(w, cnt, xrow, xin, n, 1, rows, cols, q, d, y, ys, s);
+    if (max_cnt >= 2) ok = ok && range<T, 1>(w, cnt, xrow, xin, n, 2, rows, cols, q, d, y, ys, s);
+    if (max_cnt >= 3) ok = ok && range<T, 2>(w, cnt, xrow, xin, n, max_cnt < 4 ? max_cnt : 4, rows, cols, q, d, y, ys, s);
+    if (max_cnt >= 5) ok = ok && range<T, 4>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, s);
+    return ok;
+  }
   if (exact) {
-    ok = by_lanes<T, 1, q8::kSelExact>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+    ok = by_lanes<T, 1, 0>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
     switch (max_cnt) {
 #define TOK(nt) \
-  case nt: return ok && by_lanes<T, nt, q8::kSelTwo>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
+  case nt: return ok && by_lanes<T, nt, 1>(w, cnt, xrow, xin, n, rows, cols, q, d, y, ys, s);
       TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
 #undef TOK
       default: return ok;
@@ -99,15 +124,36 @@ bool gate_up_lanes(const q8::GateUp& g, hipStream_t s) {
                                      : launch_gate_up<T, NT, 16, E, q8::kActLane>(g, s);
 }
 
+template <quant::Type T, int LO>
+bool gate_up_range(const q8::GateUp& g, uint32_t nt, hipStream_t s) {
+  q8::GateUp r = g;
+  r.n = g.n / (LO + 1);
+  if (!r.n) return true;
+  switch (nt) {
+#define TOK(t) \
+  case t: return gate_up_lanes<T, t, LO>(r, s);
+    TOK(1) TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
+#undef TOK
+    default: return false;
+  }
+}
+
 template <quant::Type T>
-bool gate_up_tokens(const q8::GateUp& g, uint32_t max_cnt, bool exact, hipStream_t s) {
+bool gate_up_tokens(const q8::GateUp& g, uint32_t max_cnt, bool exact, bool by_count, hipStream_t s) {
   if (g.cols % quant::Block<T>::values) return false;
   bool ok = true;
+  if (exact && by_count) {  // (by_tokens' ranges)
+    ok = gate_up_range<T, 0>(g, 1, s);
+    if (max_cnt >= 2) ok = ok && gate_up_range<T, 1>(g, 2, s);
+    if (max_cnt >= 3) ok = ok && gate_up_range<T, 2>(g, max_cnt < 4 ? max_cnt : 4, s);
+    if (max_cnt >= 5) ok = ok && gate_up_range<T, 4>(g, max_cnt, s);
+    return ok;
+  }
   if (exact) {
-    ok = gate_up_lanes<T, 1, q8::kSelExact>(g, s);
+    ok = gate_up_lanes<T, 1, 0>(g, s);
     switch (max_cnt) {
 #define TOK(nt) \
-  case nt: return ok && gate_up_lanes<T, nt, q8::kSelTwo>(g, s);
+  case nt: return ok && gate_up_lanes<T, nt, 1>(g, s);
       TOK(2) TOK(3) TOK(4) TOK(5) TOK(6) TOK(7) TOK(8)
 #undef TOK
       default: return ok;
@@ -126,25 +172,25 @@ bool gate_up_tokens(const q8::GateUp& g, uint32_t max_cnt, bool exact, hipStream
 
 bool q8::group(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin,
                uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y,
-               uint32_t ys, bool exact, hipStream_t s) {
+               uint32_t ys, bool exact, bool by_count, hipStream_t s) {
   if (!n || n > MV_MAX_GROUP || !rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !cols || cols % LANE_Q8_VALUES)
     return false;
   switch (type) {
 #define CASE(t) \
-  case quant::t: return by_tokens<quant::t>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, exact, s);
+  case quant::t: return by_tokens<quant::t>(w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, exact, by_count, s);
     Q8_TYPES(CASE)
 #undef CASE
     default: return false;
   }
 }
 
-bool q8::gate_up(uint32_t type, const GateUp& g, uint32_t max_cnt, bool exact, hipStream_t s) {
+bool q8::gate_up(uint32_t type, const GateUp& g, uint32_t max_cnt, bool exact, bool by_count, hipStream_t s) {
   if (!g.n || g.n > MV_MAX_GROUP || !g.rows || !max_cnt || max_cnt > MV_MAX_TOKENS || !g.cols || g.cols % LANE_Q8_VALUES ||
       g.hs < g.rows || (g.act == kActInk2 && (!g.args.sg || !g.args.su)))
     return false;
   switch (type) {
 #define CASE(t) \
-  case quant::t: return gate_up_tokens<quant::t>(g, max_cnt, exact, s);
+  case quant::t: return gate_up_tokens<quant::t>(g, max_cnt, exact, by_count, s);
     Q8_TYPES(CASE)
 #undef CASE
     default: return false;
@@ -173,7 +219,7 @@ extern "C" bool q8_enabled(void) {
 extern "C" bool q8_group_tok(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow,
                              const int32_t* xin, uint32_t n, uint32_t max_cnt, uint32_t rows, uint32_t cols,
                              const int8_t* q, const float* d, float* y, uint32_t ys, void* stream) {
-  return q8::group(type, w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, false, (hipStream_t) stream);
+  return q8::group(type, w, cnt, xrow, xin, n, max_cnt, rows, cols, q, d, y, ys, false, false, (hipStream_t) stream);
 }
 
 extern "C" bool q8_gate_up(uint32_t type, const void* const* wg, const void* const* wu, const int32_t* cnt,
@@ -183,5 +229,5 @@ extern "C" bool q8_gate_up(uint32_t type, const void* const* wg, const void* con
                            void* stream) {
   const q8::GateUp g = {wg, wu, cnt, xrow, xin, n, rows, cols, q, d, q8::kActLane,
                         {scale, win, lim, nullptr, nullptr, 0.0f, 0.0f}, h, hs};
-  return q8::gate_up(type, g, max_cnt, false, (hipStream_t) stream);
+  return q8::gate_up(type, g, max_cnt, false, false, (hipStream_t) stream);
 }

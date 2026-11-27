@@ -26,10 +26,11 @@ struct GateUp {
   uint32_t hs;
 };
 
-// the matvec: at most MV_MAX_TOKENS rows an entry - a launch at max_cnt, or exact (a launch a count, any order)
+// the matvec: at most MV_MAX_TOKENS rows an entry - a launch at max_cnt, or exact (a table in any order; by_count: by
+// count, the most first, its counts' sum at most n - a launch a range of counts over the entries that can hold it)
 bool group(uint32_t type, const void* const* w, const int32_t* cnt, const int32_t* xrow, const int32_t* xin, uint32_t n,
            uint32_t max_cnt, uint32_t rows, uint32_t cols, const int8_t* q, const float* d, float* y, uint32_t ys,
-           bool exact, hipStream_t s);
-bool gate_up(uint32_t type, const GateUp& g, uint32_t max_cnt, bool exact, hipStream_t s);
+           bool exact, bool by_count, hipStream_t s);
+bool gate_up(uint32_t type, const GateUp& g, uint32_t max_cnt, bool exact, bool by_count, hipStream_t s);
 
 }  // namespace q8

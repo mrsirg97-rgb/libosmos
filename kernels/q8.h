@@ -400,14 +400,14 @@ __device__ inline void in_rows(const int32_t* xin, uint32_t r0, uint32_t cnt, ui
 
 // matrix blockIdx.y: G = 32 / L rows a wave, L = LANE_Q8_LANES(cols) lanes a row; lane l of a row its blocks l,
 // l + L, ... in order for each of its NT tokens (input rows by in_rows), then the lanes' tree. rows past cnt[m] summed,
-// not stored. SEL which matrices are this launch's (the rest: nothing read or stored): kSelAll every one, kSelExact a
-// count of NT (0 not), kSelTwo a count of 2 or more (NT the table's most: the few past one summed at its width)
-enum Sel { kSelAll = 0, kSelExact = 1, kSelTwo = 2 };
-template <int SEL, int NT>
+// not stored. LO which matrices are this launch's (the rest: nothing read or stored): kSelAll (-1) every one, else a
+// count in LO + 1 .. NT (0 never) - a count summed at the launch's width NT, the rows past it not stored
+constexpr int kSelAll = -1;
+template <int LO, int NT>
 __device__ inline bool selected(int32_t c) {
-  return SEL == kSelAll || (SEL == kSelExact ? c == NT : c >= 2);
+  return LO < 0 || (c > LO && c <= NT);
 }
-template <quant::Type T, int NT, int L, int SEL = kSelAll>
+template <quant::Type T, int NT, int L, int LO = kSelAll>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) __attribute__((amdgpu_waves_per_eu(kFullWaves)))
 void group_tok_kernel(const uint8_t* const* __restrict__ w,
                                                                            const int32_t* __restrict__ cnt,
@@ -420,8 +420,8 @@ void group_tok_kernel(const uint8_t* const* __restrict__ w,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (SEL != kSelAll)
-    if (!selected<SEL, NT>(cnt[m])) return;  // the whole block
+  if constexpr (LO != kSelAll)
+    if (!selected<LO, NT>(cnt[m])) return;  // the whole block
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   uint64_t xr[NT];
@@ -449,8 +449,8 @@ void group_tok_kernel(const uint8_t* const* __restrict__ w,
 // each lane's blocks decoded from both and summed against x read once, each sum in group_tok_kernel's order and tree;
 // then lane 0 of a row r h = lane_swiglu(gate, up, lim, scale[win ? win[r] : r]) (scale NULL: 1 - a family whose
 // weights are applied at the sum) - swiglu_lane_kernel's operation on the sums
-// q8_group_tok gives, its two outputs never written. SEL as group_tok_kernel's
-template <quant::Type T, int NT, int L, int SEL = kSelAll, int ACT = kActLane>
+// q8_group_tok gives, its two outputs never written. LO as group_tok_kernel's
+template <quant::Type T, int NT, int L, int LO = kSelAll, int ACT = kActLane>
 __global__ __launch_bounds__(kWave* kWavesPerBlock) __attribute__((amdgpu_waves_per_eu(kFullWaves)))
 void gate_up_kernel(const uint8_t* const* __restrict__ wg,
                                                                          const uint8_t* const* __restrict__ wu,
@@ -464,8 +464,8 @@ void gate_up_kernel(const uint8_t* const* __restrict__ wg,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (SEL != kSelAll)
-    if (!selected<SEL, NT>(cnt[m])) return;  // the whole block
+  if constexpr (LO != kSelAll)
+    if (!selected<LO, NT>(cnt[m])) return;  // the whole block
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint64_t off = (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;

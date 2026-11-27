@@ -176,6 +176,7 @@ struct Ink2Forward
   uint64_t *m_key;
   MoeEntry *m_ent;                   /* its entries (moe_entries) */
   const void *(*m_ex)[POOL_PARTS];   /* each run's expert's parts in memory (membrane_wait's) */
+  bool *m_cold;                      /* each run's expert reading at the step's holds (moe_q8's second launch) */
   uint8_t *m_host, *m_build;
   void *m_dev;
   void *amax;

@@ -1,5 +1,5 @@
-// route_tok (osmos/gpu/route.h): a decode's expert tables built on the GPU, against the host's grouping (the step's
-// until now: experts ascending, an expert's tokens ascending, its rows in chunks): random picks (each token's k
+// route_tok (osmos/gpu/route.h): a decode's expert tables built on the GPU, against the host's grouping (experts
+// ascending, an expert's tokens ascending, its rows in chunks; the entries then by count, the most first): random picks (each token's k
 // distinct) at Hy4-flash's shape (512 experts, 16 picks) and others, every table bit for bit, the padding count 0 to
 // n_tok x k; the experts' matrices from a table of their addresses (the membrane's); a pick out of range or twice in
 // a token faults; shapes it does not take refused.
@@ -50,7 +50,17 @@ static Tables host(const std::vector<int32_t>& idx, const std::vector<float>& w,
     }
   }
   CHECK(r == nk);
-  return t;
+  // the entries by count, the most first (0.18.1), experts and an expert's chunks in order within one (a stable sort
+  // of the grouping's entries, which are in expert order)
+  std::vector<uint32_t> ord(e_n);
+  std::iota(ord.begin(), ord.end(), 0u);
+  std::stable_sort(ord.begin(), ord.end(), [&](uint32_t a, uint32_t b) { return t.cnt[a] > t.cnt[b]; });
+  Tables s = t;
+  for (uint32_t i = 0; i < e_n; i++) {
+    s.cnt[i] = t.cnt[ord[i]], s.xrow[i] = t.xrow[ord[i]];
+    for (int m = 0; m < 3; m++) s.wptr[m * nk + i] = t.wptr[m * nk + ord[i]];
+  }
+  return s;
 }
 
 template <class T>
@@ -138,6 +148,7 @@ int main() {
   CHECK(!route_tok(p, nullptr, 1, 16, ROUTE_MAX_EXPERTS + 1, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
   CHECK(!route_tok(p, nullptr, 1, 16, 512, 0, t, p, p, nullptr, p, p, nullptr, p, nullptr));
   CHECK(!route_tok(p, nullptr, 0, 16, 512, 4, t, p, p, nullptr, p, p, nullptr, p, nullptr));
+  CHECK(!route_tok(p, nullptr, 1, 16, 512, ROUTE_MAX_CHUNK + 1, t, p, p, nullptr, p, p, nullptr, p, nullptr));
   std::mt19937 rng(20261118);
   uint32_t cases = 0;
   for (uint32_t n : {1u, 2u, 3u, 9u, 64u, 65u, 300u, 2600u})
