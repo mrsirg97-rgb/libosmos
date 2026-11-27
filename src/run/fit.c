@@ -38,11 +38,63 @@ static uint64_t next(uint64_t built, uint64_t room, uint64_t target, double cost
 
 bool fit_sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t *budget, char err[OSMOS_ERR])
 {
-  return fit_sized_hint(build, unbuild, ctx, headroom, NULL, budget, err);
+  return fit_sized_hint(build, unbuild, ctx, headroom, 0, NULL, budget, err);
 }
 
-bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, FitHint *hint, uint64_t *budget,
-                    char err[OSMOS_ERR])
+/* a hint's budget moved by a room against the hint's: down by all of a room that shrank, up by a grown one over the
+   first step's cost - either way short of the memory, not past it (a cost measured between close builds is the
+   room's wobble) */
+static uint64_t hinted(uint64_t budget, uint64_t then, uint64_t now, uint64_t floor)
+{
+  const double d = (double)now - (double)then;
+  const double moved = d < 0 ? d : d / FIT_FIRST_COST;
+  return moved >= 0 ? budget + (uint64_t)moved
+                    : (-moved < (double)(budget - floor) ? budget - (uint64_t)-moved : floor);
+}
+
+static bool sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, FitHint *hint, uint64_t *budget,
+                  char err[OSMOS_ERR]);
+
+bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, uint64_t start_room,
+                    FitHint *hint, uint64_t *budget, char err[OSMOS_ERR])
+{
+  if (hint && hint->budget && hint->start_room && start_room) /* the hint's build alone first: no dense build */
+  {
+    /* aimed at the middle of what it keeps (the window: the headroom to a slack past it), from the room the hint's build
+       left: the room's wobble between starts either side stays in it */
+    const uint64_t aim = headroom + FIT_SLACK / 2;
+    uint64_t want = hinted(hint->budget, hint->start_room, start_room, 0);
+    if (hint->room && !hint->capped)
+      want = hinted(want, aim, hint->room, 0);
+    uint64_t built = 0, room = 0;
+    char herr[OSMOS_ERR] = "";
+    for (int t = 0; t < 2; t++) /* the aimed build, and one step from it when it lands outside */
+    {
+      if (!build(ctx, want, &built, &room, herr))
+        break; /* refused: sized as from cold, the dense build first */
+      const bool capped = room >= headroom && built + FIT_SLACK < want;
+      if (capped || (room >= headroom && room <= headroom + FIT_SLACK))
+      {
+        *budget = built;
+        /* this start's own: its build (a capped one's: what it was given) at its room, the dense room moved alike
+           (what the dense build takes is the build's, not the machine's) */
+        const int64_t moved = (int64_t)start_room - (int64_t)hint->start_room;
+        hint->dense_room = (int64_t)hint->dense_room + moved > 0 ? (uint64_t)((int64_t)hint->dense_room + moved) : 0;
+        *hint = (FitHint){hint->dense_room, capped ? want : built, start_room, room, capped};
+        return true;
+      }
+      unbuild(ctx);
+      want = hinted(built, aim, room, 0); /* down by all of a shortfall, up by a surplus over the first cost */
+    }
+  }
+  const bool ok = sized(build, unbuild, ctx, headroom, hint, budget, err);
+  if (ok && hint)
+    hint->start_room = start_room;
+  return ok;
+}
+
+static bool sized(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t headroom, FitHint *hint, uint64_t *budget,
+                  char err[OSMOS_ERR])
 {
   const uint64_t target = headroom + FIT_SLACK / 2; /* the window's middle: a step's error either side stays in it */
   uint64_t built = 0, room = 0;
@@ -57,7 +109,7 @@ bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t head
      units' padding has been, so the first step, the longest, lands short of the target, not past it into the RAM
      kept free */
   double cost = FIT_FIRST_COST;
-  const bool hinted = hint && hint->budget > dense;
+  const bool hinted_first = hint && hint->budget > dense;
   const uint64_t dense_room = room;
   uint64_t asked = 0; /* a capped build's budget (every expert resident in less): the hint's, so the next start's
                          first step is capped again, not taken as all it may hold */
@@ -69,15 +121,8 @@ bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t head
     if (live && room < headroom && built <= dense)
       break; /* short at the floor: nothing smaller */
     uint64_t want = next(last, last_room, target, cost);
-    if (i == 1 && hinted) /* the last start's budget, moved by this machine's room against that start's: down by all
-                             of a room that shrank, up by a grown one over the first step's cost - either way short of
-                             the memory, not past it (a cost measured between close builds is the room's wobble) */
-    {
-      const double d = (double)dense_room - (double)hint->dense_room;
-      const double moved = d < 0 ? d : d / FIT_FIRST_COST;
-      want = moved >= 0 ? hint->budget + (uint64_t)moved
-                        : (-moved < (double)(hint->budget - dense) ? hint->budget - (uint64_t)-moved : dense);
-    }
+    if (i == 1 && hinted_first) /* the last start's budget, moved by this machine's room against that start's */
+      want = hinted(hint->budget, hint->dense_room, dense_room, dense);
     /* on a flat short of the headroom - two budgets, the room moved less than half as far (a byte of budget costs at
        least a byte off a flat: only the streamed pool's drift moves it there) - the room moves in steps, not with the
        budget, so the shortfall says nothing of how far: stepped below the flat by one step, not crept across it a
@@ -121,7 +166,7 @@ bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t head
                        (Hy4, Mini: four or five more whole builds at the same size) */
       break;
     }
-    if (i == 1 && hinted && room >= headroom && room <= headroom + 2 * FIT_SLACK)
+    if (i == 1 && hinted_first && room >= headroom && room <= headroom + FIT_SLACK)
       break; /* the hint's step a little past the window (the room's wobble between starts): kept, not one more
                 whole build for a few experts */
   }
@@ -134,6 +179,6 @@ bool fit_sized_hint(FitBuild build, FitUnbuild unbuild, void *ctx, uint64_t head
   }
   *budget = built;
   if (hint)
-    *hint = (FitHint){dense_room, asked && built == ok ? asked : built};
+    *hint = (FitHint){dense_room, asked && built == ok ? asked : built, 0, room, asked && built == ok};
   return true;
 }

@@ -86,6 +86,7 @@ Osmos *osmos_create(const OsmosModel *m, const OsmosOptions *o, char err[OSMOS_E
 void osmos_destroy(Osmos *e);
 uint64_t osmos_identity(const Osmos *e);
 bool osmos_room(const Osmos *e, uint64_t *bytes);
+bool osmos_machine_room(uint64_t ram_kept, uint64_t *bytes);
 void osmos_stats(const Osmos *e, OsmosStats *s);
 
 bool osmos_batch(Osmos *e, OsmosSeq *const *seqs, const int32_t *tokens, uint32_t n, char err[OSMOS_ERR]);
@@ -161,6 +162,10 @@ osmos_identity
 
 osmos_room
   the GPU memory left after the build (the server's sizing reads it); false when it cannot be read.
+
+osmos_machine_room
+  the same measure with no build (fit_room of the GPU's free memory and the RAM past ram_kept): the room a start
+  begins from, a sizing hint's (osmos/run/fit.h); false when it cannot be read.
 
 osmos_stats
   the build's budget and the counters a bench reads; zeros for a family without them.

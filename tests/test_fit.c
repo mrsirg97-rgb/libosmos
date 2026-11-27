@@ -198,15 +198,22 @@ int main(void)
       printf("  every expert fits (%llu GiB dense, %llu of experts): budget %.2f GiB in %d builds\n",
              (unsigned long long)whole[k][2], (unsigned long long)whole[k][3], (double)budget / GIB, q.builds);
       assert(budget == q.dense + q.experts && build_room(&q, budget) >= GIB);
-      FitHint h = {0, 0};
-      unbuild(&q), q.builds = 0;
-      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live); /* cold: learns the hint */
-      const int cold = q.builds;
-      unbuild(&q), q.builds = 0;
-      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live && budget == q.dense + q.experts);
-      assert(q.builds == 2 && q.builds <= cold); /* the hint capped again on its first step, not a step past it */
       if (build_room(&q, q.dense + q.experts) >= 2 * GIB + q.experts / 8) /* room to spare past the first step */
         assert(q.builds == 2);
+      FitHint h = {0, 0, 0, 0, false};
+      unbuild(&q), q.builds = 0;
+      assert(fit_sized_hint(build, unbuild, &q, GIB, 0, &h, &budget, err) && q.live); /* cold: learns the hint */
+      const int cold = q.builds;
+      unbuild(&q), q.builds = 0;
+      assert(fit_sized_hint(build, unbuild, &q, GIB, 0, &h, &budget, err) && q.live && budget == q.dense + q.experts);
+      assert(q.builds == 2 && q.builds <= cold); /* the hint capped again on its first step, not a step past it */
+      FitHint g = {0, 0, 0, 0, false};
+      for (int r = 0; r < 3; r++) /* with the room before a build: from the second start on, the capped build alone */
+      {
+        unbuild(&q), q.builds = 0;
+        assert(fit_sized_hint(build, unbuild, &q, GIB, q.memory - q.other, &g, &budget, err) && q.live);
+        assert(budget == q.dense + q.experts && (r == 0 || q.builds == 1));
+      }
     }
   }
   /* a hint, the last start's: the same build again lands in the window on its first step - two builds (the dense one
@@ -217,25 +224,59 @@ int main(void)
     {
       Engine q = {shapes[k][0] * GIB, shapes[k][1] * GIB, shapes[k][2] * GIB, shapes[k][3] * GIB, shapes[k][4],
                   shapes[k][5], 0, 0, 0, 0, w * GIB / 1000, INT64_MAX, 0};
-      FitHint h = {0, 0};
+      FitHint h = {0, 0, 0, 0, false};
       uint64_t first = 0;
-      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &first, err) && q.live && h.budget == first);
+      assert(fit_sized_hint(build, unbuild, &q, GIB, 0, &h, &first, err) && q.live && h.budget == first);
       const int cold = q.builds;
       unbuild(&q);
       q.builds = 0, q.least = INT64_MAX;
       q.other = (uint64_t)((int64_t)q.other + shift * (int64_t)GIB);
-      assert(fit_sized_hint(build, unbuild, &q, GIB, &h, &budget, err) && q.live);
+      assert(fit_sized_hint(build, unbuild, &q, GIB, 0, &h, &budget, err) && q.live);
       const uint64_t left = build_room(&q, budget);
       if (!shift && !w)
         assert(q.builds == 2 && budget == first);
       const int64_t wob = 2 * (int64_t)q.wobble;
-      assert(left + wob >= GIB && left <= GIB + 2 * FIT_SLACK + wob &&
+      assert(left + wob >= GIB && left <= GIB + FIT_SLACK + wob &&
              q.least >= (int64_t)GIB - (int64_t)FIT_SLACK - wob);
       assert(q.builds <= cold + (w ? 1 : 0));
       if (k == 4 && !w)
         printf("  a hint (UD-IQ1_S-like, %+d GiB taken since): %d builds, not %d; %.3f GiB left\n", shift, q.builds,
                cold, (double)left / GIB);
     }
+  /* the hint with the room before any build: the same machine again builds the hint's budget alone - one build, no
+     dense one; 3 GiB more or less taken since (and the room's wobble), still the headroom, never past the memory,
+     and a build that misses the window sized as from the hint's step */
+  for (uint64_t w = 0; w <= 200; w += 100)
+    for (size_t k = 0; k < sizeof shapes / sizeof *shapes; k++)
+      for (int shift = -3; shift <= 3; shift += 3)
+      {
+        Engine q = {shapes[k][0] * GIB, shapes[k][1] * GIB, shapes[k][2] * GIB, shapes[k][3] * GIB, shapes[k][4],
+                    shapes[k][5], 0, 0, 0, 0, w * GIB / 1000, INT64_MAX, 0};
+        FitHint h = {0, 0, 0, 0, false};
+        uint64_t first = 0;
+        assert(fit_sized_hint(build, unbuild, &q, GIB, q.memory - q.other, &h, &first, err) && q.live);
+        const int cold = q.builds;
+        for (int again = 0; again < 2; again++) /* twice: the one-build start's hint feeds the next as well */
+        {
+          unbuild(&q);
+          q.builds = 0, q.least = INT64_MAX;
+          if (!again)
+            q.other = (uint64_t)((int64_t)q.other + shift * (int64_t)GIB);
+          assert(fit_sized_hint(build, unbuild, &q, GIB, q.memory - q.other, &h, &budget, err) && q.live);
+          const int64_t wob = 2 * (int64_t)q.wobble;
+          const uint64_t left = build_room(&q, budget);
+          assert(left + wob >= GIB && left <= GIB + FIT_SLACK + wob &&
+                 q.least >= (int64_t)GIB - (int64_t)FIT_SLACK - wob);
+          if (!shift && !w)
+            assert(q.builds == 1 && budget + FIT_SLACK >= first && budget <= first + FIT_SLACK);
+          if (again && !w)
+            assert(q.builds == 1); /* the machine as the last start left it: one build */
+          assert(q.builds <= cold + 2);
+          if (k == 4 && !w && !again)
+            printf("  a hint and the room before a build (%+d GiB taken since): %d build(s), not %d; %.3f GiB left\n",
+                   shift, q.builds, cold, (double)left / GIB);
+        }
+      }
   printf("[test_fit] ok\n");
   return 0;
 }

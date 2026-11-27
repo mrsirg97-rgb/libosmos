@@ -157,6 +157,15 @@ bool osmos_room(const Osmos *e, uint64_t *bytes)
   return true;
 }
 
+bool osmos_machine_room(uint64_t ram_kept, uint64_t *bytes)
+{
+  uint64_t free_b = 0;
+  if (!bytes || !osmos_gpu_room(&free_b))
+    return false;
+  *bytes = fit_room(free_b, fit_ram_available(), ram_kept);
+  return true;
+}
+
 void osmos_stats(const Osmos *e, OsmosStats *s)
 {
   if (!s)
