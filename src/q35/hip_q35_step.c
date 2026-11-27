@@ -100,27 +100,41 @@ static bool deltanet(Q35Forward *f, const Run *run, uint32_t runs, uint32_t n, i
          mat(f, L->ssm_out, L->s_ssm_out, D, in, f->fo, n, f->out, read);
 }
 
-/* the layer's blocks closed up to `want` (each its 512 keys indexed): its index vectors to the host, Ward there
-   (src/lsa's lsa_block), its buckets back */
-static bool close_blocks(Q35Forward *f, Q35Seq *s, int l, uint32_t want)
+/* the layer's blocks closed up to `want` (each its 512 keys indexed): deferred onto f->closer when none of them are
+   read in this step, else batched to the host and bucketed in order */
+static bool close_blocks(Q35Forward *f, Q35Seq *s, int l, uint32_t want, bool defer)
 {
-  for (; s->closed[l] < want; s->closed[l]++)
+  for (uint32_t b0 = s->closed[l]; b0 < want; b0 += f->close_max)
   {
-    const uint32_t b = s->closed[l];
-    if (hipMemcpy(f->h_ik, s->ik[l] + (uint64_t)b * LSA_WINDOW * LSA_DIM, LSA_WINDOW * LSA_DIM * F,
-                  hipMemcpyDeviceToHost) != hipSuccess ||
-        !lsa_block(f->h_ik, b, f->h_cent, f->h_mem) ||
-        hipMemcpy(s->cent[l] + (uint64_t)b * LSA_BUCKETS * LSA_DIM, f->h_cent, LSA_BUCKETS * LSA_DIM * F,
-                  hipMemcpyHostToDevice) != hipSuccess ||
-        hipMemcpy(s->mem[l] + (uint64_t)b * LSA_BUCKETS * LSA_CAP, f->h_mem, LSA_BUCKETS * LSA_CAP * 4,
-                  hipMemcpyHostToDevice) != hipSuccess)
+    const uint32_t k = want - b0 < f->close_max ? want - b0 : f->close_max;
+    if (defer && lsa_closer_queue(f->closer, s->ik[l] + (uint64_t)b0 * LSA_WINDOW * LSA_DIM, b0, k,
+                                  s->cent[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_DIM,
+                                  s->mem[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_CAP, &s->broken, NULL))
+    {
+      s->closed[l] = b0 + k;
+      continue;
+    }
+    if (hipMemcpyAsync(f->h_ik, s->ik[l] + (uint64_t)b0 * LSA_WINDOW * LSA_DIM, (uint64_t)k * LSA_WINDOW * LSA_DIM * F,
+                       hipMemcpyDeviceToHost, NULL) != hipSuccess ||
+        hipStreamSynchronize(NULL) != hipSuccess)
       return false;
+    for (uint32_t i = 0; i < k; i++)
+      if (!lsa_block(f->h_ik + (uint64_t)i * LSA_WINDOW * LSA_DIM, b0 + i,
+                     f->h_cent + (uint64_t)i * LSA_BUCKETS * LSA_DIM, f->h_mem + (uint64_t)i * LSA_BUCKETS * LSA_CAP))
+        return false;
+    if (hipMemcpy(s->cent[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_DIM, f->h_cent,
+                  (uint64_t)k * LSA_BUCKETS * LSA_DIM * F, hipMemcpyHostToDevice) != hipSuccess ||
+        hipMemcpy(s->mem[l] + (uint64_t)b0 * LSA_BUCKETS * LSA_CAP, f->h_mem,
+                  (uint64_t)k * LSA_BUCKETS * LSA_CAP * 4, hipMemcpyHostToDevice) != hipSuccess)
+      return false;
+    s->closed[l] = b0 + k;
   }
   return true;
 }
 
-/* LSA in a run: its keys indexed, the blocks they close bucketed; a decode's tokens each their read (the blocks
-   closed before its window), its attention over the read alone - a prompt's stays dense (lsa.py's) */
+/* LSA in a run: its keys indexed, the blocks they close bucketed; a decode's tokens past LSA_WINDOW each their read
+   (the blocks closed before its window), its attention over the read alone - prompts and decodes within the first
+   LSA_WINDOW stay dense (with deferred block closing) */
 static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_t n, bool read, bool *done)
 {
   const Q35Geometry *g = &f->w->geo;
@@ -131,12 +145,12 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
   if (!lsa_index_gpu(f->kq + (uint64_t)off * kv, n, kv, kvh, 1, hd, &free_dims, f->wk[l], true,
                      s->ik[l] + (uint64_t)P * LSA_DIM, NULL))
     return false;
-  if (read)
-    return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
+  if (read || P + n <= LSA_WINDOW)
+    return close_blocks(f, s, l, (P + n) / LSA_WINDOW, true);
   for (uint32_t t = 0; t < n; t++)
   {
     const uint64_t at = (uint64_t)(off + t) * q;
-    if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW) ||
+    if (!close_blocks(f, s, l, (P + t) / LSA_WINDOW, false) ||
         !lsa_index_gpu(f->q + at, 1, q, kvh, heads / kvh, hd, &free_dims, f->wq[l], false, f->iq, NULL) ||
         !lsa_read_gpu(f->iq, P + t, s->cent[l], s->mem[l], s->closed[l], f->lsa_s, f->list, f->list_n, NULL) ||
         !attn_core_run(f->attn,
@@ -151,7 +165,7 @@ static bool lsa_attention(Q35Forward *f, Q35Seq *s, int l, uint32_t off, uint32_
       return false;
   }
   *done = true;
-  return close_blocks(f, s, l, (P + n) / LSA_WINDOW);
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, true);
 }
 
 /* a run's attention, dense, on the core: a read the prompt's kernel at any size, a decode the decode's in steps of
@@ -209,12 +223,13 @@ static bool mlp(Q35Forward *f, int l, uint32_t n, bool read)
 /* the step (q35_step_runs), read its math (a prompt's or a decode's); keep_from: rows below it not kept whatever the
    prompts say (q35_step's: its last `rows` rows alone) */
 static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                 bool read, uint32_t keep_from, char *err)
+                 bool read, uint32_t keep_from, bool honor_prompt, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > Q35_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or past Q35_MAX_RUNS runs");
   if (!overflow_settle(&f->ovf, err)) /* (a reset the last step owes: refused with its cause while it fails) */
     return false;
+  (void)lsa_closer_join(f->closer);
   f->rows = 0; /* no row kept until the step runs: a refused one leaves none, not the step before's through a
                   half-rewritten slot table */
   Run run[Q35_MAX_RUNS];
@@ -233,7 +248,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
       return osmos_fail(err, "the tokens past the forward's step, or a sequence past its context");
     run[r] = (Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
-      kept += n + t >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
+      kept += n + t >= keep_from && (!honor_prompt || !s->prompt_end || s->pos + t + 1 >= s->prompt_end);
     n += lens[r];
   }
   if (kept > f->logit_rows)
@@ -262,7 +277,7 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
     for (uint32_t t = 0; t < run[r].len; t++)
     {
       const uint32_t row = run[r].off + t;
-      const bool keep = row >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
+      const bool keep = row >= keep_from && (!honor_prompt || !s->prompt_end || s->pos + t + 1 >= s->prompt_end);
       f->slot[row] = keep ? (int32_t)k : -1;
       if (keep && ok)
         ok = hipMemcpyAsync(f->hx + (uint64_t)k * D, f->h + (uint64_t)row * D, D * F, hipMemcpyDeviceToDevice, NULL) ==
@@ -295,13 +310,13 @@ static bool step(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint3
 bool q35_step_runs(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, false, 0, err);
+  return step(f, seqs, lens, runs, tokens, false, 0, true, err);
 }
 
 bool q35_step_read(Q35Forward *f, Q35Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                    char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, true, 0, err);
+  return step(f, seqs, lens, runs, tokens, true, 0, true, err);
 }
 
 /* one sequence, its last `rows` rows' logits on the host (q35_logits): a step past Q35_MV_TOKENS tokens a prompt's
@@ -310,7 +325,7 @@ bool q35_step(Q35Forward *f, Q35Seq *s, const int32_t *tokens, uint32_t n, uint3
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
-  if (!step(f, &s, &n, 1, tokens, n > Q35_MV_TOKENS, n - rows, err))
+  if (!step(f, &s, &n, 1, tokens, n > Q35_MV_TOKENS, n - rows, false, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||

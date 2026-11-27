@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "osmos/gpu/lsa_close.h"
 #include "osmos/gpu/lsa_ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "osmos/lsa.h"
@@ -46,6 +47,8 @@ struct Q35Forward
   bool lsa;
   float *wq[Q35_MAX_LAYERS], *wk[Q35_MAX_LAYERS];
   LsaScratch *lsa_s;
+  LsaCloser *closer; /* deferred block closing beside the GPU (osmos/gpu/lsa_close.h) */
+  uint32_t close_max;
   float *iq;
   uint32_t *list, *list_n; /* a read and its count (device) */
   float *h_ik, *h_cent;

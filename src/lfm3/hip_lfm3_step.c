@@ -187,7 +187,7 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     closed = want > closed ? want : closed;
   }
   *dense = 0;
-  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed, false);
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed, true);
 }
 
 static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
@@ -253,7 +253,7 @@ static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint
 
 /* the step (lfm3_step_runs); keep_from: rows below it not kept whatever the prompts say (lfm3_step's: its last rows) */
 static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                 bool read, uint32_t keep_from, char *err)
+                 bool read, uint32_t keep_from, bool honor_prompt, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > LFM3_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
@@ -280,7 +280,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
     run[r] = (Lfm3Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
     {
-      const bool keep = n + t >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
+      const bool keep = n + t >= keep_from && (!honor_prompt || !s->prompt_end || s->pos + t + 1 >= s->prompt_end);
       f->slot[n + t] = keep ? (int32_t)kept : -1;
       kept += keep;
     }
@@ -363,20 +363,20 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
 bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, false, 0, err);
+  return step(f, seqs, lens, runs, tokens, false, 0, true, err);
 }
 
 bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, true, 0, err);
+  return step(f, seqs, lens, runs, tokens, true, 0, true, err);
 }
 
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
-  if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, err))
+  if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, false, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
