@@ -7481,3 +7481,37 @@ the target's last hidden fused into the anchor slot, a hidden correction with it
 3.35 / 3.08. Its embedded target config is 1017's but for the DSpark keys. 8.85 GB as released (experts 7.22 GB
 MXFP4) against the pack's DSpark 4.68 GB (IQ2_XS experts): ~4 GB of the target's resident set, or its experts
 requantized. A new drafter family; left for a later release.
+
+### 0.18.2: a start's wait - whole builds, again and again (2026-11-27, low-power)
+
+A rig row's first token after a start waited on `--budget auto` (fit_sized): built at 0 (the dense weights alone),
+then toward 1 GiB of room past the experts, each build a whole engine - its dense weights uploaded and every resident
+expert read from the SSD (Hy4: 11.5 s the dense build, ~23 s each whole one). Hy4, Qwen and Mini hold every expert
+with room to spare, yet took the same build (86.45 / 89.32 / 21.32 GiB) four or five more times; DeepSeek and Small
+stepped toward a 0.25 GiB window the room's measure wobbled across (MemAvailable's ~0.1-0.3 GiB between builds):
+0.18.1 ready in Hy4 127.8 s (6 builds), Qwen 108.3 (6), Small 43-102 (3-6), DeepSeek evo 44.4 (6), Mini 22.6 (6).
+A build that took less than it was given and left the headroom now ends the sizing (every expert resident: nothing
+more to take), and the window is 512 MiB (FIT_SLACK; at most 0.25 GiB more of experts left out): Hy4 36.1 s, Qwen
+23.2, Mini 6.6, Small 39-40 (3 builds), DeepSeek evo 14-22 - the same budgets.
+
+### 0.18.2: the last start's budget first - a warm start one build (2026-11-27, low-power)
+
+The same build on the same machine sizes to the same budget every start. osmos-serve keeps what a sizing learned
+beside the model (`.osmos-fit-<hash>`: the hash of the version, the model file's size and time, and every flag - any
+of them changed, another file): the room before any build (osmos_machine_room), the dense build's, the budget kept (a
+capped build's: what it was given) and the room it left. The next start builds that budget alone, moved by its own
+room before a build against the hint's - down by all of a room that shrank, up by a grown one over FIT_FIRST_COST, so
+either way short of the memory - and aimed mid-window by the room the hint's build left; kept when it lands in the
+window or capped, else one step from it, else sized from cold (the dense build first). A cost measured between the
+hint's close builds was the wobble's (2.4 on a 0.13 GiB step: a step from it overshot in test_fit), so the hint keeps
+none. Ready, warm: Hy4 23.8 s, Qwen 15.3, Small 19.7-20.5, DeepSeek evo 6.0-6.4, Mini 4.4. `--no-fit-hint` sizes
+from cold.
+
+### 0.18.2: a load's conversions over threads - Hy4's 9 s before its experts (2026-11-27, low-power)
+
+Hy4's warm build: its dense upload 0.96 s (7.3 GB), its experts 12.4 s (66 GB: ~5.3 GB/s, the SSD's with the
+membrane's 12 readers - one direct reader 3.0 GB/s), and 9.35 s between: the head's Q8_0 copy 2.6 (BF16 -> F32 -> Q8_0
+on one thread) and DFly2's load 6.45 (1.7 GB of BF16, each matrix the same). tensor_f32's conversion and Hy4's Q8_0
+rows now run over 16 threads (osmos/cpu/par.h: contiguous runs, each row as alone - the serial loop's bytes; the
+drafted hashes as 0.18.1's): the head 0.34 s, DFly2 2.1 s, a warm start 16.9 s. What is left is the SSD's (the
+experts' reads); serving before every expert is read would be the next step, not this release's.

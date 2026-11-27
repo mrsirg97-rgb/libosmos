@@ -1,5 +1,30 @@
 # Changelog
 
+## [0.18.2]: time to first token - a pack starts in one build
+
+Every pack's answers are unchanged, token for token (hashed against 0.18.1's), drafted == plain for every pack;
+decode and prompt speed the same, within noise (DeepSeek's drafted code: nine runs 24.2-28.9, median 28.4, the two slow
+ones right after hours of load; 0.18.1's 28.5-29.0).
+
+- **Time to first token** (performance profile, launch to a first request's first token, the rig rows' configs;
+  a later start / a version's first, 0.18.1 in parentheses): `hy4-flash` 15.7 / 18.7 s (104.5),
+  `qwen38-ud-iq3_xxs` 13.9 / 17.7 (75.0), `osmos-evo-inkling` 19.3 / 37.5 (38-55), `inkling-2-mini` 3.9 / 5.0
+  (19.2), `osmos-evo-1017` 20.2 / 27.3 (28.8: ~15 s of it the first step's read of its experts), `osmos1.7b` 0.8
+  (1.1).
+- **A build that holds every expert ends the sizing.** `--budget auto` built the whole engine up to six times, each
+  re-reading the experts from the SSD; Hy4, Qwen and Mini hold every expert, yet took the same build four or five
+  more times.
+- **The last start's budget first.** osmos-serve keeps what a sizing found beside the model (`.osmos-fit-<hash>`:
+  the version, the model file and every flag), and a later start builds that budget alone, moved by the memory free
+  now, checked against it as any build (`--no-fit-hint`: sizes from cold). The sizing's window is 512 MiB (the room's
+  measure wobbled across 0.25 GiB: Small took up to six builds).
+- **A load's CPU conversions over 16 threads** (`osmos/cpu/par.h`): BF16 -> F32 and Hy4's Q8_0 copies - its head
+  2.6 -> 0.34 s, its DFly2 drafter 6.45 -> 2.1 s; each row as computed alone, the same bytes.
+- **Tests:** `test_fit` (a whole-model build, the hint: cold, warm, the memory moved, the room's wobble; each case
+  failing without its change), `test_par` (new); `test_q4x_headroom_gpu` sets its edge again once the memory
+  settles (the gate's run found the edge wider than it set it, memory still coming free).
+- **README:** a time-to-first-token table; the 0.15.0 three-questions table and repeated text dropped.
+
 ## [0.18.1]: Small drafted +31% / +18% (its reads under the GPU's work); osmos1.7b prompts +8%
 
 Every pack's answers are unchanged, token for token (hashed against 0.18.0's), drafted == plain for every pack.
