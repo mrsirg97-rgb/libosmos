@@ -652,20 +652,26 @@ __global__ __launch_bounds__(kSampThreads) void sample_kernel(const float* x, ui
     if (!t) *out = -1;
     return;
   }
-  // top-k first (Hugging Face's and vLLM's order: temperature, top-k, top-p): kb the k-th greatest p's bits -
-  // the greatest tau with at least k tokens at or past it (its ties kept), by the same bisection over a float's bits
+  // top-k first (Hugging Face's and vLLM's order: temperature, top-k, top-p): bisect in raw logit order (monotonic
+  // under expf((x - m) / temp)), then map the k-th greatest logit once to kb = bits(expf((lx - m) / temp))
   uint32_t kb = 0;  // 0: every token (top_k 0, or k past the row)
   if (top_k && top_k < n) {
-    uint32_t a = 0, b = 0x3F800001u;  // count(a) >= k (every token), count(b) < k (past the greatest, 1)
+    const auto to_ord = [](float v) {
+      const uint32_t u = __float_as_uint(v);
+      return (u & 0x80000000u) ? ~u : u | 0x80000000u;
+    };
+    uint32_t a = 0x007FFFFFu, b = to_ord(m) + 1u;  // -inf (count >= k) .. past max m (count < k)
     while (b - a > 1) {
       const uint32_t mid = a + (b - a) / 2;
-      const float tau = __uint_as_float(mid);
+      const uint32_t mu = (mid & 0x80000000u) ? (mid & 0x7FFFFFFFu) : ~mid;
+      const float tau = __uint_as_float(mu);
       float c = 0;  // (a count as a float: exact to 2^24 tokens)
-      for (uint32_t i = lo; i < hi; i++) c += expf((x[i] - m) / temp) >= tau ? 1.0f : 0.0f;
+      for (uint32_t i = lo; i < hi; i++) c += x[i] >= tau ? 1.0f : 0.0f;
       if (samp_sum(c, lds) >= (float) top_k) a = mid;
       else b = mid;
     }
-    kb = a;
+    const uint32_t au = (a & 0x80000000u) ? (a & 0x7FFFFFFFu) : ~a;
+    kb = __float_as_uint(expf((__uint_as_float(au) - m) / temp));
   }
   uint32_t tb = kb;  // tau's bits: the top-k's at top_p 1; else top-p's within the top-k's kept
   if (top_p < 1.0f) {

@@ -131,11 +131,11 @@ static bool engram(Hy4Forward *f, uint32_t n, int l)
 static bool select_runs(Hy4Forward *f, const float *ixw, const float *groups, uint32_t off, uint32_t len, uint32_t IH,
                         uint32_t ID, uint32_t pool, uint32_t top, bool read)
 {
-  const uint32_t mg = f->max_ctx / pool + 1;
   bool ok = true;
   for (uint32_t a = 0; ok && a < len; a += HY4_SCORE_ROWS)
   {
     const uint32_t m = len - a < HY4_SCORE_ROWS ? len - a : HY4_SCORE_ROWS, o = off + a;
+    const uint32_t mg = (uint32_t)f->pin_pos[o + m - 1] / pool + 1;
     ok = hy4_ix_select(f->ixq + (uint64_t)o * IH * ID, ixw + (uint64_t)o * IH, groups, IH, ID, pool, top, f->pos + o, m, mg,
                        f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->ix_spread, f->st);
   }

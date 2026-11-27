@@ -311,12 +311,18 @@ template <> __device__ inline void codes<quant::kIQ4_XS>(const uint8_t* b, int j
 // a block's exact integers against x: g[h] its half h's codes' dot (16 values), q[k] x's quarter k's sum (8 values).
 // every type's block sum is combine<T>'s float arithmetic on them
 template <quant::Type T>
-constexpr bool kQuarters = kGeneric<T> || T == quant::kQ3_K || T == quant::kQ2_K || T == quant::kQ4_K ||
-                           T == quant::kIQ1_M || T == quant::kIQ1_S;
+constexpr bool kPlainZeroOff = T == quant::kQ8_0 || T == quant::kIQ4_NL || T == quant::kMXFP4 ||
+                               T == quant::kNVFP4 || T == quant::kIQ4_XS;
+template <quant::Type T>
+constexpr bool kQuarters = (kGeneric<T> && !kPlainZeroOff<T>) || T == quant::kQ3_K || T == quant::kQ2_K ||
+                           T == quant::kQ4_K || T == quant::kIQ1_M || T == quant::kIQ1_S;
 
 // the block's sum before x's scale, from its integers: each half's, in the contract's order
 template <quant::Type T>
 __device__ inline float combine(const Codes& c, const int* g, const int* q) {
+  if constexpr (kPlainZeroOff<T>) {  // off == 0, mh == 0: dh * g (no quarter x sums)
+    return c.dh[0] * (float) g[0] + c.dh[1] * (float) g[1];
+  }
   if constexpr (kGeneric<T>) {  // each half: dh (its codes' dot - off x's sum) + mh x's sum
     float r = 0.0f;
     for (int h = 0; h < 2; h++) {

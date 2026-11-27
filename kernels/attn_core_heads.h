@@ -494,7 +494,7 @@ __global__ __launch_bounds__(kSpanWaves * 32) void fa_span_kernel(const float* q
     const bool diag = last > first;
     int32_t p = (int32_t) (top < last ? top : last - 1) + 1;
     for (bool pass0 = true;; pass0 = false) {
-      bool upd[osmos_slots], mine = pass0;
+      bool upd[osmos_slots], mine = false;
       if (!pass0) {
         if (--p < (int32_t) kb || p < (int32_t) first) break;
         __syncthreads();  // the last pass's reads of vt

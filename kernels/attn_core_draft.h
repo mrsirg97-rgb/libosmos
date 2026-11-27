@@ -196,7 +196,6 @@ __global__ void attn_kernel(const float* q, uint32_t n_q, int32_t pos0, const fl
     sum = sum + lds[j];
   }
   sum = block_sum<kThreads>(sum, red);
-  __syncthreads();
   for (uint32_t d = threadIdx.x; d < Q4X_DF_HEAD; d += kThreads) {
     float o = 0.0f;
     for (uint32_t j = 0; j < nk; j++) {

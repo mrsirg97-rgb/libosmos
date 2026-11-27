@@ -661,7 +661,7 @@ __global__ __launch_bounds__(kThreads) void ix_wide_count_kernel(const float* sc
                                                                  uint32_t* cnt) {
   __shared__ uint32_t lds[kThreads];
   const uint32_t t = blockIdx.y, own = (uint32_t) pos[t] / pool, chunk = wide_chunk(own), g0 = blockIdx.x * chunk;
-  if (own < top) return;
+  if (own < top || g0 >= own) return;
   uint32_t gt = 0, eq = 0;
   const uint32_t v = st[t].prefix, g1 = g0 + chunk < own ? g0 + chunk : own;
   const float* sc = scores + (uint64_t) t * max_groups;
@@ -887,6 +887,11 @@ extern "C" bool hy4_ix_select(const float* q, const float* w, const float* group
   if (!q || !w || !groups || !pos || !scores || !sel || !n_sel || !heads || heads > 16 || !dim || dim > kIxDim ||
       !pool || top < 2 || !n_tok || !max_groups)
     return false;
+  // every token's own < top (guaranteed when max_groups < top): dense prefix only, skip scoring and wide radix
+  if (max_groups < top) {
+    ix_select_kernel<<<n_tok, kThreads, 0, st(stream)>>>(pos, pool, top, max_groups, scores, sel, n_sel, false);
+    return ok();
+  }
   // a read's scores the matrix cores' at any step size (its bits a prompt's however it is split); a decode's or a
   // verify's F32. the selection over many blocks for a step's few tokens, a block a token for many (the
   // same picks either way: integer counts)

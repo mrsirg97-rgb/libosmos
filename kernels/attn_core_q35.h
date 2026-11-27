@@ -73,6 +73,7 @@ __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, con
   const Keys keys = keys_of(pos0 + t, window, list ? list_len : nullptr);
   const uint32_t len_t = token_len(pos0 + t, window, list ? list_max : 0), per = part_keys(len_t);
   const uint32_t parts_t = (len_t + per - 1) / per;  // (parts: the stride, the call's most)
+  if (part >= parts_t) return;
   const uint32_t k0 = part * per, k1 = k0 + per < keys.n ? k0 + per : keys.n;
   const uint64_t row = (uint64_t) kv_heads * HD / Q4X_KV_BLOCK * Q4X_KV_BLOCK_BYTES;
   const uint32_t c = kvh * HD + lane * L;
@@ -102,7 +103,6 @@ __global__ __launch_bounds__(32 * kWarps) void decode_kernel(const float* q, con
       for (int j = 0; j < L; j++) o[h][j] = __fmaf_rn(p, vv[j], o[h][j] * a);
     }
   }
-  if (part >= parts_t) return;
   // a part past the keys (k0 >= its count) writes (-inf, 0): the merge weighs it 0
   const uint64_t base = ((uint64_t) t * heads + kvh * G) * parts + part;
 #pragma unroll
