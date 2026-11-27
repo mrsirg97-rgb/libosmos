@@ -31,6 +31,5 @@ bool request_hy4(const Json *body, Request *r, char err[OSMOS_ERR])
   r->preserve_given = pt && pt->type != JSON_NULL, r->preserve = pt && pt->type == JSON_TRUE;
   if (!request_messages(msgs, &r->messages, err))
     return false;
-  r->tools = request_tools(body);
-  return true;
+  return request_tools(body, &r->tools, err);
 }

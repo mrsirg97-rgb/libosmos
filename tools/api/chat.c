@@ -193,9 +193,9 @@ void api_chat(Api *a, Http *h)
   }
   size_t n = 0;
   int32_t *ids = prompt_ids(a, &rq, &n, err);
-  const unsigned ctx = a->engine.max_ctx;
+  unsigned ctx = 0;
   bool loading = false, over = false; /* the refusal's kind: a 503 to retry, OpenAI's context_length_exceeded */
-  if (ids && !engine_ready(&a->engine)) /* loading: no context known yet (its 503 below, said as it is) */
+  if (ids && !engine_ready(&a->engine, &ctx)) /* loading: no context known yet (its 503 below, said as it is) */
     snprintf(err, sizeof err, "the engine is not ready (loading)"), free(ids), ids = NULL, loading = true;
   else if (ids && n >= ctx)
     snprintf(err, sizeof err, "the prompt is %zu tokens: the context is %u", n, ctx), free(ids), ids = NULL, over = true;
@@ -248,7 +248,7 @@ void api_chat(Api *a, Http *h)
     if (m && !parsed && !strcmp(r->finish, "stop"))
     { /* the turn ended out of the format (a calls block, a special token's text, no </think>): an error, never its
          text as the answer. cut by max_tokens ("length"), its text goes as it is */
-      const bool called = memmem(s.shape.p, s.shape.n, a->d->calls_open, strlen(a->d->calls_open)) != NULL;
+      const bool called = s.shape.p && memmem(s.shape.p, s.shape.n, a->d->calls_open, strlen(a->d->calls_open)) != NULL;
       snprintf(err, sizeof err, "the model's %s did not parse (%s)", called ? "tool call" : "answer", perr);
       reply_fail(h, rq.stream, err, &s.text, a->d->eos);
     }

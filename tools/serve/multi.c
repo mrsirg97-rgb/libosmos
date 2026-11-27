@@ -109,6 +109,14 @@ static Lane *lane_of(Multi *m, long long rid)
   return NULL;
 }
 
+static bool waiting_rid(const Multi *m, long long rid)
+{
+  for (int k = 0; k < m->nwait; k++)
+    if (m->wait[k].rid == rid)
+      return true;
+  return false;
+}
+
 /* STOP: a reading lane's state is not kept (its prompt's end past it: back to its furthest point, conv_cancel_read),
    an answering one's is (to its last fed) */
 static void stop(Multi *m, bool all, long long rid)
@@ -145,7 +153,7 @@ static void gen(Multi *m, char *line)
   const char *bad = !g.has_rid ? "this engine runs several conversations: GEN needs rid=<id>"
                     : g.spec > 0 && !osmos_block(m->sv->e) ? "spec=1 without a drafter (--dspark)"
                     : g.n >= m->sv->max_ctx ? "a prompt past the context"
-                    : lane_of(m, g.rid) ? "a rid already running"
+                    : lane_of(m, g.rid) || waiting_rid(m, g.rid) ? "a rid already running"
                                         : NULL;
   if (bad)
   {
@@ -249,12 +257,13 @@ static void turn(void *scope)
     }
 }
 
-/* stdin's lines, each an event; its end a QUIT */
+/* stdin's lines, each an event; its end (or an error/OOM) stops the engine */
 static void *reader(void *arg)
 {
   Multi *m = arg;
   char *buf = NULL;
   size_t cap = 0;
+  bool quit_sent = false;
   for (ssize_t len; (len = getline(&buf, &cap, stdin)) >= 0;)
   {
     while (len && (buf[len - 1] == '\n' || buf[len - 1] == '\r'))
@@ -264,17 +273,23 @@ static void *reader(void *arg)
     if (!ctx || !(ev->m = m, ev->line = strdup(buf)) || !engine_add(m->evt, ctx, PRIO_LINE))
     {
       free(ev ? ev->line : NULL), free(ev), context_destroy(ctx);
-      break; /* (stopped: QUIT came) */
+      break;
     }
     if (!strcmp(buf, "QUIT"))
+    {
+      quit_sent = true;
       break;
+    }
   }
-  if (feof(stdin))
+  if (!quit_sent)
   {
     LineEv *ev = malloc(sizeof *ev);
     Context *ctx = ev ? context_create(ev, on_line) : NULL;
-    if (ctx && (ev->m = m, ev->line = strdup("QUIT")) && !engine_add(m->evt, ctx, PRIO_LINE))
-      free(ev->line), free(ev), context_destroy(ctx);
+    if (!ctx || !(ev->m = m, ev->line = strdup("QUIT")) || !engine_add(m->evt, ctx, PRIO_LINE))
+    {
+      free(ev ? ev->line : NULL), free(ev), context_destroy(ctx);
+      engine_stop(m->evt);
+    }
   }
   free(buf);
   return NULL;

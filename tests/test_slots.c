@@ -384,6 +384,25 @@ int main(void)
   printf("  a state handed over, not copied: RAM's take-back the buffer put; streamed straight to the folder (none of "
          "it in RAM) and taken back in pieces, a save failing part way leaving nothing, no folder not kept\n");
 
+  /* two identities sharing one folder with identical tokens do not overwrite each other's files */
+  clear();
+  SlotsOptions id_a = opts(dir, 1, 0, 0, 101), id_b = opts(dir, 1, 0, 0, 202);
+  Slots *sa = slots_create(&id_a, err), *sb = slots_create(&id_b, err);
+  assert(sa && sb);
+  put(sa, 1, N, STATE, true);
+  assert(slots_flush(sa, err));
+  int32_t *t_same = conv(1, N);
+  bool kept_b = false;
+  assert(slots_put(sb, t_same, N, state(2, STATE), STATE, &kept_b, err) && kept_b && slots_flush(sb, err));
+  free(t_same);
+  assert(files(".bin") == 2 && files(".meta") == 2);
+  slots_destroy(sa), slots_destroy(sb);
+  assert((sa = slots_create(&id_a, err)) && slots_in_dir(sa) == 1);
+  assert((sb = slots_create(&id_b, err)) && slots_in_dir(sb) == 1);
+  take_back(sa, 1, N, STATE);
+  slots_destroy(sa), slots_destroy(sb);
+  printf("  shared folder: two identities with identical token prefixes keep distinct slot files\n");
+
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
   assert(system(cmd) == 0);

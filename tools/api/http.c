@@ -251,7 +251,7 @@ void http_linger(int fd, bool wait)
       ;
     return;
   }
-  const struct timeval t = {0, API_LINGER_MS * 1000};
+  const struct timeval t = {API_LINGER_MS / 1000, (API_LINGER_MS % 1000) * 1000};
   (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &t, sizeof t);
   char sink[16384];
   struct timespec a, b;

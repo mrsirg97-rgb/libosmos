@@ -118,7 +118,7 @@ static void answer(Http *h)
   const bool get = !strcmp(h->method, "GET"), post = !strcmp(h->method, "POST");
   if (!strcmp(h->path, "/health"))
   {
-    const bool ready = engine_ready(&api.engine);
+    const bool ready = engine_ready(&api.engine, NULL);
     const char *b = ready ? "{\"status\": \"ok\"}" : "{\"status\": \"loading\"}";
     http_send(h, ready ? 200 : 503, "application/json", b, strlen(b));
   }
@@ -129,9 +129,10 @@ static void answer(Http *h)
     json_dump_string(&b, api.model, strlen(api.model));
     json_puts(&b, ", \"object\": \"model\", \"owned_by\": \"osmos\"");
     char t[96];
-    const bool ready = engine_ready(&api.engine); /* listed while loading, said so - and the context once known */
+    unsigned ctx = 0;
+    const bool ready = engine_ready(&api.engine, &ctx); /* listed while loading, said so - and the context once known */
     if (ready)
-      snprintf(t, sizeof t, ", \"context_length\": %u", api.engine.max_ctx), json_puts(&b, t);
+      snprintf(t, sizeof t, ", \"context_length\": %u", ctx), json_puts(&b, t);
     json_puts(&b, ready ? ", \"osmos\": {\"ready\": true}}]}" : ", \"osmos\": {\"ready\": false}}]}");
     if (!b.oom)
       http_send(h, 200, "application/json", b.p, b.n);
@@ -203,12 +204,17 @@ static int tokenize(const char *model)
 #define API_CTX_MAX 1048576u /* the largest any pack's model reads (DeepSeek-V4.1's 1M; Qwen's YaRN to it) */
 static unsigned ctx_of(const char *s)
 {
+  if (!s || *s < '0' || *s > '9')
+    return 0;
+  errno = 0;
   char *end = NULL;
   const unsigned long long v = strtoull(s, &end, 10);
   const unsigned long long m = !*end ? 1 : (*end == 'k' || *end == 'K') && !end[1] ? 1024
                                : (*end == 'm' || *end == 'M') && !end[1] ? 1048576 : 0;
+  if (errno || end == s || !m || v > API_CTX_MAX / m)
+    return 0;
   const unsigned long long n = v * m;
-  return end != s && m && n >= API_CTX_MIN && n <= API_CTX_MAX ? (unsigned)n : 0;
+  return n >= API_CTX_MIN ? (unsigned)n : 0;
 }
 
 int main(int argc, char **argv)

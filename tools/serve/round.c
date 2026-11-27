@@ -56,8 +56,10 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
     end = server_eos(m->sv, x) ? "stop" : ln->produced >= ln->limit ? "length" : NULL;
   }
   const int keep = end ? printed - 1 : acc + 1;
-  bool ok = oseq_rollback(ln->c.s, (uint32_t)(e->k + 1 - keep)) &&
-            (!keep || oseq_seed(ln->c.s, e->pos, e->pos + keep, ln->c.err));
+  bool ok = oseq_rollback(ln->c.s, (uint32_t)(e->k + 1 - keep));
+  if (!ok)
+    osmos_fail(ln->c.err, "rollback failed");
+  ok = ok && (!keep || oseq_seed(ln->c.s, e->pos, e->pos + keep, ln->c.err));
   for (int i = 0; ok && i < keep; i++)
     if (!(ok = ids_push(&ln->c.held, toks[e->off + i])))
       osmos_fail(ln->c.err, "out of memory");
@@ -95,7 +97,8 @@ static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLO
     left--;
     if (!ln->g.spec && !greedy_goes_on(m, ln))
       continue;
-    if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit)) /* its last token: printed and the
+    if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit ||
+                       (uint32_t)oseq_position(ln->c.s) + 1 >= m->sv->max_ctx)) /* its last token: printed and the
         lane finished, not fed (greedy_goes_on's) - its verify's rollback past a block's close would be refused */
     {
       greedy_goes_on(m, ln);

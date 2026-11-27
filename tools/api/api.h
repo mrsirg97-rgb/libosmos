@@ -68,7 +68,7 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
                 char err[OSMOS_ERR]);
 void engine_stop(Engine *e, Run *r);
 void engine_release(Engine *e, Run *r);
-bool engine_ready(Engine *e);
+bool engine_ready(Engine *e, unsigned *max_ctx);
 bool engine_quit(Engine *e, int wait_s);
 
 /* a connection's request: its method, path, body */

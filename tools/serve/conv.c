@@ -160,7 +160,12 @@ bool conv_cancel_read(Conv *c, const Server *sv)
                  b = c->user.n && c->user.n <= c->held.n ? c->user.n : 0;
   if (!a && !b)
     return conv_restart(c, sv);
-  return go_back(c, sv, a > b ? &c->prompt : &c->user);
+  if (a > b)
+    return go_back(c, sv, &c->prompt);
+  const bool ok = go_back(c, sv, &c->user);
+  if (ok)
+    c->prompt.n = 0; /* stale prompt point below user must not pull a later turn back past it */
+  return ok;
 }
 
 /* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a

@@ -35,7 +35,7 @@ void request_free(Request *r);
 /* shared by the readers: the effort asked (reasoning_effort, else chat_template_kwargs'), a failure, the tools as
    OpenAI function tools (each in its {"type": "function", "function"} wrapper; NULL: none) */
 const Json *request_effort(const Json *body);
-Json *request_tools(const Json *body);
+bool request_tools(const Json *body, Json **out, char err[OSMOS_ERR]);
 bool request_format(const Json *body, JsonBuf *out, char err[OSMOS_ERR]);
 /* the messages as Qwen's and Inkling's templates take them (request_messages.c): `reasoning` as reasoning_content,
    a call's arguments given as a JSON string parsed into an object - *out owned, NULL with why on a refusal */
