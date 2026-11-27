@@ -7431,3 +7431,53 @@ accepted, a draft 22% / 17% of a step. int8 against f16 on Small: faster at ever
 8: 287 / 309) - drafted 17.1 / 16.7 against 13.8 / 13.9 tok/s. Small's drafting is its experts' (0.18.1: the
 membrane's resident set, its reads under the compute). The matvec's exact mode as one launch, each matrix its own
 count: Mini's layer 1,107 -> 1,090 us at 7 tokens, 681 -> 699 at 4 (f16 1,091 / 663) - not kept.
+
+### 0.18.1: LSA's closed blocks bucketed beside the GPU (2026-11-26, low-power)
+
+osmos1.7b's ~3K prompt waited on the host's Ward bucketing of each closed 512-key block (2.27 ms a block, ~30 a
+prompt). Ward's dots and merge costs made once, a merged pool's again after its round, four dots in flight: 0.56 ms
+a block, the same buckets byte for byte (2,001 blocks against 0.17.1's) - 4,034 -> 4,177 tok/s (+3.5%). Then a step
+that reads none of the blocks it closes (every read below sparse_from: LSA_READ_MAX 4,612 keys) queues their
+bucketing on a thread (osmos/gpu/lsa_close.h), joined before the next step, a save, a load, a reset or a
+destruction: 3,992 -> 4,378 (+9.7%; the closing skipped altogether 4,389). Steps past sparse_from still close in
+line (Ward over blocks in parallel: later).
+
+### 0.18.1: the router's tables by count - real verifies share their experts (2026-11-26, low-power)
+
+Recorded verifies (OSMOS_ROUTE_DUMP, a session's and the speed harness's steps): at 6 tokens ~0.63 of n x k picks
+distinct, 57-63% of picks in an expert another token of the step also picked. exact's two launches (count 1, then
+every other entry at the step's width) summed a shared expert at the full width: q8_verify_bench on the recorded
+picks, Hy4 4 / 5 / 6 tokens 7-11% of the layer. route_tok's tables by count, the most first, and q8_experts'
+by_count (a launch each of counts 1, 2, 3-4, 5-8 at its most over the first n / (its least) entries): Hy4 -5 / -11 /
+-9% at 4 / 5 / 6, Qwen -4 / -2% at 5 / 6, Small resident -18 / -19% at 7 / 8, +2-3% at 3-4. Served, the speed
+harness's verifies mostly 1-3 tokens: Hy4 +0.5%, Qwen +1%, Small (its host tables by count, h_cnt) +3%.
+
+### 0.18.1: Small's decode, where its step went - the membrane's misses waited on (2026-11-26, low-power, profiled)
+
+osmos-evo-inkling drafted (238 steps, ~3.3 tokens a step), ink2's profile: inputs 16.0 ms a step, attention 3.9, mid
+6.3, the MoE 108.6 - of it the membrane's waits 30.6 (22%), the router 2.8, the experts' kernels and their tables
+71.9 - the head 3.1. ~21 picks a step not in memory (~8 MB, ~1.45 ms each read), ~2.4% of its distinct picks; the
+GPU idle while a layer waited. The experts' slots (mapped host memory registered with HIP) read as fast as
+hipMalloc's (q8_verify_bench HOST=1: 149-169 GB/s either way). The int8 path sent its tables in the prompt-sized
+layout every layer (~1.8 MB, ~85 MB a step). Shipped (moe_q8): the experts in memory launched first, the cold ones
+after their reads; the tables compact - drafted 16.3 / 15.8 -> 20.3 / 18.8 tok/s, the compact tables alone 16.7 /
+16.5. The inputs (q / gate / k / v / rel / sink, 2.33 GB a step: ~11.6 ms at ~200 GB/s) leave ~4 ms over their floor
+(the residual's mix, the norms, the prep kernels, launch gaps) - mid (6.3 ms for 1.27 GB) and the head at theirs.
+
+### 0.18.1: Qwen's DFlash2 drafter against its MTP head - MTP kept (2026-11-26, low-power)
+
+incoai/Qwen3.8-Flash-Next-DFlash2 (Q8_0; 0.5.12's q4x_dflash), served drafted code / prose against the pack's MTP
+head, a confidence product's floor of 0.1 (today's) to 0.7 (another engine's cut for its greedy requests): MTP 50.1 /
+42.0; DFlash2 0.1 47.6 / 39.5, 0.3 46.9 / 38.0, 0.5 44.4 / 35.3, 0.7 41.8 / 32.7 - the same answers throughout.
+Another engine's ~2x drafted Qwen is its decode copies (requantized weights: perplexity +1.3%; its exact weights
+30.5 plain / 44.9 MTP) and this drafter at its cut - neither osmos's (bits). Qwen stays on MTP.
+
+### 0.18.1: DeepSeek's DFly2-B6 drafter - not built this release (2026-11-26)
+
+AngelSlim/DS-V4.1-Flash-DFly2-B6 (AngelSpec's DSpark model without its Markov head: 3 MoE layers of 128 FP4
+experts, each attending the target's layer 28 / 32 / 36 latent at its indexer's top-512 plus a 128-token window,
+the target's last hidden fused into the anchor slot, a hidden correction with its own block attention). Its card:
+4.12 / 3.88 tokens a round (T 0 / 1) against a DSpark of its recipe's 3.81 / 3.51, agentic 4.06 / 3.75 against
+3.35 / 3.08. Its embedded target config is 1017's but for the DSpark keys. 8.85 GB as released (experts 7.22 GB
+MXFP4) against the pack's DSpark 4.68 GB (IQ2_XS experts): ~4 GB of the target's resident set, or its experts
+requantized. A new drafter family; left for a later release.
