@@ -12,8 +12,7 @@ An inference engine for five mixture-of-experts models, and one small long-conte
 - **Hy4-flash** (Tencent; 220B, ~11B active a token, AngelSlim's Q3_K), its backbone in GPU memory (on less, its
   experts streamed) and its 63 GB Engram table read from the SSD, drafted by the release's own DFly2, to a 1M context.
 - **Inkling-2-Mini** (Thinking Machines; 26B, its middle layers looped three times a token), the release's own
-  NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context:
-  prompts at ~1,000 tokens a second.
+  NVFP4 / MXFP8 / BF16 weights - 19.6 GB, all of it in GPU memory - drafted by its own head, to a 1M context.
 - **osmos1.7b** (LFM3-1.7B, 1.85 GB in Q8_0), its full-attention layers reading a 256K context through latent sparse
   attention: prompts at thousands of tokens a second, each token's attention ~4,600 keys however long the context.
 
