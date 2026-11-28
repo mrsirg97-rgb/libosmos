@@ -2,10 +2,15 @@
 
 ## [0.19.0]: runtime audit — structural cleanup, correctness fixes, and hot-path optimizations
 
-A full runtime audit across the serving layer, host memory/loading/text paths, all six model families, and core GPU
-kernels: shared infrastructure replaces duplicated family code, correctness and safety gaps fail closed, and wasted
-work is trimmed without altering model math.
+Every pack's answers are unchanged, token for token: all 6 packs match 0.18.2's speed-harness hashes (drafted == plain),
+and all 9 recorded 122-step agent sessions (6 greedy + 3 sampled; 1,098/1,098 steps) match 0.18.0's baselines and
+drafted == plain bit for bit.
 
+- **Measured performance** (`performance` profile; prior README baseline in parentheses):
+  - **Speed (~3K prompt; drafted code / prose; plain code / prose):** `qwen38-ud-iq3_xxs` 963 (954) prompt, **51.5 / 44.2** (51.1 / 43.8) drafted, 30.9 / 31.0 (30.7 / 30.7) plain; `osmos-evo-1017` **398** (377, +5.5%) prompt, **28.5 / 23.8** drafted, 18.6 / 19.1 plain; `hy4-flash` 480 prompt, **27.2 / 25.0** (27.0 / 24.8) drafted, **19.0 / 19.0** (18.8 / 18.8) plain; `inkling-2-mini` 1,254 prompt, **46.0 / 42.6** (45.9 / 42.4) drafted, 29.0 / 29.1 plain; `osmos1.7b` 5,706 prompt, **96.5 / 96.1** (95.3 / 95.4) plain; `osmos-evo-inkling` 370 prompt, 21.3 / 20.2 drafted, 16.3 / 17.2 plain.
+  - **Recorded 122-step agent session** (`session_bench.py`, vs 0.18.0): `qwen38-ud-iq3_xxs` **60.4** / 29.0 (59.5 / 29.0) tok/s; `hy4-flash` **33.5** / 17.7 (33.0 / 17.7); `osmos-evo-inkling` **23.8** / 13.3 (17.7 / 13.7, +34.5% combining 0.18.1's overlapped reads + 0.19.0's cleanups); `inkling-2-mini` **49.7** / 22.5 sampled (49.6 / 22.4), 54.5 / 22.5 greedy; `osmos-evo-1017` 41.9 / 19.0 greedy, 35.3 / 19.0 sampled (~500 MiB leaner GPU memory); `osmos1.7b` 82.8 greedy, 71.0 sampled.
+  - **Agents (4 at once, 8 turns; vs 0.18.0):** `osmos1.7b` **88.6 s** (92.0–93.3 s, -4.4%), `qwen38-ud-iq3_xxs` **187.7 s** (191.5–192.0 s, first-token p50 2.28 vs 2.7–2.8 s), `inkling-2-mini` **201.4 s** (204.5 s), `hy4-flash` **418.7 s** (428.3 s, -9.6 s on identical 7,292 tokens), `osmos-evo-1017` 426.0 s at 110.4 GiB budget (dense build 27.0 vs 28.2 GiB; first-token p50 6.19 vs 6.92 s, turn-done p95 84.1 vs 91.2 s).
+  - **TTFT (later starts):** `hy4-flash` **15.5 s** (15.7), `inkling-2-mini` **3.9 s** (3.9), `osmos-evo-inkling` **19.3 s** (19.3), `osmos1.7b` **0.8 s** (0.8), `qwen38-ud-iq3_xxs` 14.7 s, `osmos-evo-1017` 21.0 s.
 - **Shared runtime primitives:**
   - `osmos/run/draft.h` (`draft_accept`): NaN-safe speculative cutoff shared across all five drafters, plus Q4x MTP
     vocab-size validation and a single-sync pinned `OverflowFlag` read across all six families.
@@ -48,10 +53,12 @@ work is trimmed without altering model math.
     allocate `pin_logits`, free converted `f->dev` tensors, and size Engram scratch for one layer; trim Ink2 double
     `ops_rms_x16_many`, full-vocab logits copy, and padded drafter rows; trim Q4x `experts()` redundant launch, NPU
     down-pack size, MTP seed inject, unused PLE buffers, and padded DFlash rows; clamp the final `resident.c` arena to
-    exact remaining bytes; keep one open shard fd with `POSIX_FADV_DONTNEED` during upload; single-pass Q8_0 LM head
-    quantization via `q4x_kv_put(v=NULL)`.
+    exact remaining bytes (saving ~1.2 GiB on DeepSeek dense builds); reserve `FIT_SLACK` in `experts_fit_now()` for
+    `hipHostRegister` page-table overhead; keep one open shard fd during upload; single-pass Q8_0 LM head quantization
+    via `q4x_kv_put(v=NULL)`.
 - **Tests:** added `test_draft`, `test_moe_stage`, `test_slots`, plus regression coverage in `test_gguf`, `test_pool`,
-  `test_fit`, and `test_resident`.
+  `test_fit`, and `test_resident`. Full verification: all host tests, ASan/UBSan/LSan, TSan, 102/102 API tests, 80/80
+  installer tests, and 114/114 GPU tests on `gfx1151`.
 
 ## [0.18.2]: time to first token - a pack starts in one build
 

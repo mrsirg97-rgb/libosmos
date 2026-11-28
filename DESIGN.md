@@ -7544,5 +7544,18 @@ A full audit across serving (`tools/api`, `tools/serve`), host memory/loading/te
     read-only `tokenizer_has_special()` fast path in `osmos-api`.
   - *Families & loading:* skip redundant DS4/Hy4/Ink2/Q4x projections, norms, padded drafter rows, and unused buffers
     (including ~560 MB unreachable DFly2 `head8`, duplicate BF16 `output.weight` when Q8_0 head is active, single-layer
-    Engram scratch, exact-sized final `resident.c` arena, 1-fd `POSIX_FADV_DONTNEED` shard uploads, and single-pass
-    `q4x_kv_put(v=NULL)` LM-head Q8_0 quantization).
+    Engram scratch, exact-sized final `resident.c` arena, 1-fd shard uploads, and single-pass `q4x_kv_put(v=NULL)`
+    LM-head Q8_0 quantization). `POSIX_FADV_DONTNEED` after `gpu_upload_table()` was tried and dropped: evicting clean
+    dense weights from the page cache between `fit_sized()`'s cold builds cost +3 s on Qwen cold TTFT (23.2 -> 20.2 s
+    without it). Dropping the cache also exposed that single-shot `experts_fit_now()` left zero slack past
+    `FIT_HEADROOM` for `mmap(MAP_POPULATE)` + `hipHostRegister()` page tables (~4.75 MiB/GiB, ~175-224 MiB on 44-47 GiB
+    of Qwen host slots); reserving `FIT_SLACK` in `experts_fit_now()` keeps `test_q4x_headroom_gpu` cleanly at 1.29-1.31
+    GiB (3/3 passes).
+- **Verification & release measurements (performance profile).** 114/114 GPU tests, 102/102 API tests, 80/80 installer
+  tests, all host tests, ASan/UBSan/LSan, and TSan pass. All 6 packs' speed-harness answers hash-match 0.18.2 bit for
+  bit (drafted == plain); all 9 recorded 122-step agent sessions (1,098/1,098 steps, greedy + sampled) match 0.18.0's
+  baselines bit for bit with flat GPU memory. Highlights vs prior README: `osmos-evo-1017` ~3K prompt 377 -> 398 tok/s
+  (+5.5%, dense build 28.2 -> 27.0 GiB), `qwen38-ud-iq3_xxs` session 59.5 -> 60.4 tok/s and agents 191.5 -> 187.7 s,
+  `hy4-flash` session 33.0 -> 33.5 tok/s and agents 428.3 -> 418.7 s, `osmos-evo-inkling` session 17.7 -> 23.8 tok/s
+  (+34.5% over 0.18.0), `osmos1.7b` decode 95.3 -> 96.5 tok/s and agents 92.0 -> 88.6 s (-4.4%), `inkling-2-mini` agents
+  204.5 -> 201.4 s.

@@ -96,69 +96,69 @@ context (the table below), or `--ctx` (installer or osmos-api: `512k`, `1m`, ...
 
 ## Speed
 
-osmos 0.18.2 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
+osmos 0.19.0 on one Strix Halo, the `performance` profile, nothing else running. Every number from the same harness:
 `osmos-api` with the pack's own `osmos.json` (its context, its drafter, its budget sized to the machine), a fresh
 process, a warm-up request, then each request alone; decode is the answer's own rate from the server's timings. Drafted
-and plain answers are the same tokens, bit for bit (their hashes compared); drafting moves only the speed.
+and plain answers are the same tokens, bit for bit (their hashes compared against 0.18.2's); drafting moves only the speed.
 
 | Pack | Prompt, ~3K tokens | Decode, drafted: code / prose | Decode, plain: code / prose |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 1,253 tok/s | **45.9** / **42.4** tok/s | 28.9 / 29.0 tok/s |
-| `qwen38-ud-iq3_xxs` | 954 | **51.1** / **43.8** | 30.7 / 30.7 |
-| `osmos-evo-1017` | 377 | **28.4** / **24.2** | 18.5 / 19.2 |
-| `hy4-flash` | 480 | **27.0** / **24.8** | 18.8 / 18.8 |
-| `osmos-evo-inkling` | 370 | **22.2** / **20.6** | 16.5 / 17.3 |
-| `osmos1.7b` (no drafter) | **5,782** | | **95.3** / **95.4** |
+| `inkling-2-mini` | 1,254 tok/s | **46.0** / **42.6** tok/s | 29.0 / 29.1 tok/s |
+| `qwen38-ud-iq3_xxs` | 963 | **51.5** / **44.2** | 30.9 / 31.0 |
+| `osmos-evo-1017` | 398 | **28.5** / **23.8** | 18.6 / 19.1 |
+| `hy4-flash` | 480 | **27.2** / **25.0** | 19.0 / 19.0 |
+| `osmos-evo-inkling` | 370 | **21.3** / **20.2** | 16.3 / 17.2 |
+| `osmos1.7b` (no drafter) | **5,706** | | **96.5** / **96.1** |
 
-Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0
-(`osmos-evo-1017`'s drafted code: the median of nine runs, 24.2-28.9).
+Code is a duration parser with tests, prose a B-tree explanation, 256 tokens each at temperature 0.
 `inkling-2-mini` samples at its release's temperature 1.0 by default: the same code question at its default draws
 45.5 tok/s drafted (28.6 plain, 0.15.0).
 
-**Time to first token** (osmos 0.18.2, the `performance` profile): from launching `osmos-api` on the pack's
+**Time to first token** (osmos 0.19.0, the `performance` profile): from launching `osmos-api` on the pack's
 `osmos.json` to the first token of a first, short request. A pack's first start on a version sizes itself to the
 machine in a few whole builds and keeps what it found beside the model (`.osmos-fit-<hash>`); every later start builds
 once (`--no-fit-hint` on osmos-serve sizes from cold each time).
 
 | Pack | First start | Later starts | osmos 0.18.1 |
 | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | 5.0 s | **3.9 s** | 19.2 s |
-| `qwen38-ud-iq3_xxs` | 17.7 | **13.9** | 75.0 |
-| `osmos-evo-1017` | 27.3 | **20.2** | 28.8 |
-| `hy4-flash` | 18.7 | **15.7** | 104.5 |
-| `osmos-evo-inkling` | 37.5 | **19.3** | 38-55 |
-| `osmos1.7b` | 0.8 | **0.8** | 1.1 |
+| `inkling-2-mini` | 5.6 s | **3.9 s** | 19.2 s |
+| `qwen38-ud-iq3_xxs` | 20.2 | **14.7** | 75.0 |
+| `osmos-evo-1017` | 27.8 | **21.0** | 28.8 |
+| `hy4-flash` | 20.6 | **15.5** | 104.5 |
+| `osmos-evo-inkling` | 37.7 | **19.3** | 38-55 |
+| `osmos1.7b` | 1.0 | **0.8** | 1.1 |
 
 What a later start waits on is the SSD: the experts it holds, read once (Hy4's 66 GB in ~12.5 s), and DeepSeek's
-read at its first step (~15 s of its 20).
+read at its first step (~15 s of its 21).
 
-**A recorded agent session** (osmos 0.18.0, new then; `tools/serve/session_bench.py`): a real 122-step rig session
+**A recorded agent session** (osmos 0.19.0; `tools/serve/session_bench.py`): a real 122-step rig session
 (Inkling-2-Small fixing a bug and opening a PR: 3 user turns, 130 tool calls) replayed through each pack's `osmos-
 api`, step by step - each step given the recording up to it, its answer checked, then dropped. The context grows from
 ~6K to 88K-108K tokens (by the pack's tokenizer). Every pack, both modes: all 122 steps continued in the engine's
-cache, every answer parsed, none repeated the last call, GPU memory flat, and drafted == plain on every step. Decode
-is the median of the steps' own rates (most steps are short tool calls, which draft well); a step at most 192 tokens.
-Sampled is the pack's own temperature / top_p with a fixed seed a step; **bold** is how the pack ships.
+cache, every answer parsed, none repeated the last call, GPU memory flat, and drafted == plain == 0.18.0 on every step
+(1,098 of 1,098 steps across all 9 replays). Decode is the median of the steps' own rates (most steps are short tool
+calls, which draft well); a step at most 192 tokens. Sampled is the pack's own temperature / top_p with a fixed seed a
+step; **bold** is how the pack ships.
 
 | Pack | Ships | Greedy: drafted / plain | Sampled: drafted / plain | Step done p50, as shipped: drafted / plain |
 | --- | --- | ---: | ---: | ---: |
-| `inkling-2-mini` | sampled, 1.0 | 54.4 / 22.5 tok/s | **49.6** / **22.4** tok/s | 4.0 / 7.3 s |
-| `qwen38-ud-iq3_xxs` | greedy | **59.5** / **29.0** | | 3.7 / 6.3 |
-| `osmos-evo-1017` | sampled, 1.0 | 42.9 / 19.0 | **36.5** / **19.0** | 7.4 / 11.3 |
-| `hy4-flash` | greedy | **33.0** / **17.7** | | 5.8 / 8.4 |
-| `osmos-evo-inkling` | sampled, 1.0 | 17.7 / 13.7 | (not run) | 12.2 / 14.3 (greedy) |
-| `osmos1.7b` (no drafter) | sampled, 0.1 | 82.5 | **71.6** | 2.3 |
+| `inkling-2-mini` | sampled, 1.0 | 54.5 / 22.5 tok/s | **49.7** / **22.5** tok/s | 4.0 / 7.2 s |
+| `qwen38-ud-iq3_xxs` | greedy | **60.4** / **29.0** | | 3.6 / 6.3 |
+| `osmos-evo-1017` | sampled, 1.0 | 41.9 / 19.0 | **35.3** / **19.0** | 7.6 / 11.3 |
+| `hy4-flash` | greedy | **33.5** / **17.7** | | 5.8 / 8.2 |
+| `osmos-evo-inkling` | sampled, 1.0 | 23.8 / 13.3 | (not run) | 10.5 / 14.4 (greedy) |
+| `osmos1.7b` (no drafter) | sampled, 0.1 | 82.8 | **71.0** | 2.3 |
 
-**Agents** (osmos 0.18.0; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
+**Agents** (osmos 0.19.0; `tools/serve/agent_bench.py`, Maya's harness ported): 4 agents at once, 8 turns each - a 4K-12K system
 prompt and task, then tool results of 150-2,000 tokens (one in ten a 5K-20K file read) and 0.5-5 s of tool time
 between turns: 98,757 new prompt tokens against up to 8,003 answer tokens, each model's own tokens, at a 131K
-context, every turn drafted where the pack has a drafter. One run each (osmos1.7b and Qwen two: both shown).
+context, every turn drafted where the pack has a drafter. One run each.
 
 | | `osmos1.7b` | `qwen38-ud-iq3_xxs` | `inkling-2-mini` | `osmos-evo-1017` | `hy4-flash` |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Wall time, all 32 turns | **92.0-93.3 s** | 191.5-192.0 s | 204.5 s | 411.1 s | 428.3 s |
-| First token, p50 / p95 | **0.85 / 6.0 s** | 2.7-2.8 / 26-27 s | 1.68 / 19.3 s | 6.92 / 53.2 s | 5.00 / 46.0 s |
-| Turn done, p50 / p95 | **8.4-8.8 / 14.2-14.4 s** | 14.7-16.8 / 46.2-46.7 s | 19.8 / 43.3 s | 39.6 / 91.2 s | 46.3 / 97.2 s |
+| Wall time, all 32 turns | **88.6 s** | 187.7 s | 201.4 s | 426.0 s | 418.7 s |
+| First token, p50 / p95 | **0.85 / 6.0 s** | 2.28 / 25.4 s | 1.99 / 20.7 s | 6.19 / 50.6 s | 5.08 / 47.9 s |
+| Turn done, p50 / p95 | **8.1 / 13.5 s** | 19.0 / 47.9 s | 18.4 / 40.5 s | 43.0 / 84.1 s | 44.4 / 95.2 s |
 
 Every turn answered, and every later turn continued its conversation in place. osmos sizes itself to leave 8 GiB of
 RAM free beside the model (`"fill_gib"` in `osmos.json`, osmos-serve `--fill`: the output the same at any value).
