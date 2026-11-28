@@ -130,7 +130,7 @@ static Rest rest_entries(MoeStage *c, uint32_t nd, const int32_t *cnt_j, const u
   uint32_t *x, *y;
   r.cnt = moe_stage_carve(c, room * 4, (void **)&r.dcnt);
   x = moe_stage_carve(c, room * 4, (void **)&r.dx), y = moe_stage_carve(c, room * 4, (void **)&r.dy);
-  if (!tab || !r.cnt || !x || !y)
+  if (!tab || !r.cnt || !x || !y) /* the staging buffer overflowed: r.cnt NULL, the caller's refusal (never n == 0) */
     return (Rest){0};
   for (uint32_t p = 0; p < r.n; p++)
   {
@@ -316,6 +316,8 @@ bool fwd_moe(Forward *f, int l, char *err)
     gu = rest_entries(&c, nd, cnt_j, nq, ex_g, ex_u, 2, slot0, base, D, FF);
   if (ok && parts && npu_dn)
     dn = rest_entries(&c, nd, cnt_j, nq, ex_d, NULL, 1, slot0, base, FF, D);
+  if (ok && (!gu.cnt || !dn.cnt)) /* a table not staged: refused, never its entries skipped */
+    return osmos_fail(err, "the experts' staging buffer overflowed");
   const bool gu_on = parts && npu_gu, dn_on = parts && npu_dn;
   ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
        mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&
