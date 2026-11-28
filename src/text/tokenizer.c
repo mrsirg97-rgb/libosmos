@@ -301,7 +301,13 @@ int64_t tokenizer_encode_shaped(const Tokenizer *t, const char *text, const char
       n++;
     }
     else
-      n += raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+    {
+      const int64_t added =
+          raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+      if (added < 0) /* out of memory: refused, never a count one short */
+        return free(f), -1;
+      n += (size_t)added;
+    }
   }
   free(f);
   return (int64_t)n;
