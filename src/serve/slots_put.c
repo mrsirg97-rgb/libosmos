@@ -60,7 +60,17 @@ bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_
     slots_trim_dir(s, s->n - 1);
   }
   if (!slots_trim_ram(s))
-    return slots_drop(s, s->n - 1), slots_fail(err, "a conversation could not be written to the folder");
+  {
+    /* this one not kept if still in RAM: found by name, since a failed trim's drop moved it out of s->n - 1 (and
+       one trimmed to the folder before the failure stays there) */
+    for (uint32_t i = 0; i < s->n; i++)
+      if (s->e[i].state && !strcmp(s->e[i].name, e.name))
+      {
+        slots_drop(s, i);
+        break;
+      }
+    return slots_fail(err, "a conversation could not be written to the folder");
+  }
   if (kept)
     *kept = true;
   return true;
