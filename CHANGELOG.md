@@ -37,6 +37,11 @@ drafted == plain bit for bit.
     `order()`/`order_key()` in `attn.hip`/`hy4.hip` and `bf16_rn` in `mm_fp4.hip`; `ops_index_score_rows` FMA dispatch;
     `q8.h` `kSelAll` count guard; `round.h` non-finite `ue8m0_code`; wave-shuffle `route.hip` scan; and CUDA
     compatibility (`!osmos_cuda` guard, `hipDeviceAttributeMultiprocessorCount`, `__shfl_up`).
+  - **Review follow-ups:** `slots_put` drops the new entry by name when a trim fails (not whatever was moved to the
+    last index); `tokenizer_encode_shaped` refuses `raw()`'s out-of-memory `-1`; `q4x_npu_take` selects from a
+    streamed layer's compact tables; DS4 `rest_entries` staging overflow refused, not read as no entries; a drafter's
+    failure ends only the lanes drafted; Ink2 rollback keeps the drafter's context for cuts of a block or less
+    (`mlast_ok` gates a draft until the next seed).
 - **Wasted work and hot-path optimizations:**
   - **GPU kernels:** skip idle waves in `attn_core_heads.h`; halve `v_dot4` calls for zero-offset quant formats in
     `q8.h`; gate `select.h` `cand[]` gather on `bin_n <= kCandCap`; size sparse MLA `splits` by `sel_cap * pool`;
