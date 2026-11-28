@@ -81,7 +81,7 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
 }
 
 /* the round's lanes in order (a greedy one's token printed first: one at its end left out), each with the answering
-   lanes after it; the drafting ones' drafts all at once (oseq_draft_all) - a drafter's failure every drafting lane's */
+   lanes after it; the drafting ones' drafts all at once (oseq_draft_all) - a drafter's failure every drafted lane's */
 static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLOCK], int *k)
 {
   OsmosSeq *ds[MAX_LANES];
@@ -116,9 +116,12 @@ static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLO
   char err[OSMOS_ERR] = "";
   if (nd && !oseq_draft_all(ds, ys, (uint32_t)nd, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, cnt, err))
   {
+    bool drafted[MAX_LANES] = {false}; /* a drafter's failure the lanes drafted's: one left out (no slack) goes on */
+    for (int d = 0; d < nd; d++)
+      drafted[at[d]] = true;
     int kept = 0;
     for (int j = 0; j < n; j++)
-      if (go[j]->g.spec)
+      if (drafted[j])
         snprintf(go[j]->c.err, sizeof go[j]->c.err, "%s", err), lane_fail(m, go[j]);
       else
         go[kept] = go[j], k[kept++] = 0;
