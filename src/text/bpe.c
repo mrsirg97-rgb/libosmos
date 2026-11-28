@@ -187,28 +187,53 @@ static void queue(const Bpe *b, const char *buf, const size_t *start, const size
 
 int32_t bpe_whole(const Bpe *b, const unsigned char *word, size_t len)
 {
-  char *buf = malloc(2 * len + 1);
+  if (!len)
+    return map_get(&b->vocab, "", 0);
+  char stack[129];
+  char *buf = len <= 64 ? stack : malloc(2 * len + 1);
   if (!buf)
     return -1;
   size_t at = 0;
   for (size_t i = 0; i < len; i++)
     at += put_cp(buf + at, byte_cp[word[i]]);
   const int32_t id = map_get(&b->vocab, buf, at);
-  free(buf);
+  if (buf != stack)
+    free(buf);
   return id;
 }
 
-size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap)
+int64_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap)
 {
-  char *buf = malloc(2 * len + 1), *key = malloc(4 * len + 2);
-  size_t *start = malloc(len * sizeof *start), *size = malloc(len * sizeof *size);
-  long *next = malloc(len * sizeof *next), *prev = malloc(len * sizeof *prev);
-  /* a merge queues at most two pairs, the bytes len - 1 at the start: 3 len bounds the queue */
-  Pair *heap = malloc((3 * len + 1) * sizeof *heap);
-  if (!buf || !key || !start || !size || !next || !prev || !heap)
-  {
-    free(buf), free(key), free(start), free(size), free(next), free(prev), free(heap);
+  if (!len)
     return 0;
+  enum { SMALL = 64 };
+  Pair s_heap[3 * SMALL + 1];
+  size_t s_start[SMALL], s_size[SMALL];
+  long s_next[SMALL], s_prev[SMALL];
+  char s_buf[2 * SMALL + 1], s_key[4 * SMALL + 2];
+  void *arena = NULL;
+  Pair *heap = s_heap;
+  size_t *start = s_start, *size = s_size;
+  long *next = s_next, *prev = s_prev;
+  char *buf = s_buf, *key = s_key;
+  if (len > SMALL)
+  {
+    const size_t n_heap = 3 * len + 1;
+    const size_t per = 3 * sizeof *heap + 2 * sizeof *start + 2 * sizeof *next + 6;
+    if (len > (SIZE_MAX - sizeof *heap - 3) / per)
+      return -1;
+    const size_t b_heap = n_heap * sizeof *heap, b_sz = len * sizeof *start, b_ln = len * sizeof *next;
+    arena = malloc(b_heap + 2 * b_sz + 2 * b_ln + (2 * len + 1) + (4 * len + 2));
+    if (!arena)
+      return -1;
+    uint8_t *p = arena;
+    heap = (Pair *)p, p += b_heap;
+    start = (size_t *)p, p += b_sz;
+    size = (size_t *)p, p += b_sz;
+    next = (long *)p, p += b_ln;
+    prev = (long *)p, p += b_ln;
+    buf = (char *)p, p += 2 * len + 1;
+    key = (char *)p;
   }
   size_t at = 0, nh = 0;
   for (size_t i = 0; i < len; i++) /* a symbol a byte: its stand-in's UTF-8, the symbols adjacent in buf */
@@ -254,8 +279,8 @@ size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *id
       }
     }
   }
-  free(buf), free(key), free(start), free(size), free(next), free(prev), free(heap);
-  return n;
+  free(arena);
+  return (int64_t)n;
 }
 
 int bpe_decode(const char *text, unsigned char *out, size_t cap)

@@ -48,9 +48,10 @@
 #define LANE_ROWS (LANE_PAIRS + MV_MAX_TOKENS) /* the lane's rows' buffers: an entry's rows past it read, not used */
 #define FWD_GUESS_K 6 /* a token's next-layer experts guessed (hip_ds4_guess.c): the router's top this many */
 /* a layer's routing tables at most for `pairs` pairs: 3 matrix pointers, 4 offsets, a count an entry (an expert, or
-   a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert - with
-   each table's alignment (16) */
-#define FWD_UP_BYTES(pairs) ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4 + 2 * 8 + 3 * 4) + 14 * 16)
+   a part of MM_MAX_TOKENS of one: at most pairs entries); an order and a pair a pair; 2 x 16 slots an expert; plus
+   both NPU rest_entries (gu: 2 ptrs + 3 ints; dn: 1 ptr + 3 ints) - with each table's alignment (16) */
+#define FWD_UP_BYTES(pairs) \
+  ((uint64_t)(pairs) * (3 * 8 + 4 * 4 + 4 + 2 * 4 + 2 * MM_TILE * 4 + 3 * 8 + 6 * 4) + 18 * 16)
 /* the experts' slots at most: each its tokens padded to whole tiles - the pairs and a tile's padding an expert */
 #define FWD_MAX_SLOTS(pairs, experts) ((pairs) + (uint64_t)(experts) * (MM_TILE - 1))
 
@@ -332,6 +333,7 @@ bool fwd_pinned(GpuBufs *b, void *host, uint64_t bytes);
 bool fwd_mapped(GpuBufs *b, void *host, uint64_t bytes);
 bool fwd_wait(Forward *f, hipEvent_t ev); /* the GPU past `ev`: spun on in a decode-sized step, slept on in a prompt's */
 bool fwd_settle(Forward *f);              /* the GPU past everything queued (fwd_wait on `passed`) */
+bool fwd_settle_spin(Forward *f);         /* short-wait spin settle (drafter rounds after large prompt steps) */
 /* the taps at target layers `at` taken from the next step on (a drafter's): false if none, or they cannot be held,
    or taps are on already at other layers */
 /* the taps planned (the target layers at[]: f->tapped, tap_of, n_tap), before the step's buffers are made (taps' with

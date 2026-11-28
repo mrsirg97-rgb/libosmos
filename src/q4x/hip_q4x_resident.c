@@ -13,6 +13,7 @@
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/experts.h"
 #include "osmos/mem/membrane.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/run/fit.h"
 #include "osmos/gpu/mv.h"
 #include "q4x_impl.h"
@@ -132,7 +133,14 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
   ExpertsPlan plan;
   Experts ex;
   char merr[OSMOS_ERR] = "";
-  if (ok && !experts_plan(units, L, E, warm, 0, budget, f->fixed_bytes, ARENA_GRAIN, &plan))
+  const uint64_t P = (uint64_t)f->max_tokens * K;
+  Q4xExpertBounds bd;
+  q4x_expert_bounds((uint32_t)P, E, &bd);
+  const uint64_t moe_cap = (5 * (uint64_t)bd.entries + 2 * (uint64_t)bd.slots + P) * 4 +
+                           Q4X_GROUP_TENSORS * (uint64_t)bd.entries * sizeof(void *) + 16 * MOE_STAGE_ALIGN;
+  const uint64_t tab_bytes = n * Q4X_GROUP_TENSORS * sizeof(void *);
+  const uint64_t post = P * 4 + 2 * moe_cap > tab_bytes ? P * 4 + 2 * moe_cap : tab_bytes;
+  if (ok && !experts_plan(units, L, E, warm, 0, budget, f->fixed_bytes + post, ARENA_GRAIN, &plan))
     ok = osmos_fail(err, "the experts' plan refused");
   if (ok && !experts_create(f->ledger, units, L, E, warm, &plan, ARENA_GRAIN, Q4X_EXPERT_READERS, host_copy, NULL, 0, true, &ex,
                             merr))
@@ -142,7 +150,7 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
     f->pinned_bytes = host_slots_bytes(ex.slots) + host_slots_bytes(ex.stream);
   if (ok && membrane_whole(f->mem))
   {
-    const void **tab = malloc(n * Q4X_GROUP_TENSORS * sizeof *tab);
+    const void **tab = malloc(tab_bytes);
     ok = tab != NULL;
     for (size_t u = 0; ok && u < n; u++) /* [layer][tensor][expert]: a layer's tensor's E addresses side by side */
     {
@@ -151,22 +159,19 @@ bool q4x_experts(Q4xForward *f, uint64_t budget, char *err)
       for (int k = 0; ok && k < Q4X_GROUP_TENSORS; k++)
         tab[((u / E) * Q4X_GROUP_TENSORS + (size_t)k) * E + u % E] = dev[k];
     }
-    ok = ok && ((alloc(f, &f->exp_tab, n * Q4X_GROUP_TENSORS * sizeof *tab) &&
-                 hipMemcpy(f->exp_tab, tab, n * Q4X_GROUP_TENSORS * sizeof *tab, hipMemcpyHostToDevice) == hipSuccess) ||
+    ok = ok && ((alloc(f, &f->exp_tab, tab_bytes) &&
+                 hipMemcpy(f->exp_tab, tab, tab_bytes, hipMemcpyHostToDevice) == hipSuccess) ||
                 osmos_fail(err, "GPU memory refused (the experts' table)"));
     free(tab);
   }
-  else if (ok) /* streamed: a step's tables the host's (q4x_moe) */
+  else if (ok) /* streamed: a step's tables the host's (q4x_moe), staged compact via MoeStage */
   {
-    const uint64_t P = (uint64_t)f->max_tokens * K;
-    Q4xExpertBounds bd;
-    q4x_expert_bounds((uint32_t)P, E, &bd);
+    f->moe_cap = moe_cap;
     ok = (f->h_ex = malloc(E * sizeof *f->h_ex)) && (f->h_by = malloc(P * 4)) && (f->h_row = malloc(P * 4)) &&
          (f->h_run = malloc(4 * (size_t)E * 4)) && (f->h_est = malloc(((size_t)E + 1) * 4)) &&
-         (f->h_ids = malloc(P * 4)) && (f->h_gidx = malloc(bd.slots * 4)) && (f->h_hidx = malloc(bd.slots * 4)) &&
-         (f->h_cnt = malloc(bd.entries * 4)) && (f->h_xg = malloc(bd.entries * 4)) && (f->h_yg = malloc(bd.entries * 4)) &&
-         (f->h_xd = malloc(bd.entries * 4)) && (f->h_yd = malloc(bd.entries * 4)) &&
-         (f->h_ptr = malloc(Q4X_GROUP_TENSORS * (size_t)bd.entries * sizeof *f->h_ptr));
+         (f->h_gidx = malloc(bd.slots * 4)) && (f->h_hidx = malloc(bd.slots * 4)) &&
+         (f->h_cnt = malloc(bd.entries * 4)) && (f->moe_build = malloc(f->moe_cap)) &&
+         pinned(f, &f->h_pin_ids, P * 4) && pinned(f, &f->moe_pin, f->moe_cap) && alloc(f, &f->moe_dev, f->moe_cap);
     if (!ok)
       osmos_fail(err, "out of memory (the experts' host tables)");
   }
@@ -279,7 +284,15 @@ bool q4x_buffers(Q4xForward *f, char *err)
   q4x_expert_bounds((uint32_t)(n * k), (uint32_t)g->n_experts, &bd);
   const uint64_t entries = bd.entries, slots = bd.slots + 8 * MM_TILE; /* past the last: a part's tiles read whole */
   const uint64_t dk = (uint64_t)MV_MAX_TOKENS * k; /* a decode's picks at most (the int8 experts' tables) */
-  const uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
+  uint64_t wide = (uint64_t)f->n_taps * D > hd ? (uint64_t)f->n_taps * D : hd; /* the drafter's fc's columns */
+  if (in > wide)
+    wide = in;
+  if (q > wide)
+    wide = q;
+  if (sff > wide)
+    wide = sff;
+  if (f->df && (uint64_t)f->df->geo.ff > wide)
+    wide = (uint64_t)f->df->geo.ff;
   const uint64_t x16 = (uint64_t)MM_MAX_TOKENS * wide * 2, xe16 = slots * (D > ff ? D : ff) * 2;
   Q4xBuf *b = &f->b;
   const struct
@@ -309,8 +322,10 @@ bool q4x_buffers(Q4xForward *f, char *err)
       {&b->x16b, (uint64_t)MM_SILU_MAX_TOKENS * g->hc_rank * 2, 0},
       {&b->ptr, Q4X_GROUP_TENSORS * entries * sizeof(void *), 0},  {&b->emb, n * D * F, 1},    {&b->key, n * hd * F, 1},        {&b->val, n * D * F, 1},
       {&b->kn, n * hd * F, 1},         {&b->qn, n * hd * F, 1},         {&b->pg, n * g->hc * F, 1},      {&b->gated, n * hd * F, 1},
-      {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},       {&b->ple_rows, n * g->ple_heads * 4, 1},
-      {&b->ple_sbuf, n * g->ple_heads * ple_row_bytes(f), 1},          {&b->ple_iota, n * g->ple_heads * 4, 0},
+      {&b->nrm, n * hd * F, 1},        {&b->conv, n * hd * F, 1},
+      {&b->ple_rows, f->stream_ngram ? 0 : n * g->ple_heads * 4, 1},
+      {&b->ple_sbuf, f->stream_ngram ? n * g->ple_heads * ple_row_bytes(f) : 0, 1},
+      {&b->ple_iota, f->stream_ngram ? n * g->ple_heads * 4 : 0, 0},
       {&b->taps, n * f->n_taps * D * F, 0},
       {&b->tok, n * 4, 1},             {&b->top_part, ops_argmax_scratch((uint32_t)n), 0},
       {&b->logits, n * (uint64_t)g->n_vocab * F, 1},
@@ -326,23 +341,26 @@ bool q4x_buffers(Q4xForward *f, char *err)
   for (size_t i = 0; i < sizeof want / sizeof *want; i++)
     if (want[i].per_token)
       f->rows[f->n_rows].p = want[i].p, f->rows[f->n_rows++].row = want[i].bytes / n;
-  f->ovf = (OverflowFlag){b->overflow, 4, false};
+  f->ovf = (OverflowFlag){b->overflow, 4, false, NULL};
   if (!overflow_reset(&f->ovf, err))
     return false;
-  int32_t *iota = malloc(n * g->ple_heads * 4);
-  for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
-    iota[i] = (int32_t)i;
-  const bool put = iota && hipMemcpy(b->ple_iota, iota, n * g->ple_heads * 4, hipMemcpyHostToDevice) == hipSuccess;
-  free(iota);
-  if (!put)
-    return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  if (f->stream_ngram)
+  {
+    int32_t *iota = malloc(n * g->ple_heads * 4);
+    for (uint64_t i = 0; iota && i < n * g->ple_heads; i++)
+      iota[i] = (int32_t)i;
+    const bool put = iota && hipMemcpy(b->ple_iota, iota, n * g->ple_heads * 4, hipMemcpyHostToDevice) == hipSuccess;
+    free(iota);
+    if (!put)
+      return osmos_fail(err, "a GPU call failed (the n-gram rows' places)");
+  }
   /* the attention's core: Qwen's heads block (a token's query heads, its QSA picks, chunks of 128 merged max-first:
      q4x_attn's bits), over b.fa */
   const AttnCoreDesc ad = attn_desc(f);
   if (!(f->attn = attn_core_create(&ad, b->fa, attn_core_scratch(&ad), err)))
     return false;
   return (pinned(f, &b->pin_rows, n * g->ple_heads * 4) && pinned(f, &b->pin_tok, n * 4) &&
-          pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) &&
+          pinned(f, &b->pin_overflow, 4) && !(*b->pin_overflow = 0) && (f->ovf.pin = b->pin_overflow) &&
           (b->slot = malloc(n * sizeof *b->slot)) && memset(b->slot, 0xff, n * sizeof *b->slot)) ||
          osmos_fail(err, "pinned memory refused (a step's tokens)");
 }

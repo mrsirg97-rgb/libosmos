@@ -114,7 +114,7 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
 {
   int32_t dr[OSMOS_MAX_BLOCK], picks[OSMOS_MAX_BLOCK + 1], toks[OSMOS_MAX_BLOCK + 1];
   float cf[OSMOS_MAX_BLOCK];
-  if (server_eos(sv, *t) || a->produced + 1 >= a->limit) /* t the answer's last: printed, not fed (a greedy token's
+  if (server_eos(sv, *t) || a->produced + 1 >= a->limit || (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* t the answer's last: printed, not fed (a greedy token's
                                                             end) - its verify would be work for nothing, and its
                                                             rollback past a block's close refused */
   {
@@ -140,9 +140,13 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   if (!osmos_batch(sv->e, ss, toks, (uint32_t)k + 1, c->err) ||
       !server_greedy(sv, a->samp, 0, (uint32_t)k + 1, picks, c->err))
     return -1;
-  for (int i = 0; i <= k; i++) /* row i: the held, then toks[0 .. i] */
+  for (int i = 0; i <= k; i++) /* row i: the held, then toks[0 .. i]; stop at first draft mismatch */
+  {
     if (!server_answer(sv, a->samp, &c->held, toks, (uint32_t)i + 1, (uint32_t)i, &picks[i], c->err))
       return -1;
+    if (i < k && picks[i] != dr[i])
+      break;
+  }
   int m = 0;
   while (m < k && picks[m] == dr[m])
     m++;
@@ -164,11 +168,13 @@ static int round_drafted(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, C
   if (end && k + 1 - keep == 1 && !oseq_reach(c->s)) /* a cancel's last printed token at a block's close: kept fed
                                                         (and held - the state and the held ids one), not refused */
     keep++;
-  if (!oseq_rollback(c->s, (uint32_t)(k + 1 - keep)) || (keep && !oseq_seed(c->s, pos, pos + keep, c->err)))
+  if (!oseq_rollback(c->s, (uint32_t)(k + 1 - keep)))
+    return osmos_fail(c->err, "rollback failed"), -1;
+  if (keep && !oseq_seed(c->s, pos, pos + keep, c->err))
     return -1;
   for (int i = 0; i < keep; i++)
     if (!ids_push(&c->held, toks[i]))
-      return -1;
+      return osmos_fail(c->err, "out of memory"), -1;
   *t = picks[m];
   if (!end && (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx) /* the context's last position: its pick printed, not
                                                                     fed, as step_greedy's last */
@@ -192,8 +198,11 @@ static int step_greedy(Server *sv, Conv *c, int32_t *t, Answer *a, Lines *l, Ctl
     return a->finish = "cancel", 0;
   if (a->produced >= a->limit || (uint32_t)oseq_position(c->s) + 1 >= sv->max_ctx)
     return 0;
-  if (!osmos_batch(sv->e, &c->s, t, 1, c->err) || !ids_push(&c->held, *t) || !server_greedy(sv, a->samp, 0, 1, t, c->err) ||
-      !server_answer(sv, a->samp, &c->held, NULL, 0, 0, t, c->err))
+  if (!osmos_batch(sv->e, &c->s, t, 1, c->err))
+    return -1;
+  if (!ids_push(&c->held, *t))
+    return osmos_fail(c->err, "out of memory"), -1;
+  if (!server_greedy(sv, a->samp, 0, 1, t, c->err) || !server_answer(sv, a->samp, &c->held, NULL, 0, 0, t, c->err))
     return -1;
   return 1;
 }
@@ -247,9 +256,10 @@ static void generate(Server *sv, Conv *c, const Gen *g, Lines *l, Ctl *ctl)
     out("PP %u %u %.1f %.1f %u %s\n", c->held.n, n, ms, (c->held.n - reused) / (ms / 1e3), reused,
         c->via ? c->via : "none");
     pump(l, ctl);
-    if (ctl->cancel && c->held.n < n) /* a prompt read part-way: its end past the state - back to its furthest point */
+    if (ctl->cancel) /* a prompt read cancelled (part-way or at its end): back to its furthest point when partial */
     {
-      conv_cancel_read(c, sv);
+      if (c->held.n < n)
+        conv_cancel_read(c, sv);
       out("DONE 0 %u %.1f 0.0 cancel 0 0 %u 0 0\n", n, now_ms() - t0, reused);
       return;
     }

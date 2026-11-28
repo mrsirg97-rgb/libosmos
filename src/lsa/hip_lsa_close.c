@@ -173,10 +173,12 @@ bool lsa_closer_queue(LsaCloser *c, const float *dev_ik, uint32_t b0, uint32_t k
   pthread_mutex_unlock(&c->mu);
   Slot *s = &c->slot[i];
   s->b0 = b0, s->k = k, s->dev_cent = dev_cent, s->dev_mem = dev_mem, s->broken = broken, s->failed = false;
-  if (hipMemcpyAsync(s->ik, dev_ik, (uint64_t)k * LSA_WINDOW * LSA_DIM * F, hipMemcpyDeviceToHost, (hipStream_t)stream) !=
-          hipSuccess ||
-      hipEventRecord(s->copied, (hipStream_t)stream) != hipSuccess)
+  const bool copied = hipMemcpyAsync(s->ik, dev_ik, (uint64_t)k * LSA_WINDOW * LSA_DIM * F, hipMemcpyDeviceToHost,
+                                     (hipStream_t)stream) == hipSuccess;
+  if (!copied || hipEventRecord(s->copied, (hipStream_t)stream) != hipSuccess)
   {
+    if (copied)
+      (void)hipStreamSynchronize((hipStream_t)stream);
     pthread_mutex_lock(&c->mu);
     c->free_slot[i] = true;
     pthread_mutex_unlock(&c->mu);

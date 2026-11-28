@@ -26,6 +26,8 @@ bool fwd_prompt_ahead(const Forward *f, int l)
 
 bool fwd_guess_queue(Forward *f, int l)
 {
+  if (membrane_whole(f->mem))
+    return true;
   if (fwd_prompt_ahead(f, l))
   {
     const LayerWeights *L1 = &f->w->layer[l + 1];
@@ -57,7 +59,7 @@ bool fwd_guess_queue(Forward *f, int l)
    layer's), each marked for the score (membrane_guess) */
 void fwd_guess_want(Forward *f, int l)
 {
-  if (!small(f, l))
+  if (membrane_whole(f->mem) || !small(f, l))
     return;
   const uint32_t E = (uint32_t)f->g->n_experts, next = (uint32_t)(l + 1) * E;
   for (uint32_t m = 0; m < f->n * FWD_GUESS_K; m++)

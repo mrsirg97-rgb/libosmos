@@ -254,7 +254,15 @@ static bool take(Check *c, const Role *r, int l, const GgufTensor **field)
    their sum: its role's shape) */
 static void slices(Weights *w)
 {
-  const GgufTensor *ple = gguf_tensor(w->model, "per_layer_token_embd.weight");
+  const GgufTensor *ple = NULL;
+  for (size_t i = 0; w->overlay && i < w->overlay->n_tensors; i++)
+    if (!strcmp(w->ov[i].name, "per_layer_token_embd.weight"))
+    {
+      ple = &w->ov[i];
+      break;
+    }
+  if (!ple)
+    ple = gguf_tensor(w->model, "per_layer_token_embd.weight");
   const uint64_t row = gguf_bytes(ple->type, ple->dims[0]);
   uint64_t at = 0;
   for (int l = 0; l < w->geo.n_layers; l++)

@@ -35,6 +35,7 @@ void q35_forward_destroy(Q35Forward *f)
 {
   if (!f)
     return;
+  lsa_closer_destroy(f->closer);
   gpu_free_table(f->ledger, f->w->model, f->dev, NULL);
   attn_core_destroy(f->attn);
   gpu_bufs_free(&f->bufs); /* every GPU and pinned buffer the forward made - the step's, LSA's maps and read, the
@@ -45,14 +46,45 @@ void q35_forward_destroy(Q35Forward *f)
   free(f);
 }
 
+static bool q35_yarn_rope(const Q35Geometry *g, float yarn, Q4xRope *out, char *err)
+{
+  if (!isfinite(yarn) || yarn <= 0.0f)
+    return osmos_fail(err, "the YaRN scale must be finite and positive");
+  const double ctx = (double)yarn * (double)g->native_ctx;
+  if (!(ctx >= 1.0 && ctx <= (double)UINT32_MAX))
+    return osmos_fail(err, "the YaRN context is out of range");
+  return q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)ctx,
+                  Q4X_THETA_GGML, out) ||
+         osmos_fail(err, "the YaRN rotation refused");
+}
+
+static void q35_lsa_rollback(Q35Forward *f, uint32_t bufs_was, uint64_t bytes_was)
+{
+  lsa_closer_destroy(f->closer), f->closer = NULL;
+  lsa_scratch_destroy(f->lsa_s), f->lsa_s = NULL;
+  free(f->h_ik), free(f->h_cent), free(f->h_mem);
+  f->h_ik = f->h_cent = NULL, f->h_mem = NULL;
+  for (uint32_t i = f->bufs.n; i-- > bufs_was;)
+  {
+    void **p = f->bufs.slot[i].p;
+    if (*p)
+      f->bufs.slot[i].host ? ledger_host_free(f->bufs.ledger, *p) : ledger_free(f->bufs.ledger, *p);
+    *p = NULL;
+  }
+  f->bufs.n = bufs_was, f->bufs.bytes = bytes_was;
+  f->close_max = 0;
+}
+
 bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS_ERR])
 {
   const Q35Geometry *g = &f->w->geo;
   if (f->lsa)
     return osmos_fail(err, "the read already on");
+  Q4xRope new_rope;
+  if (!q35_yarn_rope(g, yarn, &new_rope, err))
+    return false;
   if (!maps) /* YaRN alone: the dense model under the maps' rotation (the read's comparison) */
-    return q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope) ||
-           osmos_fail(err, "the YaRN rotation refused");
+    return f->rope = new_rope, true;
   if ((uint32_t)g->n_kv_heads * (uint32_t)(g->head_dim - g->rope_dim) != LSA_IN)
     return osmos_fail(err, "the model's free key dims are not the maps' input");
   FILE *fp = fopen(maps, "rb");
@@ -63,6 +95,8 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS
       fclose(fp);
     return osmos_fail(err, "the maps file not read (tools/convert/lsa_maps.py's, LSA_IN x LSA_DIM)");
   }
+  const uint32_t bufs_was = f->bufs.n;
+  const uint64_t bytes_was = f->bufs.bytes;
   const size_t m = (size_t)LSA_IN * LSA_DIM;
   float *buf = malloc(2 * m * F);
   bool ok = buf != NULL;
@@ -81,15 +115,21 @@ bool q35_forward_lsa(Q35Forward *f, const char *maps, float yarn, char err[OSMOS
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = g->recurrent[l] || f->wq[l] || (osmos_fail(err, "an attention layer without its maps"), false);
   if (!ok)
-    return err && !*err ? osmos_fail(err, "the maps not loaded") : false;
-  /* the maps' rotation: YaRN at yarn x native (their training's), whatever this forward's context */
-  if (!q4x_rope((uint32_t)g->rope_dim, (uint32_t)g->rope_dim / 2, g->rope_base, g->native_ctx, (uint32_t)(yarn * (float)g->native_ctx), Q4X_THETA_GGML, &f->rope))
-    return osmos_fail(err, "the maps' YaRN rotation refused");
-  ok = (f->lsa_s = lsa_scratch_create(f->ledger, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) && q35_alloc(&f->bufs, &f->iq, LSA_DIM * F) &&
-       q35_alloc(&f->bufs, &f->list, LSA_READ_MAX * 4) && q35_alloc(&f->bufs, &f->list_n, 4) && (f->h_ik = malloc(LSA_WINDOW * LSA_DIM * F)) &&
-       (f->h_cent = malloc(LSA_BUCKETS * LSA_DIM * F)) && (f->h_mem = malloc(LSA_BUCKETS * LSA_CAP * 4));
+    return q35_lsa_rollback(f, bufs_was, bytes_was), err && !*err ? osmos_fail(err, "the maps not loaded") : false;
+  uint32_t attn_layers = 0;
+  for (int l = 0; l < g->n_layers; l++)
+    attn_layers += !g->recurrent[l];
+  f->close_max = f->max_tokens / LSA_WINDOW + 2;
+  ok = (f->lsa_s = lsa_scratch_create(f->ledger, f->max_ctx / LSA_WINDOW * LSA_BUCKETS + 1)) &&
+       (f->closer = lsa_closer_create(f->ledger, attn_layers ? attn_layers : 1, f->close_max)) &&
+       q35_alloc(&f->bufs, &f->iq, LSA_DIM * F) && q35_alloc(&f->bufs, &f->list, LSA_READ_MAX * 4) &&
+       q35_alloc(&f->bufs, &f->list_n, 4) &&
+       (f->h_ik = malloc((uint64_t)f->close_max * LSA_WINDOW * LSA_DIM * F)) &&
+       (f->h_cent = malloc((uint64_t)f->close_max * LSA_BUCKETS * LSA_DIM * F)) &&
+       (f->h_mem = malloc((uint64_t)f->close_max * LSA_BUCKETS * LSA_CAP * 4));
   if (!ok)
-    return osmos_fail(err, "out of memory (the read's scratch)");
+    return q35_lsa_rollback(f, bufs_was, bytes_was), osmos_fail(err, "out of memory (the read's scratch)");
+  f->rope = new_rope;
   f->lsa = seen > 0;
   return true;
 }
@@ -133,7 +173,11 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
   const uint64_t n = max_tokens, D = (uint64_t)g->n_embd, ff = (uint64_t)g->n_ff, vh = (uint64_t)g->ssm_v_heads;
   const uint64_t in = (uint64_t)g->ssm_inner, ch = 2ull * g->ssm_groups * g->ssm_state + in;
   const uint64_t q = (uint64_t)g->n_heads * g->head_dim, kv = (uint64_t)g->n_kv_heads * g->head_dim;
-  const uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down */
+  uint64_t wide = ff > ch ? ff : ch; /* mm's widest input: the SwiGLU's down, attention out, or hidden */
+  if (q > wide)
+    wide = q;
+  if (D > wide)
+    wide = D;
   const AttnCoreDesc ad = {.heads = (uint32_t)g->n_heads,
                            .kv_heads = (uint32_t)g->n_kv_heads,
                            .dk = (uint32_t)g->head_dim,
@@ -165,7 +209,8 @@ Q35Forward *q35_forward_create_with(const Q35Weights *w, const Q35Options *o, ch
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && (f->attn = attn_core_create(&ad, f->fa, scratch, err)) != NULL;
   f->head_type = w->output->type;
-  ok = ok && head_q8(f, err) && (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) &&
+  ok = ok && head_q8(f, err) && q35_pinned(&f->bufs, &f->pin_overflow, 4) && !(*f->pin_overflow = 0) &&
+       (f->ovf = (OverflowFlag){f->overflow, 4, false, f->pin_overflow}, overflow_reset(&f->ovf, err)) &&
        q35_pinned(&f->bufs, &f->pin_logits, lr * g->n_vocab * F) && q35_pinned(&f->bufs, &f->pin_tok, n * 4) &&
        (f->slot = malloc(n * 4));
   if (!ok)

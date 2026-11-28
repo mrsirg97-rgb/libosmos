@@ -144,6 +144,7 @@ bool membrane_warm(Membrane *m, char err[OSMOS_ERR])
 /* the visit's holds ended */
 static void end_holds(Membrane *m)
 {
+  membrane_settle(m);
   for (uint32_t k = 0; k < m->n_held; k++) /* the layer they came from next visited a whole round on */
   {
     if (m->passing && m->held_in[k] == m->pool) /* a prompt's hit in the membrane: its order kept */
@@ -158,6 +159,23 @@ static void end_holds(Membrane *m)
 
 void membrane_end(Membrane *m)
 {
+  char perr[OSMOS_ERR] = "";
+  while (m->n_pend)
+  {
+    membrane_settle(m);
+    if (!m->n_pend)
+      break;
+    if (!pump(m, true, perr))
+    {
+      for (uint32_t k = 0; k < m->n_pend; k++)
+      {
+        pool_release(m->pend_in[k], m->pend[k], 0);
+        m->is_held[m->pend[k]] = false;
+      }
+      m->n_pend = 0;
+      break;
+    }
+  }
   end_holds(m);
   uint32_t keep = 0;
   for (uint32_t k = 0; k < m->n_failed; k++) /* back to cold: read from its file when next picked */

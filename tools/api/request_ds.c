@@ -70,7 +70,9 @@ bool request_ds(const Json *body, Request *r, char err[OSMOS_ERR])
   JsonBuf rf = {0};
   if (!request_format(body, &rf, err))
     return free(rf.p), false;
-  Json *tl = request_tools(body);
+  Json *tl = NULL;
+  if (!request_tools(body, &tl, err))
+    return free(rf.p), false;
   const bool has_rf = rf.n > 0, head = tl || has_rf, first = head && system_role(msgs->item[0]);
   JsonBuf b = {0};
   char jerr[OSMOS_ERR] = "";

@@ -45,6 +45,5 @@ bool request_ink2(const Json *body, Request *r, char err[OSMOS_ERR])
     if (sys)
       free(role->s), role->s = sys, role->len = 6;
   }
-  r->tools = request_tools(body);
-  return true;
+  return request_tools(body, &r->tools, err);
 }

@@ -28,6 +28,5 @@ bool request_lfm3(const Json *body, Request *r, char err[OSMOS_ERR])
   r->preserve = pt && pt->type != JSON_NULL ? pt->type == JSON_TRUE : r->preserve_default; /* (the pack's: osmos.json) */
   if (!request_messages(msgs, &r->messages, err))
     return false;
-  r->tools = request_tools(body);
-  return true;
+  return request_tools(body, &r->tools, err);
 }

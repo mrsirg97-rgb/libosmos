@@ -120,8 +120,7 @@ static bool engram(Hy4Forward *f, uint32_t n, int l)
     e += g->engram[k];
   const uint32_t D = (uint32_t)g->n_embd, hc = (uint32_t)g->hc, dim = (uint32_t)g->engram_dim;
   const uint32_t cols = (uint32_t)((g->engram_ngram - 1) * g->engram_heads);
-  const float *rows = f->eg_rows + (uint64_t)e * n * cols * dim;
-  return hy4_engram_layer(f, e, n) && hy4_engram_rows(rows, hy4_fv(f, L->eg_lookup_norm), cols, dim, n, f->emb, f->st) &&
+  return hy4_engram_layer(f, e, n) && hy4_engram_rows(f->eg_rows, hy4_fv(f, L->eg_lookup_norm), cols, dim, n, f->emb, f->st) &&
          hy4_mat(f, L->eg_kv, (hc + 1) * D, cols * dim, f->emb, n, f->ekv, false) && /* (both maths: see engram()) */
          hy4_engram_update(f->h, f->ekv, hy4_fv(f, L->eg_kv_b), hy4_fv(f, L->eg_gate), hy4_fv(f, L->eg_hc_scale),
                            hy4_fv(f, L->eg_pre_gamma), hc, D, n, f->st);
@@ -131,11 +130,11 @@ static bool engram(Hy4Forward *f, uint32_t n, int l)
 static bool select_runs(Hy4Forward *f, const float *ixw, const float *groups, uint32_t off, uint32_t len, uint32_t IH,
                         uint32_t ID, uint32_t pool, uint32_t top, bool read)
 {
-  const uint32_t mg = f->max_ctx / pool + 1;
   bool ok = true;
   for (uint32_t a = 0; ok && a < len; a += HY4_SCORE_ROWS)
   {
     const uint32_t m = len - a < HY4_SCORE_ROWS ? len - a : HY4_SCORE_ROWS, o = off + a;
+    const uint32_t mg = (uint32_t)f->pin_pos[o + m - 1] / pool + 1;
     ok = hy4_ix_select(f->ixq + (uint64_t)o * IH * ID, ixw + (uint64_t)o * IH, groups, IH, ID, pool, top, f->pos + o, m, mg,
                        f->scores, f->sel + (uint64_t)o * top, f->n_sel + o, read, f->ix_spread, f->st);
   }
@@ -203,18 +202,17 @@ static bool attention(Hy4Forward *f, const Hy4Run *run, uint32_t runs, uint32_t 
   if (ok && !sw)
     ok = hy4_ix_query(f->ixq, ixw, IH, ID, rd, f->freqs_sparse, f->pos, n, f->st);
   ok = ok && hy4_part_done(f, 9, &t);
+  ok = ok && (read ? heads_each(f, H, hy4_dev(f, L->k_b), (uint64_t)lat * nope / 32 * 34, lat, nope, f->q,
+                                H * qk, qk, n, f->qa, H * row, row) &&
+                         hy4_mla_qrope(f->q, H, qk, row, rd, freqs, f->pos, n, f->qa, f->st)
+                   : hy4_mla_q(f->q, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos, n, f->qa, f->table, f->st));
   for (uint32_t r = 0; ok && r < runs; r++)
   {
     const uint64_t o = run[r].off;
     const uint32_t m = run[r].len;
     Hy4Seq *s = run[r].s;
     ok = hy4_mla_kv(kva + o * row, hy4_fv(f, L->kv_a_norm), lat, rd, g->rms_eps, freqs, f->pos + o, m, s->cache[l],
-                    sw ? f->ring : 0, f->kv8, f->st) &&
-         (read ? heads_each(f, H, hy4_dev(f, L->k_b), (uint64_t)lat * nope / 32 * 34, lat, nope, f->q + o * H * qk,
-                            H * qk, qk, m, f->qa + o * H * row, H * row, row) &&
-                     hy4_mla_qrope(f->q + o * H * qk, H, qk, row, rd, freqs, f->pos + o, m, f->qa + o * H * row, f->st)
-                : hy4_mla_q(f->q + o * H * qk, hy4_dev(f, L->k_b), H, nope, lat, rd, freqs, f->pos + o, m,
-                            f->qa + o * H * row, f->table, f->st)) && hy4_part_done(f, 10, &t) &&
+                    sw ? f->ring : 0, f->kv8, f->st) && hy4_part_done(f, 10, &t) &&
          (sw || indexer(f, s, l, (uint32_t)o, m, ixk, ixw, read)) && hy4_part_done(f, 11, &t) &&
          dfly_snap(f, s, l, (uint32_t)o, m) &&
          attn_core_run(f->mla[l],

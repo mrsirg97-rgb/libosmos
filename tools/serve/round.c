@@ -56,8 +56,10 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
     end = server_eos(m->sv, x) ? "stop" : ln->produced >= ln->limit ? "length" : NULL;
   }
   const int keep = end ? printed - 1 : acc + 1;
-  bool ok = oseq_rollback(ln->c.s, (uint32_t)(e->k + 1 - keep)) &&
-            (!keep || oseq_seed(ln->c.s, e->pos, e->pos + keep, ln->c.err));
+  bool ok = oseq_rollback(ln->c.s, (uint32_t)(e->k + 1 - keep));
+  if (!ok)
+    osmos_fail(ln->c.err, "rollback failed");
+  ok = ok && (!keep || oseq_seed(ln->c.s, e->pos, e->pos + keep, ln->c.err));
   for (int i = 0; ok && i < keep; i++)
     if (!(ok = ids_push(&ln->c.held, toks[e->off + i])))
       osmos_fail(ln->c.err, "out of memory");
@@ -79,44 +81,52 @@ static void settle(Multi *m, const Entry *e, const int32_t *toks, const int32_t 
 }
 
 /* the round's lanes in order (a greedy one's token printed first: one at its end left out), each with the answering
-   lanes after it; the drafting ones' drafts all at once (oseq_draft_all) - a drafter's failure every drafting lane's */
+   lanes after it; the drafting ones' drafts all at once (oseq_draft_all) - a drafter's failure every drafted lane's */
 static int lanes_of(Multi *m, Lane **go, int *after, int32_t (*dr)[OSMOS_MAX_BLOCK], int *k)
 {
   OsmosSeq *ds[MAX_LANES];
   int32_t ys[MAX_LANES];
-  int n = 0, nd = 0, left = 0, at[MAX_LANES];
-  for (int i = 0; i < m->n; i++)
-    left += m->lane[i].st == ANSWERING;
+  int n = 0, nd = 0, at[MAX_LANES];
   for (int i = 0; i < m->n; i++)
   {
     Lane *ln = &m->lane[i];
     if (ln->st != ANSWERING)
       continue;
-    left--;
     if (!ln->g.spec && !greedy_goes_on(m, ln))
       continue;
-    if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit)) /* its last token: printed and the
+    if (ln->g.spec && (server_eos(m->sv, ln->t) || ln->produced + 1 >= ln->limit ||
+                       (uint32_t)oseq_position(ln->c.s) + 1 >= m->sv->max_ctx)) /* its last token: printed and the
         lane finished, not fed (greedy_goes_on's) - its verify's rollback past a block's close would be refused */
     {
       greedy_goes_on(m, ln);
       continue;
     }
-    k[n] = 0, after[n] = left, go[n] = ln;
-    if (ln->g.spec)
-      at[nd] = n, ds[nd] = ln->c.s, ys[nd++] = ln->t;
+    k[n] = 0, go[n] = ln;
     n++;
+  }
+  const int slack = (int)m->sv->round_tokens - n;
+  for (int j = 0; j < n; j++)
+  {
+    after[j] = n - 1 - j;
+    if (go[j]->g.spec && cut(m, go[j], 1, slack) > 0)
+      at[nd] = j, ds[nd] = go[j]->c.s, ys[nd++] = go[j]->t;
   }
   float cf[MAX_LANES][OSMOS_MAX_BLOCK];
   int cnt[MAX_LANES];
   char err[OSMOS_ERR] = "";
   if (nd && !oseq_draft_all(ds, ys, (uint32_t)nd, OSMOS_DRAFT_CONF_MIN, OSMOS_DRAFT_CUM_MIN, dr, cf, cnt, err))
   {
+    bool drafted[MAX_LANES] = {false}; /* a drafter's failure the lanes drafted's: one left out (no slack) goes on */
+    for (int d = 0; d < nd; d++)
+      drafted[at[d]] = true;
     int kept = 0;
     for (int j = 0; j < n; j++)
-      if (go[j]->g.spec)
+      if (drafted[j])
         snprintf(go[j]->c.err, sizeof go[j]->c.err, "%s", err), lane_fail(m, go[j]);
       else
-        go[kept] = go[j], after[kept] = after[j], k[kept++] = 0;
+        go[kept] = go[j], k[kept++] = 0;
+    for (int j = 0; j < kept; j++)
+      after[j] = kept - 1 - j;
     return kept;
   }
   for (int j = nd - 1; j >= 0; j--) /* the drafts to their lanes' rows: at[j] >= j, so the last first */
@@ -153,19 +163,27 @@ void round_all(Multi *m)
   if (!total)
     return;
   char err[OSMOS_ERR] = "";
-  /* every row's greedy pick in one launch (lanes greedy and sampled mixed): a sampled lane's rows drawn again below */
-  if (!osmos_batch(sv->e, seqs, toks, (uint32_t)total, err) || !osmos_greedy(sv->e, 0, (uint32_t)total, picks, err))
+  bool any_greedy = false;
+  for (int j = 0; j < nin; j++)
+    any_greedy |= !osmos_sampled(&in[j].ln->g.samp);
+  /* greedy picks in one launch when any active lane is greedy; sampled lanes draw their own rows below */
+  if (!osmos_batch(sv->e, seqs, toks, (uint32_t)total, err) ||
+      (any_greedy && !osmos_greedy(sv->e, 0, (uint32_t)total, picks, err)))
   {
     for (int j = 0; j < nin; j++)
       snprintf(in[j].ln->c.err, sizeof in[j].ln->c.err, "%s", err), lane_fail(m, in[j].ln);
     return;
   }
   bool failed[MAX_LANES] = {false};
-  for (int j = 0; j < nin; j++) /* a lane's row i: its held, then its toks[off .. off + i] */
+  for (int j = 0; j < nin; j++) /* a lane's row i: its held, then its toks[off .. off + i]; stop on draft mismatch */
     for (int i = 0; i <= in[j].k && !failed[j]; i++)
+    {
       if (!server_answer(sv, &in[j].ln->g.samp, &in[j].ln->c.held, toks + in[j].off, (uint32_t)i + 1,
                          (uint32_t)(in[j].off + i), &picks[in[j].off + i], in[j].ln->c.err))
         failed[j] = true, lane_fail(m, in[j].ln);
+      else if (i < in[j].k && picks[in[j].off + i] != toks[in[j].off + i + 1])
+        break;
+    }
   for (int j = 0; j < nin; j++)
   {
     Lane *ln = in[j].ln;

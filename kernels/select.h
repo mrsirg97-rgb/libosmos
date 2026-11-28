@@ -37,7 +37,7 @@ __device__ inline uint32_t select_core(uint32_t n, uint32_t k, const Key& key, c
   // later passes over them alone - their histograms the same counts - when they fit (past kCandCap: the full scans)
   constexpr uint32_t kCandCap = 8192;
   __shared__ uint32_t cand[kCandCap];
-  __shared__ uint32_t n_cand;
+  __shared__ uint32_t n_cand, bin_n;
   bool listed = false;
   for (int shift = 32 - kRadixBits; shift >= 0; shift -= kRadixBits) {
     for (uint32_t b = tid; b < kBins; b += kSelectThreads) hist[b] = 0;
@@ -61,13 +61,14 @@ __device__ inline uint32_t select_core(uint32_t n, uint32_t k, const Key& key, c
           prefix |= (uint32_t) b << shift;
           mask |= (uint32_t) (kBins - 1) << shift;
           need -= acc;
+          bin_n = hist[b];
           break;
         }
         acc += hist[b];
       }
     }
     __syncthreads();
-    if (shift == 32 - kRadixBits && shift > 0) {  // the first pass done: its bin's keys gathered
+    if (shift == 32 - kRadixBits && shift > 0 && bin_n <= kCandCap) {  // the first pass done: its bin's keys gathered
       if (tid == 0) n_cand = 0;
       __syncthreads();
       for (uint32_t c = tid; c < n; c += kSelectThreads) {

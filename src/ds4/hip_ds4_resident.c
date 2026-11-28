@@ -119,6 +119,14 @@ static bool repacks(const Weights *w, const GgufTensor *t, uint32_t *rows, uint3
    block), so a chunk's writes never reach the tiles before it, which are still to be read */
 static bool repack_all(Forward *f, const GgufTensor *const *t_res, size_t n_t)
 {
+  bool any = false;
+  for (size_t i = 0; i < n_t && !any; i++)
+  {
+    uint32_t rows, cols;
+    any = repacks(f->w, t_res[i], &rows, &cols);
+  }
+  if (!any)
+    return true;
   void *stage = NULL;
   bool ok = ledger_malloc(f->ledger, &stage, FWD_REPACK_STAGE) == hipSuccess;
   for (size_t i = 0; ok && i < n_t; i++)
@@ -331,7 +339,7 @@ bool fwd_gates(Forward *f, const Weights *w, char *err)
 bool fwd_guess_routers(Forward *f, const Weights *w, char *err)
 {
   bool ok = true;
-  for (int l = 0; ok && !f->no_guess && l < f->n_layers; l++) /* no guess: no copy */
+  for (int l = 1; ok && !f->no_guess && l < f->n_layers; l++) /* no guess: no copy; layer 0 is never guessed */
   {
     const GgufTensor *t = w->layer[l].router;
     if (t->type != QTYPE_F32)

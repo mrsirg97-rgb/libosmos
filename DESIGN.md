@@ -7515,3 +7515,47 @@ on one thread) and DFly2's load 6.45 (1.7 GB of BF16, each matrix the same). ten
 rows now run over 16 threads (osmos/cpu/par.h: contiguous runs, each row as alone - the serial loop's bytes; the
 drafted hashes as 0.18.1's): the head 0.34 s, DFly2 2.1 s, a warm start 16.9 s. What is left is the SSD's (the
 experts' reads); serving before every expert is read would be the next step, not this release's.
+
+### 0.19.0: runtime audit — structural debt, correctness, and wasted work (2026-11-27)
+
+A full audit across serving (`tools/api`, `tools/serve`), host memory/loading/text (`src/mem`, `src/cpu`, `src/npu`,
+`src/model`, `src/text`), all six model families (`ds4`, `hy4`, `ink2`, `q4x`, `lfm3`, `q35`), and core GPU kernels
+(`kernels/`). No model math changed: every kernel and family optimization preserves bit-exact results.
+
+- **Structural consolidation.** Speculative cutoff (`draft_accept` in `osmos/run/draft.h`, failing closed on NaN),
+  single-sync pinned `OverflowFlag` readback, and compact async pinned routing staging (`MoeStage` in
+  `osmos/mem/moe_stage.h`) now live in shared headers instead of per-family copies. Q4x gathers only kept LM-head rows
+  into dead `b->ga`; LFM3 defers trailing LSA block closing and honors prompt-mode flags; Q35 gains `LsaCloser`,
+  batched closing, dense bypass below `sparse_from`, YaRN validation, and exact `q35_lsa_rollback`.
+- **Correctness & fail-closed boundaries.** Fixed `engine_run()` heap overflow, server/API mutex races (`e->dead`,
+  `e->in_fd`, `max_ctx`), `SO_RCVTIMEO` `EDOM`, spec-decode +1 over-generation at `max_ctx - 1`, content-hashed slot
+  filenames, `membrane_end` leaked holds, `pool.c` pinned scans / stale pass / dead-spare eviction, `gguf_int` and
+  `weights.c` bounds, `EINTR`/short-read I/O loops, `npu_xrt.cpp` dmabuf/BO safety, BPE OOM propagation, per-family
+  stream/type/rollback checks, NaN-safe ordering in `attn.hip`/`hy4.hip`/`mm_fp4.hip`, `MXFP8` unaligned loads,
+  `attn_core` static LDS accounting, `q8.h` `kSelAll` empty-row guard, `round.h` non-finite `ue8m0_code`, wave-shuffle
+  `route.hip` scan, and CUDA header compatibility.
+- **Wasted work trimmed.**
+  - *Kernels:* skip idle waves in `attn_core_heads.h`; skip zero-offset `v_dot4` halves in `q8.h`; gate `select.h`
+    `cand[]` gather on `bin_n <= kCandCap`; size sparse MLA `splits` by `sel_cap * pool`; early-exit `hy4` indexer and
+    `attn_core_q35.h`; drop 3 barriers in `moe_tiles.h` and a duplicate barrier in `attn_core_draft.h`; bisect `top_k`
+    in raw logit space in `ops.hip`.
+  - *Serving & engine:* stop draft sampling on first mismatch; stream-local `ops_sample` without
+    `hipDeviceSynchronize()`; save host prompt states directly via `oseq_mark_is_state()` without a GPU round-trip;
+    read-only `tokenizer_has_special()` fast path in `osmos-api`.
+  - *Families & loading:* skip redundant DS4/Hy4/Ink2/Q4x projections, norms, padded drafter rows, and unused buffers
+    (including ~560 MB unreachable DFly2 `head8`, duplicate BF16 `output.weight` when Q8_0 head is active, single-layer
+    Engram scratch, exact-sized final `resident.c` arena, 1-fd shard uploads, and single-pass `q4x_kv_put(v=NULL)`
+    LM-head Q8_0 quantization). `POSIX_FADV_DONTNEED` after `gpu_upload_table()` was tried and dropped: evicting clean
+    dense weights from the page cache between `fit_sized()`'s cold builds cost +3 s on Qwen cold TTFT (23.2 -> 20.2 s
+    without it). Dropping the cache also exposed that single-shot `experts_fit_now()` left zero slack past
+    `FIT_HEADROOM` for `mmap(MAP_POPULATE)` + `hipHostRegister()` page tables (~4.75 MiB/GiB, ~175-224 MiB on 44-47 GiB
+    of Qwen host slots); reserving `FIT_SLACK` in `experts_fit_now()` keeps `test_q4x_headroom_gpu` cleanly at 1.29-1.31
+    GiB (3/3 passes).
+- **Verification & release measurements (performance profile).** 114/114 GPU tests, 102/102 API tests, 80/80 installer
+  tests, all host tests, ASan/UBSan/LSan, and TSan pass. All 6 packs' speed-harness answers hash-match 0.18.2 bit for
+  bit (drafted == plain); all 9 recorded 122-step agent sessions (1,098/1,098 steps, greedy + sampled) match 0.18.0's
+  baselines bit for bit with flat GPU memory. Highlights vs prior README: `osmos-evo-1017` ~3K prompt 377 -> 398 tok/s
+  (+5.5%, dense build 28.2 -> 27.0 GiB), `qwen38-ud-iq3_xxs` session 59.5 -> 60.4 tok/s and agents 191.5 -> 187.7 s,
+  `hy4-flash` session 33.0 -> 33.5 tok/s and agents 428.3 -> 418.7 s, `osmos-evo-inkling` session 17.7 -> 23.8 tok/s
+  (+34.5% over 0.18.0), `osmos1.7b` decode 95.3 -> 96.5 tok/s and agents 92.0 -> 88.6 s (-4.4%), `inkling-2-mini` agents
+  204.5 -> 201.4 s.

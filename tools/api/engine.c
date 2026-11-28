@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -161,7 +162,7 @@ bool engine_start(Engine *e, char *const argv[], bool spec, char err[OSMOS_ERR])
   pthread_mutex_init(&e->mu, NULL);
   pthread_mutex_init(&e->wmu, NULL);
   pthread_cond_init(&e->ready_cv, NULL);
-  e->spec = spec, e->next_rid = 1;
+  e->spec = spec, e->next_rid = 1, e->in_fd = -1, e->out_fd = -1;
   e->pid = fork();
   if (e->pid < 0)
     return osmos_fail(err, "fork: %s", strerror(errno)), false;
@@ -181,19 +182,35 @@ bool engine_start(Engine *e, char *const argv[], bool spec, char err[OSMOS_ERR])
   return true;
 }
 
-bool engine_ready(Engine *e)
+bool engine_ready(Engine *e, unsigned *max_ctx)
 {
   pthread_mutex_lock(&e->mu);
   const bool ok = e->ready && !e->dead;
+  if (ok && max_ctx)
+    *max_ctx = e->max_ctx;
   pthread_mutex_unlock(&e->mu);
   return ok;
+}
+
+static bool appendf(char *buf, size_t cap, size_t *w, const char *fmt, ...)
+{
+  if (*w >= cap)
+    return false;
+  va_list ap;
+  va_start(ap, fmt);
+  const int n = vsnprintf(buf + *w, cap - *w, fmt, ap);
+  va_end(ap);
+  if (n < 0 || (size_t)n >= cap - *w)
+    return false;
+  *w += (size_t)n;
+  return true;
 }
 
 Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsigned mark, const Sampling *s,
                 char err[OSMOS_ERR])
 {
   Run *r = calloc(1, sizeof *r);
-  size_t cap = 64 + 12 * n;
+  const size_t cap = 256 + 12 * n;
   char *msg = malloc(cap);
   if (!r || !msg)
     return free(r), free(msg), osmos_fail(err, "out of memory"), NULL;
@@ -203,25 +220,30 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
   if (!e->ready || e->dead)
   {
     pthread_mutex_unlock(&e->mu);
+    pthread_mutex_destroy(&r->mu), pthread_cond_destroy(&r->cv);
     return free(r), free(msg), osmos_fail(err, "the engine is not ready"), NULL;
   }
   r->rid = e->next_rid++;
   r->next = e->runs, e->runs = r; /* registered before its GEN: no line of it comes unclaimed */
   pthread_mutex_unlock(&e->mu);
-  size_t w = (size_t)snprintf(msg, cap, "GEN %u rid=%lld spec=%d ", max_new, r->rid, e->spec ? 1 : 0);
-  if (mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
-    w += (size_t)snprintf(msg + w, cap - w, "mark=%u ", mark);
-  if (s && s->temperature > 0) /* sampled: the tokens of (seed, position) - the same seed, the same answer */
+  size_t w = 0;
+  bool fmt_ok = appendf(msg, cap, &w, "GEN %u rid=%lld spec=%d ", max_new, r->rid, e->spec ? 1 : 0);
+  if (fmt_ok && mark) /* a point osmos-serve keeps besides the prompt's (its last user turn's) */
+    fmt_ok = appendf(msg, cap, &w, "mark=%u ", mark);
+  if (fmt_ok && s && s->temperature > 0) /* sampled: the tokens of (seed, position) - the same seed, the same answer */
   {
-    w += (size_t)snprintf(msg + w, cap - w, "temp=%.9g top_p=%.9g seed=%llu ", s->temperature, s->top_p, s->seed);
-    if (s->top_k)
-      w += (size_t)snprintf(msg + w, cap - w, "top_k=%u ", s->top_k);
+    fmt_ok = appendf(msg, cap, &w, "temp=%.9g top_p=%.9g seed=%llu ", s->temperature, s->top_p, s->seed);
+    if (fmt_ok && s->top_k)
+      fmt_ok = appendf(msg, cap, &w, "top_k=%u ", s->top_k);
   }
-  for (size_t i = 0; i < n; i++)
-    w += (size_t)snprintf(msg + w, cap - w, i ? ",%d" : "%d", ids[i]);
-  msg[w++] = '\n';
-  bool ok = true;
+  for (size_t i = 0; fmt_ok && i < n; i++)
+    fmt_ok = appendf(msg, cap, &w, i ? ",%d" : "%d", ids[i]);
+  fmt_ok = fmt_ok && w + 1 < cap;
+  if (fmt_ok)
+    msg[w++] = '\n';
+  bool ok = fmt_ok;
   pthread_mutex_lock(&e->wmu);
+  ok = ok && e->in_fd >= 0;
   for (size_t at = 0; ok && at < w;)
   {
     const ssize_t k = write(e->in_fd, msg + at, w - at);
@@ -230,7 +252,7 @@ Run *engine_run(Engine *e, const int32_t *ids, size_t n, unsigned max_new, unsig
   pthread_mutex_unlock(&e->wmu);
   free(msg);
   if (!ok)
-    end(r, "error", "the engine's input closed");
+    end(r, "error", fmt_ok ? "the engine's input closed" : "GEN message buffer overflow");
   return r;
 }
 
@@ -238,8 +260,11 @@ void engine_stop(Engine *e, Run *r)
 {
   char msg[64];
   const int n = snprintf(msg, sizeof msg, "STOP %lld\n", r->rid);
+  pthread_mutex_lock(&e->mu);
+  const bool dead = e->dead;
+  pthread_mutex_unlock(&e->mu);
   pthread_mutex_lock(&e->wmu);
-  if (!e->dead && write(e->in_fd, msg, (size_t)n) != n)
+  if (!dead && e->in_fd >= 0 && write(e->in_fd, msg, (size_t)n) != n)
     fprintf(stderr, "osmos-api: STOP %lld not sent\n", r->rid);
   pthread_mutex_unlock(&e->wmu);
 }
@@ -263,10 +288,14 @@ void engine_release(Engine *e, Run *r)
    exit awaited, wait_s at most - then killed. true when it exited by itself */
 bool engine_quit(Engine *e, int wait_s)
 {
+  pthread_mutex_lock(&e->mu);
+  const bool dead = e->dead;
+  pthread_mutex_unlock(&e->mu);
   pthread_mutex_lock(&e->wmu);
-  const bool sent = !e->dead && write(e->in_fd, "QUIT\n", 5) == 5;
+  const bool sent = !dead && e->in_fd >= 0 && write(e->in_fd, "QUIT\n", 5) == 5;
+  if (e->in_fd >= 0)
+    close(e->in_fd), e->in_fd = -1; /* its stdin's end: a QUIT too, should the line not have gone */
   pthread_mutex_unlock(&e->wmu);
-  close(e->in_fd); /* its stdin's end: a QUIT too, should the line not have gone */
   for (int i = 0; sent && i < wait_s * 10; i++)
   {
     int st;

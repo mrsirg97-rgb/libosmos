@@ -41,7 +41,8 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
       return osmos_fail(err, "a GPU call failed: " #x);                                                       \
   } while (0)
   ink2_pf(f, -1);
-  GPU(hipMemcpy(f->ids_d, tok, n * 4, hipMemcpyHostToDevice) == hipSuccess);
+  memcpy(f->pin_tok + row0, tok, (size_t)n * 4);
+  GPU(hipMemcpyAsync(f->ids_d, f->pin_tok + row0, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess);
   GPU(ops_embed(W->embed->type, f->embed, C, f->ids_d, n, 1, f->h, f->st));
   GPU(ops_rms(f->h, C, C, f->embed_norm, g->rms_eps, n, f->h, C, f->st));
   for (int c = 0; c < INK2_CONVS; c++) /* every tail's room first: the step's reads and writes in one place */
@@ -234,11 +235,6 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   }
   ink2_pf(f, PF_MID);
   /* the head: the rows from the prompt's end - 1 on */
-  GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
-                    f->st));
-  GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, f->st));
-  if (f->mtp) /* the final normed hidden: the last tap */
-    GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));
   const uint32_t VR = (uint32_t)W->output->dims[1], V = f->vocab;
   uint32_t first = 0;
   if (s->prompt_end && s->prompt_end - 1 > pos)
@@ -249,12 +245,26 @@ static bool run(Ink2Forward *f, Ink2Seq *s, const int32_t *tok, uint32_t n, uint
   for (uint32_t t = 0; t < n; t++)
     f->slot[row0 + t] = t >= first ? (int32_t)(slot0 + t - first) : -1;
   f->n_slots += n - first;
+  if (first < n || f->mtp)
+  {
+    GPU(ink2_attn_res(f->out_res_q, 1, f->blocks, nb, maxb, f->h, n, C, g->rms_eps, res_scale, f->tmp, f->res_sc,
+                      f->st));
+    GPU(ops_rms(f->tmp, C, C, f->out_norm, g->rms_eps, n, f->xn, C, f->st));
+    if (f->mtp) /* the final normed hidden: the last tap */
+      GPU(ink2_mtp_tap(f, f->mtp->n_taps - 1, f->xn, n, row0));
+  }
   for (uint32_t at = first; at < n; at += f->head_rows)
   {
     const uint32_t k = n - at < f->head_rows ? n - at : f->head_rows;
-    GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, f->head));
-    GPU(hipMemcpy2DAsync(f->logits + (uint64_t)(slot0 + at - first) * V, (uint64_t)V * 4, f->head, (uint64_t)VR * 4,
-                         (uint64_t)V * 4, k, hipMemcpyDeviceToDevice, f->st) == hipSuccess);
+    float *dst = f->logits + (uint64_t)(slot0 + at - first) * V;
+    if (VR == V)
+      GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, dst));
+    else
+    {
+      GPU(ink2_mat(f, W->output, f->output, f->xn + (uint64_t)at * C, k, f->head));
+      GPU(hipMemcpy2DAsync(dst, (uint64_t)V * 4, f->head, (uint64_t)VR * 4, (uint64_t)V * 4, k,
+                           hipMemcpyDeviceToDevice, f->st) == hipSuccess);
+    }
   }
   if (first < n)
     GPU(ink2_softcap(f->logits + (uint64_t)slot0 * V, (uint64_t)(n - first) * V, g->logit_softcap, f->st));
@@ -312,12 +322,12 @@ bool ink2_step(Ink2Forward *f, Ink2Seq *const *seqs, const uint32_t *lens, uint3
   bool ok = true;
   for (uint32_t i = 0, at = 0; ok && i < runs; at += lens[i++])
     ok = run(f, seqs[i], tokens + at, lens[i], at, err);
-  ok = ok && (hipDeviceSynchronize() == hipSuccess || osmos_fail(err, "a GPU call failed"));
-  hipDeviceSynchronize();
+  ok = ok && ((overflow_read(&f->ovf, f->st) && hipStreamSynchronize(f->st) == hipSuccess) ||
+              osmos_fail(err, "a GPU call failed"));
+  if (!ok)
+    (void)hipDeviceSynchronize();
   membrane_end(f->mem);
-  int32_t overflow = 0;
-  if (ok && hipMemcpy(&overflow, f->overflow, 4, hipMemcpyDeviceToHost) != hipSuccess)
-    ok = osmos_fail(err, "a GPU call failed (the step's overflow flag)");
+  const int32_t overflow = ok ? *f->pin_overflow : 0;
   if (ok && overflow)
     ok = osmos_fail(err, "an activation past f16's range: the step's results are not to be trusted");
   if (!ok) /* what the failed step may have set: not the next step's to answer for */

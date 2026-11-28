@@ -135,6 +135,8 @@ static Frag *partition(const Tokenizer *t, const char *s, size_t len, bool parse
       continue;
     const char *x = t->text[id];
     const size_t xl = strlen(x);
+    if (!xl)
+      continue;
     for (size_t i = 0; i < n; i++)
     {
       if (f[i].id >= 0 || f[i].len < xl)
@@ -167,14 +169,14 @@ static Frag *partition(const Tokenizer *t, const char *s, size_t len, bool parse
   return f;
 }
 
-/* a raw fragment's ids: code points (an invalid byte U+FFFD), its pre-tokens, each merged */
-static size_t raw(const Tokenizer *t, const unsigned char *s, size_t len, int32_t *ids, size_t cap)
+/* a raw fragment's ids: code points (an invalid byte U+FFFD), its pre-tokens, each merged; -1 on OOM */
+static int64_t raw(const Tokenizer *t, const unsigned char *s, size_t len, int32_t *ids, size_t cap)
 {
   uint32_t *cp = malloc((len + 1) * sizeof *cp);
   size_t *cuts = malloc((len + 2) * sizeof *cuts), m = 0, n = 0;
   unsigned char *word = malloc(4 * len + 4);
   if (!cp || !cuts || !word)
-    return free(cp), free(cuts), free(word), 0;
+    return free(cp), free(cuts), free(word), -1;
   for (size_t i = 0, used; i < len; i += used)
     cp[m++] = pretok_utf8(s + i, len - i, &used);
   const size_t k = t->split(cp, m, cuts);
@@ -203,10 +205,15 @@ static size_t raw(const Tokenizer *t, const unsigned char *s, size_t len, int32_
       n++;
     }
     else
-      n += bpe_word(t->bpe, word, w, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+    {
+      const int64_t added = bpe_word(t->bpe, word, w, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+      if (added < 0)
+        return free(cp), free(cuts), free(word), -1;
+      n += (size_t)added;
+    }
   }
   free(cp), free(cuts), free(word);
-  return n;
+  return (int64_t)n;
 }
 
 int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool parse_special, int32_t *ids,
@@ -227,10 +234,30 @@ int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool 
       n++;
     }
     else
-      n += raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+    {
+      const int64_t added =
+          raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+      if (added < 0)
+        return free(f), -1;
+      n += (size_t)added;
+    }
   }
   free(f);
   return (int64_t)n;
+}
+
+bool tokenizer_has_special(const Tokenizer *t, const char *s, size_t len)
+{
+  if (!t || !s || !len)
+    return false;
+  for (int32_t k = 0; k < t->n_special; k++)
+  {
+    const char *x = t->text[t->special[k]];
+    const size_t xl = strlen(x);
+    if (xl && xl <= len && memmem(s, len, x, xl))
+      return true;
+  }
+  return false;
 }
 
 size_t tokenizer_defuse(const Tokenizer *t, char *s, size_t len)
@@ -274,7 +301,13 @@ int64_t tokenizer_encode_shaped(const Tokenizer *t, const char *text, const char
       n++;
     }
     else
-      n += raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+    {
+      const int64_t added =
+          raw(t, (const unsigned char *)text + f[i].off, f[i].len, ids + (n < cap ? n : cap), n < cap ? cap - n : 0);
+      if (added < 0) /* out of memory: refused, never a count one short */
+        return free(f), -1;
+      n += (size_t)added;
+    }
   }
   free(f);
   return (int64_t)n;

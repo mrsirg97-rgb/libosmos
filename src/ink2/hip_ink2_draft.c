@@ -19,6 +19,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 #define T_F32 0u
@@ -176,7 +177,7 @@ bool ink2_mtp_up(Ink2Forward *f, char *err)
     if (!(d->attn[l] = attn_core_create(&ld, d->scr, attn_core_scratch(&ad), err)))
       return false;
   }
-  d->ovf = (OverflowFlag){d->overflow, 4, false};
+  d->ovf = (OverflowFlag){d->overflow, 4, false, NULL};
   return overflow_reset(&d->ovf, err);
 }
 
@@ -192,7 +193,7 @@ bool ink2_mtp_seq_make(Ink2Seq *s)
         ledger_malloc(f->ledger, (void **)&s->mv[l], bytes) != hipSuccess)
       return false;
   }
-  s->mfrom = s->mend = 0;
+  s->mfrom = s->mend = 0, s->mlast_ok = false;
   return ledger_malloc(f->ledger, (void **)&s->mlast, (uint64_t)f->mtp->n_taps * f->mtp->n_embd * 4) == hipSuccess;
 }
 
@@ -244,9 +245,8 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, KV = kvw(m), K = (uint32_t)m->n_taps, n = (uint32_t)(to - from);
   const float *taps = d->taps + ((uint64_t)s->tap_row0 + (uint32_t)(from - s->tap_pos0)) * K * C;
-  /* the context: the positions seeded since the last gap (a seed past it starts it over) */
-  if (from > s->mend || from < s->mfrom)
-    s->mfrom = from;
+  /* the context: the positions seeded since the last gap (committed only after GPU work succeeds) */
+  const int32_t new_mfrom = (from > s->mend || from < s->mfrom) ? from : s->mfrom;
   bool ok = true;
   const uint32_t B = (uint32_t)m->block; /* the buffers' rows: the drafter's block (INK2_MTP_BLOCK runs past a block of
                                             2 or 3's buffers) */
@@ -276,7 +276,8 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
     return osmos_fail(err, "a GPU call failed (the drafter's context)");
   if (overflow)
     return overflow_reset(&d->ovf, NULL), osmos_fail(err, "the drafter's context past f16's range");
-  s->mend = to;
+  s->mfrom = new_mfrom;
+  s->mend = to, s->mlast_ok = true;
   return true;
 }
 
@@ -328,13 +329,15 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     return -1;
   if (y < 0 || y >= f->w->geo.n_vocab)
     return osmos_fail(err, "a token not of the vocabulary"), -1;
-  if (s->mend != s->pos || s->mfrom >= s->mend)
+  if (s->mend != s->pos || s->mfrom >= s->mend || !s->mlast_ok)
     return osmos_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
   const uint32_t C = (uint32_t)m->n_embd, B = (uint32_t)m->block, R = (uint32_t)m->rank, K = (uint32_t)m->n_taps,
                  VR = (uint32_t)f->w->output->dims[1], V = (uint32_t)f->w->geo.n_vocab;
   const uint32_t steps = max < B - 1 ? max : B - 1;
+  if (!steps)
+    return 0;
   const int32_t pos = s->pos;
   bool held = false;
   /* the block: the anchor's normed embedding (the target's), then mask rows */
@@ -345,19 +348,19 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     ok = hipMemcpyAsync(d->x + (uint64_t)r * C, d->mask, (uint64_t)C * 4, hipMemcpyDeviceToDevice, NULL) == hipSuccess;
   for (int l = 0; ok && l < m->n_layers; l++)
     ok = layer(f, s, l, B, pos);
-  /* the final norm, the head on rows 1 .. (uncapped), the features: the last context position's taps mixed */
+  /* the final norm, the head on rows 1 .. steps (uncapped), the features: the last context position's taps mixed */
   ok = ok && ink2_axpy(d->res, d->ob, (uint64_t)B * C, 1.0f, NULL) &&
        ops_rms(d->res, C, C, d->norm, m->eps, B, d->nrm, C, NULL) &&
-       dmat(f, f->w->output, f->output, d->base, NULL, NULL, NULL, d->nrm + C, B - 1, &held) &&
+       dmat(f, f->w->output, f->output, d->base, NULL, NULL, NULL, d->nrm + C, steps, &held) &&
        ink2_mtp_mix(s->mlast, K, d->alpha + (size_t)m->n_layers * K, 1, C, d->f_rnn, NULL) &&
        ops_rms(d->f_rnn, C, C, d->m_dflare, m->eps, 1, d->f_rnn, C, NULL);
   /* the steps' invariant: rnn_proj's [hidden | features] columns on each row's (bias added in the step) */
-  for (uint32_t r = 0; ok && r < B - 1; r++)
+  for (uint32_t r = 0; ok && r < steps; r++)
     ok = hipMemcpyAsync(d->hf + (uint64_t)r * 2 * C, d->nrm + (uint64_t)(r + 1) * C, (uint64_t)C * 4,
                         hipMemcpyDeviceToDevice, NULL) == hipSuccess &&
          hipMemcpyAsync(d->hf + (uint64_t)r * 2 * C + C, d->f_rnn, (uint64_t)C * 4, hipMemcpyDeviceToDevice, NULL) ==
              hipSuccess;
-  ok = ok && mv_run(T_F32, d->w_hf, 3 * R, 2 * C, d->hf, B - 1 > MV_MAX_TOKENS ? MV_MAX_TOKENS : B - 1, d->inv, NULL) &&
+  ok = ok && mv_run(T_F32, d->w_hf, 3 * R, 2 * C, d->hf, steps > MV_MAX_TOKENS ? MV_MAX_TOKENS : steps, d->inv, NULL) &&
        hipMemsetAsync(d->state, 0, R * 4, NULL) == hipSuccess;
   for (uint32_t st = 0; ok && st < steps; st++)
   {
@@ -382,8 +385,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
   float cum = 1.0f;
   for (; k < (int)steps; k++)
   {
-    cum *= p[k];
-    if (p[k] < conf_min || cum < cum_min)
+    if (!draft_accept(p[k], conf_min, cum_min, &cum))
       break;
     drafts[k] = ids[k], conf[k] = p[k];
   }

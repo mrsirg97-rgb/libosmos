@@ -16,6 +16,7 @@ Tokenizer *tokenizer_create(const Gguf *g, char err[OSMOS_ERR]);
 void tokenizer_destroy(Tokenizer *t);
 int64_t tokenizer_encode(const Tokenizer *t, const char *text, size_t len, bool parse_special, int32_t *ids,
                          size_t cap);
+bool tokenizer_has_special(const Tokenizer *t, const char *s, size_t len);
 size_t tokenizer_defuse(const Tokenizer *t, char *s, size_t len);
 int64_t tokenizer_encode_shaped(const Tokenizer *t, const char *text, const char *shape, size_t len, int32_t *ids,
                                 size_t cap);

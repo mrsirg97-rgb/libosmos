@@ -97,8 +97,12 @@ static size_t held(const char *p, size_t n, const char *const *marks, int nm, bo
 
 void answer_advance(Answer *s)
 {
+  if (!s->shape.p || !s->text.p || s->sent >= s->text.n)
+    return;
   while (s->phase != PHASE_DONE)
   {
+    if (s->sent >= s->text.n)
+      return;
     if (s->d->header && s->boundary) /* a block's header: its field, or the stream's end (a call, the EOS) */
     {
       DialectField field;
@@ -159,6 +163,8 @@ void answer_advance(Answer *s)
    answer's text has it (reply.c's message: the reasoning to the first </think>, the content after) */
 void answer_flush(Answer *s)
 {
+  if (!s->shape.p || !s->text.p || s->sent >= s->text.n)
+    return;
   size_t n = s->text.n - s->sent;
   const size_t eos = strlen(s->d->eos);
   if (n >= eos && !memcmp(s->text.p + s->text.n - eos, s->d->eos, eos))

@@ -28,7 +28,7 @@ Resident
   driver's own, which reclaim never takes.
 
 resident_create
-  `units` (copied) laid out back to back, each part from a POOL_ALIGN boundary, in arenas of RESIDENT_ARENA bytes
+  `units` (copied) laid out back to back, each part from a POOL_ALIGN boundary, in arenas of up to RESIDENT_ARENA bytes
   from `slots` (GPU memory the CPU writes); read by `threads` fetchq workers at once - a part of fd -1 (offset 0) is
   room: its bytes laid out, not read (a repacked layout after the file's bytes); returns when every read is done.
   NULL, with why in `err`, for a unit with no parts or more than POOL_PARTS, a range of 0 bytes or past its file,

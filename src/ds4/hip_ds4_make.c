@@ -88,7 +88,7 @@ static bool scratch(Forward *f)
   for (int l = 0; l < g->n_layers; l++)
     n_eg += g->engram[l];
   f->xf0 = b->xf, f->moe0 = b->moe, f->mid0 = b->mid, f->f_post0 = b->f_post, f->f_comb0 = b->f_comb;
-  f->ovf = (OverflowFlag){b->overflow, 4, false}; /* (zeroed: osmos/gpu/bufs.h) */
+  f->ovf = (OverflowFlag){b->overflow, 4, false, NULL}; /* (zeroed: osmos/gpu/bufs.h) */
   return fwd_put(b->pre0, pre0, B * hc * F) && fwd_alloc(&f->bufs, &f->argmax_part, ops_argmax_scratch((uint32_t)B)) &&
          (!f->n_tap || fwd_alloc(&f->bufs, &f->taps, (uint64_t)f->step * f->n_tap * f->g->n_embd * F)) &&
          fwd_mapped(&f->bufs, &f->r_ids, P * 4) &&

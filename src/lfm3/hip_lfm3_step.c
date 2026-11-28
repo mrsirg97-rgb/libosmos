@@ -187,7 +187,7 @@ static bool lsa_attention(Lfm3Forward *f, const Lfm3Run *R, int l, const float *
     closed = want > closed ? want : closed;
   }
   *dense = 0;
-  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed, false);
+  return close_blocks(f, s, l, (P + n) / LSA_WINDOW, closed, true);
 }
 
 static bool attention(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint32_t n, bool read)
@@ -253,7 +253,7 @@ static bool layer(Lfm3Forward *f, const Lfm3Run *run, uint32_t runs, int l, uint
 
 /* the step (lfm3_step_runs); keep_from: rows below it not kept whatever the prompts say (lfm3_step's: its last rows) */
 static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
-                 bool read, uint32_t keep_from, char *err)
+                 bool read, uint32_t keep_from, bool honor_prompt, char *err)
 {
   if (!f || !seqs || !lens || !tokens || !runs || runs > LFM3_MAX_RUNS)
     return osmos_fail(err, "no forward, sequences or tokens, or past LFM3_MAX_RUNS runs");
@@ -280,7 +280,7 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
     run[r] = (Lfm3Run){s, n, lens[r]};
     for (uint32_t t = 0; t < lens[r]; t++)
     {
-      const bool keep = n + t >= keep_from && (!s->prompt_end || s->pos + t + 1 >= s->prompt_end);
+      const bool keep = n + t >= keep_from && (!honor_prompt || !s->prompt_end || s->pos + t + 1 >= s->prompt_end);
       f->slot[n + t] = keep ? (int32_t)kept : -1;
       kept += keep;
     }
@@ -334,15 +334,15 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
   if (ok && kept)
     ok = ops_rms(f->hk, D, D, lfm3_fv(f, f->w->out_norm), g->rms_eps, kept, f->xf, D, f->st) &&
          mv_strided(f->head_type, f->head, V, D, f->xf, D, kept, f->logits, V, f->st);
-  int32_t over = 0;
-  ok = ok && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess &&
-       hipMemcpy(&over, f->overflow, 4, hipMemcpyDeviceToHost) == hipSuccess;
+  /* f->overflow is only written by mm_x16 during reads: skip its D2H on decode steps */
+  ok = ok && (!read || overflow_read(&f->ovf, f->st)) && hipStreamSynchronize((hipStream_t)f->st) == hipSuccess;
+  const int32_t over = ok && read ? *f->pin_overflow : 0;
   f->rows = ok && !over ? n : 0;
   if (!ok || over)
   {
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
-    if (over)
+    if (read)
       { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
     return osmos_fail(err, "%s", over ? "an activation past f16's range in a read (the step refused)"
                                        : "a GPU call failed in the step (its sequences refused until a load)");
@@ -363,20 +363,20 @@ static bool step(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uin
 bool lfm3_step_runs(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, false, 0, err);
+  return step(f, seqs, lens, runs, tokens, false, 0, true, err);
 }
 
 bool lfm3_step_read(Lfm3Forward *f, Lfm3Seq *const *seqs, const uint32_t *lens, uint32_t runs, const int32_t *tokens,
                     char err[OSMOS_ERR])
 {
-  return step(f, seqs, lens, runs, tokens, true, 0, err);
+  return step(f, seqs, lens, runs, tokens, true, 0, true, err);
 }
 
 bool lfm3_step(Lfm3Forward *f, Lfm3Seq *s, const int32_t *tokens, uint32_t n, uint32_t rows, char err[OSMOS_ERR])
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
-  if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, err))
+  if (!step(f, &s, &n, 1, tokens, n > LFM3_MV_TOKENS, n - rows, false, err))
     return false;
   const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||

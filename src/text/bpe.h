@@ -12,8 +12,8 @@ Bpe *bpe_create(char **tokens, size_t n_tokens, char **merges, size_t n_merges);
 void bpe_destroy(Bpe *b);
 /* the id of a token's exact text, or -1 */
 int32_t bpe_id(const Bpe *b, const char *text, size_t len);
-/* the ids of a word (len raw bytes) appended to ids (at most cap written, the count returned as if all were) */
-size_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap);
+/* the ids of a word (len raw bytes) appended to ids (at most cap written, the count returned as if all were; -1 OOM) */
+int64_t bpe_word(const Bpe *b, const unsigned char *word, size_t len, int32_t *ids, size_t cap);
 /* the id of a word's whole byte-level text (its bytes' stand-ins), or -1: ignore_merges' lookup (a pre-token the
    vocabulary holds whole taken so, whatever its merges would make) */
 int32_t bpe_whole(const Bpe *b, const unsigned char *word, size_t len);

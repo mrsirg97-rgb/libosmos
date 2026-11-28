@@ -9,6 +9,7 @@
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/model/qtype.h"
 #include "osmos/mem/hip_slots.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 /* the drafter: its weights in GPU memory of their own, its rings from the trunk's taps, a round's head (hip_ds4_draft.c)
@@ -274,7 +275,7 @@ static bool seed_run(Drafter *d, Seq *s, uint32_t i0, uint32_t n)
          ops_put_rows(s->dring + (uint64_t)b * W * rb, W, d->kvs_p, d->tap_pos, 1, KV_FP8, hd, n, NULL);
   /* the pinned positions are read by the copy before the next seed writes them: the stream in order, and the next
      seed's memcpy is the host's - wait for this one's copy */
-  return ok && fwd_settle(d->f);
+  return ok && fwd_settle_spin(d->f);
 }
 
 bool drafter_seed(Drafter *d, Seq *s, int32_t from, int32_t to, char err[OSMOS_ERR])
@@ -317,7 +318,7 @@ static bool confidence(Drafter *d, uint32_t t, float *out)
   if (!fwd_copy(d->cat, d->xc + (uint64_t)t * D, (uint64_t)D * sizeof(float)) ||
       !mv_strided(DRAFTER_F32, d->conf_w, 1, n, d->cat, n, 1, d->cval, 1, NULL) ||
       hipMemcpyAsync(&d->pin->conf, d->cval, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-      !fwd_settle(d->f))
+      !fwd_settle_spin(d->f))
     return false;
   *out = 1.0f / (1.0f + expf(-d->pin->conf));
   return true;
@@ -348,8 +349,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     if (!quant_dequant(DRAFTER_BF16, e_row, d->rank, d->cat + D, NULL) ||
         !confidence(d, (uint32_t)n, &conf[n]))
       return osmos_fail(err, "a GPU call failed (the drafter's confidence)"), -1;
-    cum *= conf[n];
-    if (conf[n] < conf_min || cum < cum_min)
+    if (!draft_accept(conf[n], conf_min, cum_min, &cum))
       break;
     if (!head) /* the head for every row at once, the first time a row passes: the head read once */
     {
@@ -362,7 +362,7 @@ int drafter_draft(Drafter *d, Seq *s, int32_t y, float conf_min, float cum_min, 
     if (!mv_strided(DRAFTER_BF16, d->mk_head, V, d->rank, d->cat + D, d->rank, 1, d->mk, V, NULL) ||
         !ops_add(row, d->mk, V, NULL) || !ops_argmax(row, V, 1, V, d->best, d->best_part, NULL) ||
         hipMemcpyAsync(&d->pin->best, d->best, 4, hipMemcpyDeviceToHost, NULL) != hipSuccess ||
-        !fwd_settle(d->f))
+        !fwd_settle_spin(d->f))
       return osmos_fail(err, "a GPU call failed (the drafter's markov step)"), -1;
     if (d->pin->best < 0) /* a NaN in the row: no draft from it, nor past it */
       break;

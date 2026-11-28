@@ -160,7 +160,12 @@ bool conv_cancel_read(Conv *c, const Server *sv)
                  b = c->user.n && c->user.n <= c->held.n ? c->user.n : 0;
   if (!a && !b)
     return conv_restart(c, sv);
-  return go_back(c, sv, a > b ? &c->prompt : &c->user);
+  if (a > b)
+    return go_back(c, sv, &c->prompt);
+  const bool ok = go_back(c, sv, &c->user);
+  if (ok)
+    c->prompt.n = 0; /* stale prompt point below user must not pull a later turn back past it */
+  return ok;
 }
 
 /* after a request's failure (its ERR written): a new sequence for the conversation, or - the GPU's state lost (a
@@ -188,14 +193,54 @@ static bool conv_load(void *ctx, uint64_t bytes, StateSource src, void *src_ctx)
   return oseq_load_from(c->s, bytes, src, src_ctx, c->err);
 }
 
+/* a host buffer handed straight to slots_put_stream (when a family's prompt mark IS a full state) */
+typedef struct PointBuf
+{
+  const void *buf;
+  uint64_t bytes;
+} PointBuf;
+
+static bool point_save(void *ctx, StateSink sink, void *sink_ctx)
+{
+  const PointBuf *b = ctx;
+  return sink(sink_ctx, b->buf, b->bytes);
+}
+
 /* set aside: into RAM where its room holds the state (slots_room), else straight to the folder in pieces - never
    whole in RAM past the room --fill leaves. kept as its prompt's point left it (every family):
    a decoded answer is what a client writes back otherwise (its reasoning dropped, its calls' arguments written
    again), so a kept answer would be no prefix of the turn that takes it back */
 void conv_set_aside(Conv *c, const Server *sv)
 {
-  if (!sv->slots || !c->held.n || (c->prompt.n && c->held.n > c->prompt.n && !go_back(c, sv, &c->prompt)) ||
-      !c->held.n || !slots_keeps(sv->slots, c->held.n))
+  if (!sv->slots || !c->held.n)
+    return;
+  /* if the family's mark IS a full state (DS4/Hy4) and prompt point is valid, save directly from host RAM without
+     uploading the prompt state back to GPU and downloading it again */
+  if (oseq_mark_is_state(c->s) && c->prompt.n && c->prompt.buf && c->held.n >= c->prompt.n)
+  {
+    if (!slots_keeps(sv->slots, c->prompt.n))
+      return;
+    const uint64_t bytes = c->prompt.bytes;
+    char serr[OSMOS_ERR] = "";
+    bool kept = false, ok;
+    void *st = slots_room(sv->slots, bytes, serr) ? malloc(bytes) : NULL;
+    if (st)
+    {
+      memcpy(st, c->prompt.buf, bytes);
+      ok = slots_put(sv->slots, c->held.v, c->prompt.n, st, bytes, &kept, serr);
+    }
+    else
+    {
+      serr[0] = '\0';
+      PointBuf pb = {c->prompt.buf, bytes};
+      ok = slots_put_stream(sv->slots, c->held.v, c->prompt.n, bytes, point_save, &pb, &kept, serr);
+    }
+    if (!ok)
+      out("NOTE slots: a conversation of %u tokens not set aside (%s)\n", c->prompt.n, serr);
+    return;
+  }
+  if ((c->prompt.n && c->held.n > c->prompt.n && !go_back(c, sv, &c->prompt)) || !c->held.n ||
+      !slots_keeps(sv->slots, c->held.n))
     return; /* not kept: nothing saved, no room made */
   const uint64_t bytes = oseq_state_bytes(c->s);
   char serr[OSMOS_ERR] = "";

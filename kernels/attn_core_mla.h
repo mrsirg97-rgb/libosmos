@@ -401,9 +401,8 @@ inline bool run(const float* qa, const void* cache, uint32_t slots, bool q8, con
   if (sel && (!n_sel || window || !pool || !sel_cap || (uint64_t) sel_cap * pool > HY4_MLA_MAX_KEYS)) return false;
   if (slots && slots < window) return false;
   const hipStream_t s = st(stream);
-  const uint32_t splits = (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1 < kMaxSplits
-                ? (window ? window : HY4_MLA_MAX_KEYS) / kSplitKeys + 1
-                : kMaxSplits;
+  const uint32_t max_k = window ? window : sel ? sel_cap * pool : HY4_MLA_MAX_KEYS;
+  const uint32_t splits = max_k / kSplitKeys + 1 < kMaxSplits ? max_k / kSplitKeys + 1 : kMaxSplits;
   if (read && heads % 16 == 0 && latent % 64 == 0 && (latent + rope_dim) % 16 == 0 &&
       latent + rope_dim <= kMlaRow && rope_dim <= 64) {
     if (heads % 64 == 0)

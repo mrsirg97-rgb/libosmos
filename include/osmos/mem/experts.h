@@ -59,8 +59,8 @@ void experts_destroy(Experts *e);
 /*
 experts_fit_now
   experts_plan's budget (bytes) for one build on this machine as it stands: fixed (what it has built) plus what l
-  leaves (ledger_left_settled, less FIT_HEADROOM); 1 (the smallest build) when nothing is left. a NULL l: the machine
-  read as a ledger keeping FIT_RAM_FREE would. a forward's own sizing (a test's, a bench's); osmos-serve sizes the
-  whole engine (fit_sized)
+  leaves (ledger_left_settled, less FIT_HEADROOM and FIT_SLACK for hipHostRegister page tables and RAM wobble); 1 (the
+  smallest build) when nothing is left. a NULL l: the machine read as a ledger keeping FIT_RAM_FREE would. a
+  forward's own sizing (a test's, a bench's); osmos-serve sizes the whole engine (fit_sized)
 */
 uint64_t experts_fit_now(OsmosLedger *l, uint64_t fixed);

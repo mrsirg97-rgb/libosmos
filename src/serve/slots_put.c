@@ -17,6 +17,13 @@ static bool same(const Entry *e, const int32_t *t, uint32_t n)
   return e->n == n && !memcmp(e->tokens, t, (uint64_t)n * sizeof *t);
 }
 
+static void slot_name(const Slots *s, const int32_t *tokens, uint32_t n, char out[32])
+{
+  uint64_t h = slots_fnv(&s->o.identity, sizeof s->o.identity, FNV_SEED);
+  h = slots_fnv(tokens, (uint64_t)n * sizeof *tokens, h);
+  snprintf(out, 32, "slot-%016llx", (unsigned long long)h);
+}
+
 bool slots_keeps(const Slots *s, uint32_t n) { return s && n >= s->o.min_tokens; }
 
 bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_t bytes, bool *kept,
@@ -44,7 +51,7 @@ bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_
     return slots_fail(err, "out of memory");
   }
   memcpy(e.tokens, tokens, (uint64_t)n * sizeof *tokens);
-  snprintf(e.name, sizeof e.name, "slot-%016llx", (unsigned long long)slots_fnv(tokens, (uint64_t)n * sizeof *tokens, FNV_SEED));
+  slot_name(s, tokens, n, e.name);
   s->e[s->n++] = e;
   if (past_ram) /* straight to the folder: the ones in RAM stay */
   {
@@ -53,7 +60,17 @@ bool slots_put(Slots *s, const int32_t *tokens, uint32_t n, void *state, uint64_
     slots_trim_dir(s, s->n - 1);
   }
   if (!slots_trim_ram(s))
+  {
+    /* this one not kept if still in RAM: found by name, since a failed trim's drop moved it out of s->n - 1 (and
+       one trimmed to the folder before the failure stays there) */
+    for (uint32_t i = 0; i < s->n; i++)
+      if (s->e[i].state && !strcmp(s->e[i].name, e.name))
+      {
+        slots_drop(s, i);
+        break;
+      }
     return slots_fail(err, "a conversation could not be written to the folder");
+  }
   if (kept)
     *kept = true;
   return true;
@@ -137,7 +154,7 @@ bool slots_put_stream(Slots *s, const int32_t *tokens, uint32_t n, uint64_t byte
   if (!e.tokens || !slots_grow(s))
     return free(e.tokens), slots_fail(err, "out of memory");
   memcpy(e.tokens, tokens, (uint64_t)n * sizeof *tokens);
-  snprintf(e.name, sizeof e.name, "slot-%016llx", (unsigned long long)slots_fnv(tokens, (uint64_t)n * sizeof *tokens, FNV_SEED));
+  slot_name(s, tokens, n, e.name);
   char bin[4096], tmp[4200];
   slots_path(s, e.name, ".bin", bin, sizeof bin);
   snprintf(tmp, sizeof tmp, "%s.tmp", bin);

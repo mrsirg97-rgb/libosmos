@@ -37,19 +37,16 @@ __device__ inline void tiles_block(const int32_t* ids, uint32_t n, uint32_t k, u
     const int r = a - 2, rem = c % kPart;
     return (r == Q4X_TILE_RUNS - 1 ? c / kPart : 0) + (rem && run_of(rem) == r);
   };
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
-    for (int a = 0; a < A; a++) sc[a][e] = own(e, a);
-  __syncthreads();
-  {  // inclusive scans, then each less its own: a wave's 32 by shuffles, then the earlier waves' and chunks' totals -
-     // integers, so the sums Hillis-Steele's whatever their order (two barriers a chunk of kGroupThreads, not 14)
+  {  // exclusive scans directly from own(): a wave's 32 by shuffles, then earlier waves' and chunks' totals -
+     // integers, so the sums Hillis-Steele's whatever their order, with live[a] from carry[a]
     constexpr int W = kGroupThreads / 32;
     __shared__ int wsum[A][W];
     const uint32_t lane = threadIdx.x % 32, w = threadIdx.x / 32;
     int carry[A] = {};
     for (uint32_t base = 0; base < n_exp; base += kGroupThreads) {
       const uint32_t e = base + threadIdx.x;
-      int v[A];
-      for (int a = 0; a < A; a++) v[a] = e < n_exp ? sc[a][e] : 0;
+      int o_val[A], v[A];
+      for (int a = 0; a < A; a++) o_val[a] = v[a] = e < n_exp ? own(e, a) : 0;
       for (uint32_t o = 1; o < 32; o <<= 1)
         for (int a = 0; a < A; a++) {
           const int u = __shfl_up(v[a], o, 32);
@@ -61,16 +58,13 @@ __device__ inline void tiles_block(const int32_t* ids, uint32_t n, uint32_t k, u
       for (int a = 0; a < A; a++) {
         int pre = carry[a], all = 0;
         for (uint32_t x = 0; x < (uint32_t) W; x++) pre += x < w ? wsum[a][x] : 0, all += wsum[a][x];
-        if (e < n_exp) sc[a][e] = v[a] + pre;
+        if (e < n_exp) sc[a][e] = v[a] + pre - o_val[a];
         carry[a] += all;
       }
-      __syncthreads();  // (wsum the next chunk's)
+      if (base + kGroupThreads < n_exp) __syncthreads();  // (wsum the next chunk's)
     }
+    if (threadIdx.x < A) live[threadIdx.x] = carry[threadIdx.x];
   }
-  if (threadIdx.x < A) live[threadIdx.x] = sc[threadIdx.x][n_exp - 1];
-  __syncthreads();  // the totals read before the last expert's thread makes its own exclusive below
-  for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads)
-    for (int a = 0; a < A; a++) sc[a][e] -= own(e, a);
   __syncthreads();
   for (uint32_t e = threadIdx.x; e < n_exp; e += kGroupThreads) {
     const int c = count[e];

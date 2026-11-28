@@ -250,6 +250,7 @@ static bool begin(Forward *f, char *err)
    released as a finished step releases it */
 static bool fail_held(Forward *f)
 {
+  (void)rowstream_wait(&f->eg_rs);
   (void)hipDeviceSynchronize();
   if (f->cpu)
     (void)cpu_lane_wait(f->cpu);
@@ -283,7 +284,7 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
     return osmos_fail(err, "a batch of no tokens, or more than the forward's max_tokens");
   if (!membrane_warm(f->mem, err)) /* the budget's experts, at the first step (nothing to do after it) */
     return false;
-  f->vocab_rows = 0; /* (its head's, when it runs one) */
+  f->vocab_rows = 0, f->tap_n = 0; /* (its head's and taps', when it runs them) */
   f->step_n = n;
   f->pf.kind = n > MV_MAX_TOKENS;
   const double pf0 = f->pf.on ? fwd_now() : 0;
@@ -328,9 +329,9 @@ static bool batch(Forward *f, Seq *const *seqs, const int32_t *tokens, uint32_t 
       leave(f, k);
     }
   }
-  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); the last
-     sub-batch's rows the ones left */
-  for (uint32_t k = 0; ok && k < f->n_sub; k++)
+  /* the head: the last block's pre mixes the streams, normed, then the vocabulary (the wanted tokens'); only the last
+     sub-batch's logits survive unless probing */
+  for (uint32_t k = f->probe ? 0 : f->n_sub - 1; ok && k < f->n_sub; k++)
   {
     enter(f, k);
     ok = fwd_head(f, err);

@@ -293,7 +293,8 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
                   Q4X_THETA_HF, &f->rope_full[0]);
   for (uint32_t s = 0; ok && !o->yarn_static_ctx && s < nt; s++)
     f->stage[s] = table[s], f->stages = s + 1,
-    ok = q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from,
+    ok = f->yarn_from <= UINT32_MAX / table[s].factor &&
+         q4x_rope((uint32_t)g->head_dim, (uint32_t)g->rope_pairs, g->rope_base, f->yarn_from,
                   f->yarn_from * table[s].factor, Q4X_THETA_HF, &f->rope_full[s]);
   ok = ok && q4x_rope((uint32_t)g->head_dim, (uint32_t)g->head_dim / 2, g->rope_base_swa, g->native_ctx, g->native_ctx,
                      Q4X_THETA_HF, &f->rope_swa);
@@ -329,6 +330,9 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
                            .max_tokens = f->max_tokens,
                            .max_keys = s && f->ring > f->max_ctx ? f->ring : f->max_ctx}; /* (a ring past a short context) */
   const uint64_t sc0 = attn_core_scratch(&ad[0]), sc1 = attn_core_scratch(&ad[1]), scratch = sc0 > sc1 ? sc0 : sc1;
+  uint64_t wide = ff > 3 * D ? ff : 3 * D;
+  if (q > wide)
+    wide = q;
   const GpuWant want[] = {
       {&f->tok, n * 4},          {&f->h, n * D * F},       {&f->xn, n * D * F},    {&f->y, n * D * F},
       {&f->bcx, n * 3 * D * F},  {&f->u, n * D * F},       {&f->qf, n * q * F},    {&f->kf, n * kv * F},
@@ -337,15 +341,17 @@ Lfm3Forward *lfm3_forward_create(const Lfm3Weights *w, const Lfm3Options *o, cha
       {&f->xf, lr * D * F},      {&f->logits, lr * g->n_vocab * F}, {&f->hk, lr * D * F},
       {&f->ids, lr * 4},         {&f->argmax, ops_argmax_scratch((uint32_t)lr)},
       {&f->fa_scratch, scratch},
-      {&f->x16, (uint64_t)(n + MM_TILE - 1) / MM_TILE * MM_TILE * (ff > 3 * D ? ff : 3 * D) * 2}, {&f->overflow, 4},
+      {&f->x16, (uint64_t)(n + MM_TILE - 1) / MM_TILE * MM_TILE * wide * 2}, {&f->overflow, 4},
       {&f->jo, (2 * ff > q + 2 * kv + (uint64_t)g->n_heads ? 2 * ff : q + 2 * kv + (uint64_t)g->n_heads) * F},
   };
   ok = ok && (gpu_bufs_alloc(&f->bufs, f->ledger, want, sizeof want / sizeof *want) ||
               osmos_fail(err, "GPU memory refused (a step's buffers)"));
   ok = ok && gpu_bufs_host(&f->bufs, f->ledger, &f->pin_tok, n * 4) &&
        gpu_bufs_host(&f->bufs, f->ledger, &f->pin_logits, lr * g->n_vocab * F) &&
+       gpu_bufs_host(&f->bufs, f->ledger, &f->pin_overflow, 4) && !(*f->pin_overflow = 0) &&
        (f->slot = malloc(n * 4)) &&
-       (f->ovf = (OverflowFlag){f->overflow, 4, false}, overflow_reset(&f->ovf, err)) && hipDeviceSynchronize() == hipSuccess;
+       (f->ovf = (OverflowFlag){f->overflow, 4, false, f->pin_overflow}, overflow_reset(&f->ovf, err)) &&
+       hipDeviceSynchronize() == hipSuccess;
   for (int s = 0; ok && s < 2; s++)
     ok = (f->attn[s] = attn_core_create(&ad[s], f->fa_scratch, scratch, err)) != NULL;
   if (!ok)

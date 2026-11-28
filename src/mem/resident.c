@@ -39,7 +39,27 @@ static void on_read(uint32_t unit, bool ok, void *arg)
   pthread_mutex_unlock(&r->mu);
 }
 
-static bool check(const PoolUnit *u, size_t i, uint64_t *size, char *err)
+typedef struct FdSize
+{
+  int fd;
+  uint64_t size;
+} FdSize;
+
+static bool fd_size(int fd, FdSize *cache, size_t *n_cache, size_t cap, uint64_t *out)
+{
+  for (size_t i = 0; i < *n_cache; i++)
+    if (cache[i].fd == fd)
+      return *out = cache[i].size, true;
+  struct stat st;
+  if (fstat(fd, &st) != 0 || st.st_size < 0)
+    return false;
+  if (*n_cache < cap)
+    cache[(*n_cache)++] = (FdSize){fd, (uint64_t)st.st_size};
+  *out = (uint64_t)st.st_size;
+  return true;
+}
+
+static bool check(const PoolUnit *u, size_t i, uint64_t *size, FdSize *cache, size_t *n_cache, size_t cap, char *err)
 {
   if (u->n_parts < 1 || u->n_parts > POOL_PARTS)
     return osmos_fail(err, "unit %zu: %d parts (1 to %d)", i, u->n_parts, POOL_PARTS), false;
@@ -47,31 +67,41 @@ static bool check(const PoolUnit *u, size_t i, uint64_t *size, char *err)
   for (int k = 0; k < u->n_parts; k++)
   {
     const PoolRange *p = &u->part[k];
-    struct stat st;
+    uint64_t fsz = 0;
     if (p->bytes == 0 || (p->fd < 0 && p->offset != 0) ||
-        (p->fd >= 0 && (fstat(p->fd, &st) != 0 || p->offset >= (uint64_t)st.st_size ||
-                        p->bytes > (uint64_t)st.st_size - p->offset)))
+        (p->fd >= 0 && (!fd_size(p->fd, cache, n_cache, cap, &fsz) || p->offset >= fsz || p->bytes > fsz - p->offset)))
       return osmos_fail(err, "unit %zu part %d: 0 bytes, or past its file", i, k), false;
     *size += up(p->bytes);
   }
   return true;
 }
 
-/* every unit its place, arena by arena: a unit never spans two */
+/* every unit its place, arena by arena: a unit never spans two; each arena is clamped to the remaining units that fit
+   within RESIDENT_ARENA so the final arena does not over-allocate up to 2 GiB */
 static bool lay_out(Resident *r, char *err)
 {
-  uint64_t used = RESIDENT_ARENA, cap = 0;
+  uint64_t *sizes = r->n ? malloc(r->n * sizeof *sizes) : NULL;
+  if (r->n && !sizes)
+    return osmos_fail(err, "out of memory"), false;
+  FdSize fcache[64];
+  size_t n_fcache = 0;
+  for (size_t i = 0; i < r->n; i++)
+    if (!check(&r->u[i], i, &sizes[i], fcache, &n_fcache, 64, err))
+      return free(sizes), false;
+  uint64_t used = 0, cap = 0;
   for (size_t i = 0; i < r->n; i++)
   {
-    uint64_t size;
-    if (!check(&r->u[i], i, &size, err))
-      return false;
-    if (used + size > cap)
+    const uint64_t size = sizes[i];
+    if (!cap || used + size > cap)
     {
-      cap = size > RESIDENT_ARENA ? size : RESIDENT_ARENA;
+      uint64_t need = size;
+      if (need < RESIDENT_ARENA)
+        for (size_t j = i + 1; j < r->n && need + sizes[j] <= RESIDENT_ARENA; j++)
+          need += sizes[j];
+      cap = need;
       uint8_t *a = r->slots.alloc(cap, r->slots.ctx);
       if (!a)
-        return osmos_fail(err, "GPU memory refused (%llu bytes held)", (unsigned long long)r->bytes), false;
+        return free(sizes), osmos_fail(err, "GPU memory refused (%llu bytes held)", (unsigned long long)r->bytes), false;
       r->arena[r->n_arena++] = a, r->bytes += cap, used = 0;
     }
     r->dev[i] = r->arena[r->n_arena - 1] + used;
@@ -80,6 +110,7 @@ static bool lay_out(Resident *r, char *err)
       r->off[i][k] = at, at += up(r->u[i].part[k].bytes);
     used += size;
   }
+  free(sizes);
   return true;
 }
 

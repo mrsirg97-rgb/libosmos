@@ -126,7 +126,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
             hipMemcpyAsync(f->pos, f->pin_pos, (size_t)n * 4, hipMemcpyHostToDevice, f->st) == hipSuccess &&
             hy4_engram_offsets(f, run, runs, n); /* (each Engram layer's rows read as it is queued) */
   ok = ok && launches(f, run, runs, n, kept, read);
-  ok = ok && hipMemcpyAsync(f->pin_flags, f->overflow, 8, hipMemcpyDeviceToHost, f->st) == hipSuccess;
+  ok = ok && overflow_read(&f->ovf, f->st);
   /* one sync, whatever failed: the flags read, and the kernels done before membrane_end lets their experts go */
   const bool drained = hipStreamSynchronize(f->st) == hipSuccess;
   ok = ok && drained;
@@ -138,6 +138,7 @@ static bool step(Hy4Forward *f, Hy4Seq *const *seqs, const uint32_t *lens, uint3
   f->rows = ok && !over && !fault ? n : 0;
   if (!ok || over || fault)
   {
+    (void)rowstream_wait(&f->eg_rs);
     for (uint32_t r = 0; r < runs; r++)
       run[r].s->broken = true;
     { char rerr_[OSMOS_ERR] = ""; overflow_reset(&f->ovf, rerr_); } /* (failing: owed, the next step says so) */
@@ -172,9 +173,11 @@ bool hy4_step(Hy4Forward *f, Hy4Seq *s, const int32_t *tokens, uint32_t n, uint3
 {
   if (!f || !s || !n || !rows || rows > n || rows > f->logit_rows)
     return osmos_fail(err, "a step of no tokens, or more rows than tokens or the logits'");
+  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
+  if (!f->pin_logits && !hy4_pinned(&f->bufs, &f->pin_logits, (uint64_t)f->logit_rows * V * F))
+    return osmos_fail(err, "out of memory (the logits' pinned buffer)");
   if (!step(f, &s, &n, 1, tokens, n > HY4_MV_TOKENS, n - rows, err))
     return false;
-  const uint32_t V = (uint32_t)f->w->geo.n_vocab;
   return hipMemcpy(f->pin_logits, f->logits, (uint64_t)rows * V * F, hipMemcpyDeviceToHost) == hipSuccess ||
          osmos_fail(err, "a GPU call failed (the logits' copy)");
 }

@@ -3,6 +3,7 @@
 #pragma once
 #include "osmos/mem/ledger_hip.h"
 #include "osmos/mem/experts.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/model/moe_route.h"
 
 #include "osmos/gpu/attn_core.h"
@@ -46,9 +47,10 @@ struct Hy4Forward
   const Hy4Weights *w;
   uint32_t max_tokens, max_ctx, logit_rows, ring; /* ring: a sliding layer's rows (its window, a step, the reach) */
   bool kv8;                                       /* MLA's cache rows Q8_0 (Hy4Options' kv_f32 not set) */
+  bool skip_output;                               /* skip uploading BF16 output.weight when head_q8 replaces it */
   void *head8;                                    /* Hy4Options' head_q8: the head's Q8_0 copy (NULL: the file's) */
-  const void **kb_tab, **vb_tab;                  /* a read's k_b / v_b: each layer's heads' matrices (mm_group's) */
-  uint32_t *kb_xo, *kb_yo, *vb_xo, *vb_yo;        /* a head's x16 and y offsets (head h's slice of the rows) */
+  const void **vb_tab;                            /* a read's v_b: each layer's heads' matrices (mm_group's) */
+  uint32_t *vb_xo, *vb_yo;                        /* a head's x16 and y offsets (head h's slice of the rows) */
   int32_t *hcnt;                                  /* every head's token count (a chunk's) */
   uint32_t kring;    /* a sparse layer's token keys a ring of this many (a step's, a pool's and the reach: a key is
                         read only when its group completes) */
@@ -86,9 +88,7 @@ struct Hy4Forward
   bool *in_joint;             /* a tensor's device bytes inside one (not freed alone) */
   int32_t *fault;             /* a decode's routing saw a pick out of range or twice (route_tok): the step refused */
   int32_t *pin_flags;         /* overflow and fault (one buffer on the GPU: fault = overflow + 1) read with one copy */
-  uint32_t *rx, *ry, *rxd, *ryd, *h_rx, *h_ry, *h_rxd, *h_ryd;
-  int32_t *rgidx, *rhidx, *h_rgidx, *h_rhidx, *rcnt, *h_rcnt;
-  const void **rw, **h_rw;    /* the entries' gate, up, down (3 x entries) */
+  int32_t *h_rgidx, *h_rhidx, *h_rcnt; /* moe_route's slot scratch and the step's entry counts (host) */
   uint64_t *rkey;             /* the entries' sort keys (count, then build order) */
   /* the routed experts behind the membrane (experts.h): units [MoE layer][expert], a MoE layer l - n_dense; their own
      O_DIRECT descriptors; every one resident (whole): their addresses' device table [MoE layer][gate, up, down][expert]
@@ -118,7 +118,10 @@ struct Hy4Forward
      start / count / slot0 (4 x n_experts), the entries (moe_entries) */
   uint32_t *h_estart, *h_by, *h_run;
   MoeEntry *h_ent;
-  void *h_stage;              /* the sorted tables' staging (host) */
+  uint8_t *moe_build, *moe_pin, *moe_dev; /* compact MoE routing staging (cached host, pinned host, device) */
+  uint64_t moe_cap;
+  int32_t *pin_idx;           /* pinned D2H router picks (n * K) */
+  float *pin_w;               /* pinned D2H router weights (n * K) */
 
   float *qr, *qres, *q, *kva, *gt, *qa, *olat, *ao, *out;
   float *ixk, *ixkn, *ixq, *ixw, *scores; /* the indexer (ixkn: the step's keys normed, before their rows) */
@@ -133,8 +136,7 @@ struct Hy4Forward
   float *xqd, *hqd;
   int32_t *idx, *gidx, *sidx, *cnt, *xrow; /* the router's picks; the experts' order and back; mv_group_tok's table */
   void **wptr;                             /* mv_group_tok's matrices (device), a table of three */
-  int32_t *h_idx, *h_gidx, *h_sidx;                  /* host copies (a read's routing) */
-  float *h_w, *h_wsel;                                /* the router's weights, and in the experts' order */
+  int32_t *h_sidx; /* moe_route's row scratch (host) */
   int32_t *tok, *pos, *pin_tok, *pin_pos;
   float *hx, *logits, *pin_logits;
   int32_t *slot, *ids, *argmax;

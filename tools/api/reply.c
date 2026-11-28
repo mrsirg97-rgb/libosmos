@@ -100,7 +100,7 @@ Json *reply_message(const Answer *s, const Request *rq, long long rid, bool *par
   char jerr[OSMOS_ERR] = "";
   JsonBuf b = {0};
   const ChatMode mode = rq->mode;
-  if ((*parsed = s->d->parse(rq, s->text.p, s->shape.p, s->text.n, &b, err)))
+  if ((*parsed = s->d->parse(rq, s->text.p ? s->text.p : "", s->shape.p ? s->shape.p : "", s->text.n, &b, err)))
   {
     Json *m = json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
     free(b.p);

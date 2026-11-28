@@ -1,3 +1,4 @@
+#include <errno.h>
 #include <limits.h>
 #include <pthread.h>
 #include <stdatomic.h>
@@ -81,7 +82,11 @@ static bool read_part(const PoolRange *r, uint8_t *dst)
       return fstat(r->fd, &st) == 0 && r->offset + got == (uint64_t)st.st_size;
     }
     if (n < 0)
+    {
+      if (errno == EINTR)
+        continue;
       return false;
+    }
     got += (uint64_t)n;
   }
   return true;
@@ -142,7 +147,8 @@ static void *work(void *arg)
     {
       pthread_mutex_lock(&q->mu);
       q->ahead_out -= j->r.bytes;
-      pthread_cond_broadcast(&q->cv); /* a worker that left a read ahead for the bound may take it now */
+      if (q->jobs->len)
+        pthread_cond_broadcast(&q->cv); /* a worker that left a read ahead for the bound may take it now */
       pthread_mutex_unlock(&q->mu);
     }
     if (atomic_fetch_sub(&u->left, 1) == 1) /* the unit's last job */
@@ -273,7 +279,10 @@ bool fetchq_read(Fetchq *q, uint32_t unit, const PoolRange *parts, int n, void *
     atomic_store(&u->bad, true);
   atomic_init(&u->left, u->queued);
   q->queued[unit] = u;
-  pthread_cond_broadcast(&q->cv);
+  if (u->queued == 1)
+    pthread_cond_signal(&q->cv);
+  else
+    pthread_cond_broadcast(&q->cv);
   pthread_mutex_unlock(&q->mu);
   return true;
 }
@@ -307,6 +316,7 @@ void fetchq_need(Fetchq *q, uint32_t unit, uint64_t need)
   for (int i = 0; u && i < u->n_jobs; i++)
     if (u->jobs[i].ev)
       queue_update(q->jobs, u->jobs[i].ev, prio);
-  pthread_cond_broadcast(&q->cv); /* a job the bound kept queued may be a waited one now */
+  if (u)
+    pthread_cond_broadcast(&q->cv); /* a job the bound kept queued may be a waited one now */
   pthread_mutex_unlock(&q->mu);
 }

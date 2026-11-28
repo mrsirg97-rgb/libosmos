@@ -51,8 +51,9 @@ static bool routed_expert(const Hy4Weights *w, const GgufTensor *t)
 
 static bool not_resident(const GgufTensor *t, void *arg)
 {
-  const Hy4Weights *w = ((const Hy4Forward *)arg)->w;
-  return !resident(w, t) || routed_expert(w, t);
+  const Hy4Forward *f = (const Hy4Forward *)arg;
+  const Hy4Weights *w = f->w;
+  return !resident(w, t) || routed_expert(w, t) || (f->skip_output && t == w->output);
 }
 
 /* a promotion's copy, the stream's slot to the pool's (both pinned host memory the GPU reads in place) */
@@ -199,15 +200,23 @@ bool hy4_joints_make(Hy4Forward *f, uint32_t *most)
   return true;
 }
 
-/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's Q8_0, decoded) */
+/* a matrix the kernels read as F32 (iHC's mixes: Q4_K_M's F32, copied; SPARK-4Bit's Q8_0, decoded); the source tensor
+   slot is freed once converted so it does not stay resident alongside the F32 copy */
 bool hy4_as_f32(Hy4Forward *f, const GgufTensor *t, float **out)
 {
   const uint64_t n = t->dims[0] * t->dims[1];
   if (!hy4_alloc(&f->bufs, out, n * F))
     return false;
-  if (t->type == QTYPE_F32)
-    return hipMemcpy(*out, hy4_dev(f, t), n * F, hipMemcpyDeviceToDevice) == hipSuccess;
-  return quant_dequant(t->type, hy4_dev(f, t), n, *out, NULL);
+  const bool ok = t->type == QTYPE_F32
+                      ? hipMemcpy(*out, hy4_dev(f, t), n * F, hipMemcpyDeviceToDevice) == hipSuccess
+                      : quant_dequant(t->type, hy4_dev(f, t), n, *out, NULL) && hipDeviceSynchronize() == hipSuccess;
+  if (ok)
+  {
+    const size_t idx = (size_t)(t - f->w->model->tensors);
+    if (f->dev[idx] && (!f->in_joint || !f->in_joint[idx]))
+      ledger_free(f->ledger, f->dev[idx]), f->dev[idx] = NULL;
+  }
+  return ok;
 }
 
 /* a rope's frequencies: 1 / base^(2i / dim), as the reference computes them (F32) */
@@ -243,11 +252,12 @@ bool hy4_engram_reader(Hy4Forward *f, const int *fds, char *err)
   const GgufTensor *t = w->engram_table;
   f->eg_fd = fds[t->file];
   f->eg_row_bytes = t->bytes / t->dims[1];
-  const uint64_t rows = (uint64_t)f->max_tokens * g->n_engram * cols;
+  const uint64_t one = (uint64_t)f->max_tokens * cols;
+  const uint64_t rows = one * g->n_engram;
   const bool ok = (f->eg_read = rowread_create(HY4_ROW_THREADS)) && (f->eg_off = malloc(rows * 8)) &&
                   hy4_pinned(&f->bufs, &f->eg_stage, rows * f->eg_row_bytes) &&
-                  hy4_alloc(&f->bufs, &f->eg_raw, rows * f->eg_row_bytes) &&
-                  hy4_alloc(&f->bufs, &f->eg_rows, rows * g->engram_dim * F);
+                  hy4_alloc(&f->bufs, &f->eg_raw, one * f->eg_row_bytes) &&
+                  hy4_alloc(&f->bufs, &f->eg_rows, one * g->engram_dim * F);
   f->eg_rs = (RowStream){f->eg_read, f->eg_fd, f->eg_off, f->eg_stage, f->eg_row_bytes, 0, 0, false};
   return ok || osmos_fail(err, "out of memory (the Engram rows' buffers)");
 }

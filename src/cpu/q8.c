@@ -1,4 +1,5 @@
 #include <immintrin.h>
+#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -371,13 +372,21 @@ ROWS_OF(rows_q2_k, Q2_K)
 typedef void (*rows_fn)(const uint8_t *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d,
                         uint32_t m, float *y, uint32_t ys);
 
-bool cpu_q8_ready(void)
+static bool g_cpu_q8_ok;
+static void cpu_q8_probe(void)
 {
   __builtin_cpu_init();
-  return __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
-         __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512dq") &&
-         __builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512vbmi") &&
-         __builtin_cpu_supports("bmi2");
+  g_cpu_q8_ok = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw") &&
+                __builtin_cpu_supports("avx512vl") && __builtin_cpu_supports("avx512dq") &&
+                __builtin_cpu_supports("avx512vnni") && __builtin_cpu_supports("avx512vbmi") &&
+                __builtin_cpu_supports("bmi2");
+}
+
+bool cpu_q8_ready(void)
+{
+  static pthread_once_t once = PTHREAD_ONCE_INIT;
+  pthread_once(&once, cpu_q8_probe);
+  return g_cpu_q8_ok;
 }
 
 bool cpu_q8_rows(uint32_t type, const void *w, uint32_t cols, uint32_t r0, uint32_t r1, const int8_t *q, const float *d,

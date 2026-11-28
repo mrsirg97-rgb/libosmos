@@ -18,6 +18,7 @@ typedef struct Slot
   int holds;
   uint64_t released, next; /* when its last hold ended (the pool's clock); when it is wanted again (the caller's) */
   bool fresh;              /* read since its last release: no place of its own yet (pool_pass) */
+  bool stale;              /* passed while fresh: evict before wanted units even when p->now == 0 */
 } Slot;
 
 typedef struct Spare
@@ -30,9 +31,11 @@ struct Pool
 {
   Slot *s;
   size_t n;
+  uint32_t *pinned, *pin_pos; /* dense list of POOL_PINNED unit indices and each unit's slot in it */
+  size_t n_pinned;
   Spare *spare;
   size_t n_spare, cap_spare;
-  uint64_t budget, bytes; /* bytes: every allocation held, units' and spares' */
+  uint64_t budget, bytes, spare_bytes, reading_bytes; /* bytes: every allocation held, units' and spares' */
   Slots slots;
   Fetcher fetcher;
   pool_event_fn on_event;
@@ -73,6 +76,7 @@ static void keep_spare(Pool *p, uint8_t *dev, uint64_t size)
     p->spare = grown, p->cap_spare = cap;
   }
   p->spare[p->n_spare++] = (Spare){dev, size};
+  p->spare_bytes += size;
 }
 
 static uint8_t *take_spare(Pool *p, uint64_t size)
@@ -81,18 +85,42 @@ static uint8_t *take_spare(Pool *p, uint64_t size)
     if (p->spare[i].size == size)
     {
       uint8_t *dev = p->spare[i].dev;
+      p->spare_bytes -= p->spare[i].size;
       p->spare[i] = p->spare[--p->n_spare];
       return dev;
     }
   return NULL;
 }
 
+static void drop_spare(Pool *p)
+{
+  const Spare x = p->spare[--p->n_spare];
+  p->spare_bytes -= x.size;
+  release_memory(p, x.dev, x.size);
+}
+
+static void pin_add(Pool *p, uint32_t unit)
+{
+  p->pin_pos[unit] = (uint32_t)p->n_pinned;
+  p->pinned[p->n_pinned++] = unit;
+}
+
+static void pin_del(Pool *p, uint32_t unit)
+{
+  const uint32_t pos = p->pin_pos[unit];
+  const uint32_t last = p->pinned[--p->n_pinned];
+  p->pinned[pos] = last;
+  p->pin_pos[last] = pos;
+}
+
 /* a pinned unit gone: cold, its memory the caller's */
 static uint8_t *unpin(Pool *p, Slot *s)
 {
+  const uint32_t unit = (uint32_t)(s - p->s);
   uint8_t *dev = s->dev;
   s->dev = NULL, s->state = POOL_COLD;
-  emit(p, POOL_EV_UNPIN, (uint32_t)(s - p->s), s->size);
+  pin_del(p, unit);
+  emit(p, POOL_EV_UNPIN, unit, s->size);
   return dev;
 }
 
@@ -105,7 +133,7 @@ typedef struct Reach
 
 /* when a unit is wanted for room's choice: its next, or - past it, not wanted then (a decode's expert not picked again)
    - stale: after every unit still wanted, so the first to go */
-static uint64_t when(const Pool *p, const Slot *c) { return c->next >= p->now ? c->next : UINT64_MAX; }
+static uint64_t when(const Pool *p, const Slot *c) { return !c->stale && c->next >= p->now ? c->next : UINT64_MAX; }
 
 static bool may_go(const Pool *p, const Slot *c, Reach r)
 {
@@ -117,10 +145,10 @@ static bool may_go(const Pool *p, const Slot *c, Reach r)
 static Slot *furthest(Pool *p, Reach r, uint64_t size)
 {
   Slot *last = NULL;
-  for (size_t i = 0; i < p->n; i++)
+  for (size_t i = 0; i < p->n_pinned; i++)
   {
-    Slot *c = &p->s[i];
-    if (c->state == POOL_PINNED && may_go(p, c, r) && (!size || c->size == size) &&
+    Slot *c = &p->s[p->pinned[i]];
+    if (may_go(p, c, r) && (!size || c->size == size) &&
         (!last || when(p, c) > when(p, last) || (when(p, c) == when(p, last) && c->released < last->released)))
       last = c;
   }
@@ -130,18 +158,19 @@ static Slot *furthest(Pool *p, Reach r, uint64_t size)
 /* the bytes no room can be made from: units reading, or pinned and out of room's reach */
 static uint64_t kept(const Pool *p, Reach r)
 {
-  uint64_t k = 0;
-  for (size_t i = 0; i < p->n; i++)
+  uint64_t k = p->reading_bytes;
+  for (size_t i = 0; i < p->n_pinned; i++)
   {
-    const Slot *c = &p->s[i];
-    k += c->state == POOL_READING || (c->state == POOL_PINNED && !may_go(p, c, r)) ? c->size : 0;
+    const Slot *c = &p->s[p->pinned[i]];
+    if (!may_go(p, c, r))
+      k += c->size;
   }
   return k;
 }
 
-/* memory for `s`: a spare of its size, else room (spares freed, then the furthest of the units in reach) and the
-   allocator's - which, refusing, gets more room the same way until it fits. NULL when it cannot fit (nothing changed)
-   or nothing more can go (spares and units may have gone for its room) */
+/* memory for `s`: a spare of its size, else room (dead spares freed if they cover the budget, else same-size reuse or
+   spares then the furthest of the units in reach) and the allocator's - which, refusing, gets more room the same way
+   until it fits. NULL when it cannot fit (nothing changed) or nothing more can go */
 static uint8_t *room(Pool *p, const Slot *s, Reach r)
 {
   uint8_t *dev = take_spare(p, s->size);
@@ -149,6 +178,13 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
     return dev;
   if (p->bytes + s->size <= p->budget && (dev = p->slots.alloc(s->size, p->slots.ctx)))
     return p->bytes += s->size, dev;
+  if (p->n_spare && p->bytes - p->spare_bytes + s->size <= p->budget)
+  {
+    while (p->n_spare && p->bytes + s->size > p->budget)
+      drop_spare(p);
+    if (p->bytes + s->size <= p->budget && (dev = p->slots.alloc(s->size, p->slots.ctx)))
+      return p->bytes += s->size, dev;
+  }
   Slot *same = furthest(p, r, s->size); /* its memory reused as it is: no hole to find */
   if (same)
     return unpin(p, same);
@@ -158,8 +194,7 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
   {
     if (p->n_spare)
     {
-      const Spare x = p->spare[--p->n_spare];
-      release_memory(p, x.dev, x.size);
+      drop_spare(p);
       continue;
     }
     Slot *v = furthest(p, r, 0); /* one exists: kept() counted every unit that cannot go */
@@ -178,8 +213,7 @@ static uint8_t *room(Pool *p, const Slot *s, Reach r)
     }
     if (p->n_spare)
     {
-      const Spare x = p->spare[--p->n_spare];
-      release_memory(p, x.dev, x.size);
+      drop_spare(p);
       continue;
     }
     Slot *v = furthest(p, r, 0);
@@ -197,7 +231,8 @@ static void begin_read(Pool *p, Slot *s, uint8_t *dev, uint64_t need)
   void *dst[POOL_PARTS] = {0};
   for (int k = 0; k < s->u.n_parts; k++)
     dst[k] = dev + s->off[k];
-  s->dev = dev, s->state = POOL_READING, s->fresh = true, s->released = 0, p->reading++; /* no place from its past */
+  s->dev = dev, s->state = POOL_READING, s->fresh = true, s->stale = false, s->released = 0;
+  p->reading++, p->reading_bytes += s->size; /* no place from its past */
   emit(p, POOL_EV_READ, (uint32_t)(s - p->s), s->size);
   p->fetcher.fetch((uint32_t)(s - p->s), s->read, s->u.n_parts, dst, need, p->fetcher.ctx);
 }
@@ -221,7 +256,27 @@ uint64_t pool_unit_bytes(const PoolUnit *u, uint64_t read_align)
   return b;
 }
 
-static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
+typedef struct FdSize
+{
+  int fd;
+  uint64_t size;
+} FdSize;
+
+static bool fd_size(int fd, FdSize *cache, size_t *n_cache, size_t cap, uint64_t *out)
+{
+  for (size_t i = 0; i < *n_cache; i++)
+    if (cache[i].fd == fd)
+      return *out = cache[i].size, true;
+  struct stat st;
+  if (fstat(fd, &st) != 0 || st.st_size < 0)
+    return false;
+  if (*n_cache < cap)
+    cache[(*n_cache)++] = (FdSize){fd, (uint64_t)st.st_size};
+  *out = (uint64_t)st.st_size;
+  return true;
+}
+
+static bool check_unit(Slot *s, size_t i, uint64_t align, FdSize *cache, size_t *n_cache, size_t cap, char *err)
 {
   if (s->u.n_parts < 1 || s->u.n_parts > POOL_PARTS)
   {
@@ -231,9 +286,8 @@ static bool check_unit(Slot *s, size_t i, uint64_t align, char *err)
   for (int k = 0; k < s->u.n_parts; k++)
   {
     const PoolRange *r = &s->u.part[k];
-    struct stat st;
-    if (fstat(r->fd, &st) != 0 || r->bytes == 0 || r->offset >= (uint64_t)st.st_size ||
-        r->bytes > (uint64_t)st.st_size - r->offset)
+    uint64_t fsz = 0;
+    if (!fd_size(r->fd, cache, n_cache, cap, &fsz) || r->bytes == 0 || r->offset >= fsz || r->bytes > fsz - r->offset)
     {
       osmos_fail(err, "unit %zu part %d: 0 bytes, past its file, or a file that cannot be read", i, k);
       return false;
@@ -257,18 +311,23 @@ Pool *pool_create(const PoolUnit *units, size_t n_units, uint64_t budget, Slots 
   if (read_align & (read_align - 1))
     return osmos_fail(err, "a read alignment of %llu: not a power of two", (unsigned long long)read_align), NULL;
   Pool *p = calloc(1, sizeof *p);
-  if (!p || !(p->s = calloc(n_units ? n_units : 1, sizeof *p->s)))
+  const size_t cap = n_units ? n_units : 1;
+  if (!p || !(p->s = calloc(cap, sizeof *p->s)) || !(p->pinned = malloc(cap * sizeof *p->pinned)) ||
+      !(p->pin_pos = malloc(cap * sizeof *p->pin_pos)))
   {
-    free(p);
+    if (p)
+      free(p->pinned), free(p->pin_pos), free(p->s), free(p);
     osmos_fail(err, "out of memory");
     return NULL;
   }
   p->budget = budget, p->slots = slots, p->fetcher = fetcher, p->on_event = on_event, p->event_arg = event_arg;
+  FdSize fcache[64];
+  size_t n_fcache = 0;
   for (size_t i = 0; i < n_units; i++)
   {
     Slot *s = &p->s[i];
     s->u = units[i];
-    const bool fits = check_unit(s, i, read_align, err) && s->size <= budget;
+    const bool fits = check_unit(s, i, read_align, fcache, &n_fcache, 64, err) && s->size <= budget;
     if (!fits && !err[0])
       osmos_fail(err, "unit %zu: %llu bytes, more than the budget", i, (unsigned long long)s->size);
     if (!fits)
@@ -293,11 +352,10 @@ void pool_destroy(Pool *p)
       release_memory(p, s->state == POOL_PINNED ? unpin(p, s) : s->dev, size);
     }
   while (p->n_spare)
-  {
-    const Spare x = p->spare[--p->n_spare];
-    release_memory(p, x.dev, x.size);
-  }
+    drop_spare(p);
   free(p->spare);
+  free(p->pinned);
+  free(p->pin_pos);
   free(p->s);
   free(p);
 }
@@ -339,7 +397,7 @@ void pool_want(Pool *p, uint32_t unit, uint64_t next)
   Slot *s = &p->s[unit];
   if (s->state != POOL_COLD)
   {
-    s->next = next;
+    s->next = next, s->stale = false;
     if (s->state == POOL_READING && p->fetcher.need)
       p->fetcher.need(unit, want_need(next), p->fetcher.ctx);
     return;
@@ -360,7 +418,8 @@ PoolPin pool_place(Pool *p, uint32_t unit, const void *dev[POOL_PARTS])
     emit(p, POOL_EV_REFUSED, unit, s->size);
     return POOL_FULL;
   }
-  s->dev = mem, s->state = POOL_PINNED, s->fresh = true, s->released = 0, s->holds = 1;
+  s->dev = mem, s->state = POOL_PINNED, s->fresh = true, s->stale = false, s->released = 0, s->holds = 1;
+  pin_add(p, unit);
   emit(p, POOL_EV_PIN, unit, s->size);
   fill(s, dev);
   return POOL_OK;
@@ -381,10 +440,11 @@ void pool_ready(Pool *p, uint32_t unit, bool ok)
   if (!p || unit >= p->n || p->s[unit].state != POOL_READING)
     return;
   Slot *s = &p->s[unit];
-  p->reading--;
+  p->reading--, p->reading_bytes -= s->size;
   if (ok)
   {
     s->state = POOL_PINNED;
+    pin_add(p, unit);
     emit(p, POOL_EV_PIN, unit, s->size);
     return;
   }
@@ -407,7 +467,7 @@ void pool_release(Pool *p, uint32_t unit, uint64_t next)
     return;
   Slot *s = &p->s[unit];
   if (--s->holds == 0)
-    s->released = ++p->clock, s->next = next, s->fresh = false;
+    s->released = ++p->clock, s->next = next, s->fresh = false, s->stale = false;
 }
 
 void pool_now(Pool *p, uint64_t now)
@@ -422,7 +482,7 @@ void pool_pass(Pool *p, uint32_t unit)
     return;
   Slot *s = &p->s[unit];
   if (--s->holds == 0 && s->fresh) /* read for this hold: stale, the least recently released */
-    s->released = 0, s->next = 0, s->fresh = false;
+    s->released = 0, s->next = 0, s->fresh = false, s->stale = true;
 }
 
 PoolState pool_state(const Pool *p, uint32_t unit)

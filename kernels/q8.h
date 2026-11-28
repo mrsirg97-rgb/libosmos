@@ -60,7 +60,7 @@ constexpr int8_t kMxfp4Lut[16] = {0, 1, 2, 3, 4, 6, 8, 12, 0, -1, -2, -3, -4, -6
 constexpr Lut16 kIq4nlTab = lut16(kIq4nlLut), kMxfp4Tab = lut16(kMxfp4Lut);
 __device__ inline int table4(uint32_t w, int sh, const Lut16& t) {
   const uint32_t n = (w >> sh) & 0x0F0F0F0Fu, sel = n & 0x07070707u;
-  const uint32_t lo = __builtin_amdgcn_perm(t.w[1], t.w[0], sel), hi = __builtin_amdgcn_perm(t.w[3], t.w[2], sel);
+  const uint32_t lo = osmos_perm(t.w[1], t.w[0], sel), hi = osmos_perm(t.w[3], t.w[2], sel);
   const uint32_t m = ((n >> 3) & 0x01010101u) * 0xFFu;
   return (int) ((hi & m) | (lo & ~m));
 }
@@ -311,12 +311,18 @@ template <> __device__ inline void codes<quant::kIQ4_XS>(const uint8_t* b, int j
 // a block's exact integers against x: g[h] its half h's codes' dot (16 values), q[k] x's quarter k's sum (8 values).
 // every type's block sum is combine<T>'s float arithmetic on them
 template <quant::Type T>
-constexpr bool kQuarters = kGeneric<T> || T == quant::kQ3_K || T == quant::kQ2_K || T == quant::kQ4_K ||
-                           T == quant::kIQ1_M || T == quant::kIQ1_S;
+constexpr bool kPlainZeroOff = T == quant::kQ8_0 || T == quant::kIQ4_NL || T == quant::kMXFP4 ||
+                               T == quant::kNVFP4 || T == quant::kIQ4_XS;
+template <quant::Type T>
+constexpr bool kQuarters = (kGeneric<T> && !kPlainZeroOff<T>) || T == quant::kQ3_K || T == quant::kQ2_K ||
+                           T == quant::kQ4_K || T == quant::kIQ1_M || T == quant::kIQ1_S;
 
 // the block's sum before x's scale, from its integers: each half's, in the contract's order
 template <quant::Type T>
 __device__ inline float combine(const Codes& c, const int* g, const int* q) {
+  if constexpr (kPlainZeroOff<T>) {  // off == 0, mh == 0: dh * g (no quarter x sums)
+    return c.dh[0] * (float) g[0] + c.dh[1] * (float) g[1];
+  }
   if constexpr (kGeneric<T>) {  // each half: dh (its codes' dot - off x's sum) + mh x's sum
     float r = 0.0f;
     for (int h = 0; h < 2; h++) {
@@ -420,8 +426,11 @@ void group_tok_kernel(const uint8_t* const* __restrict__ w,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (LO != kSelAll)
+  if constexpr (LO != kSelAll) {
     if (!selected<LO, NT>(cnt[m])) return;  // the whole block
+  } else if (cnt[m] <= 0) {
+    return;
+  }
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint8_t* rb = w[m] + (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   uint64_t xr[NT];
@@ -464,8 +473,11 @@ void gate_up_kernel(const uint8_t* const* __restrict__ wg,
   constexpr int G = kWave / L;
   const int lane = threadIdx.x % kWave, ll = lane % L;
   const uint32_t m = blockIdx.y, row = (blockIdx.x * kWavesPerBlock + threadIdx.x / kWave) * G + lane / L;
-  if constexpr (LO != kSelAll)
+  if constexpr (LO != kSelAll) {
     if (!selected<LO, NT>(cnt[m])) return;  // the whole block
+  } else if (cnt[m] <= 0) {
+    return;
+  }
   const uint32_t nblk = cols / LANE_Q8_VALUES, r0 = (uint32_t) xrow[m];
   const uint64_t off = (uint64_t) (row < rows ? row : 0) * row_bytes<T>(cols);
   const uint8_t *rg = wg[m] + off, *ru = wu[m] + off;

@@ -31,6 +31,7 @@ Q35SeqBytes q35_seq_bytes(const Q35Geometry *g)
 
 static bool reset(Q35Seq *s)
 {
+  (void)lsa_closer_join(s->f->closer);
   const Q35Geometry *g = &s->f->w->geo;
   const Q35SeqBytes sb = q35_seq_bytes(g);
   s->cur = 0, s->back = 0; /* slot 0 the latest, zeroed: the others not read until a step writes them */
@@ -71,6 +72,7 @@ void q35_seq_destroy(Q35Seq *s)
 {
   if (!s)
     return;
+  (void)lsa_closer_join(s->f->closer);
   gpu_bufs_free(&s->bufs); /* every GPU buffer it made: from its record */
   free(s);
 }
@@ -181,6 +183,7 @@ bool q35_seq_save_to(const Q35Seq *s, StateSink sink, void *ctx, char err[OSMOS_
 {
   if (!s || !sink)
     return osmos_fail(err, "no sequence or sink");
+  (void)lsa_closer_join(s->f->closer);
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   Header h;
@@ -207,6 +210,7 @@ bool q35_seq_load_from(Q35Seq *s, uint64_t bytes, StateSource src, void *ctx, ch
 {
   if (!s || !src)
     return osmos_fail(err, "no sequence or source");
+  (void)lsa_closer_join(s->f->closer);
   Header h;
   if (bytes < sizeof h + sizeof(uint64_t) || !src(ctx, &h, sizeof h))
     return refuse(s, err, "a state shorter than its header, or its source failed");
@@ -239,6 +243,7 @@ bool q35_seq_mark_save(const Q35Seq *s, void *out, uint64_t bytes, char err[OSMO
 {
   if (!s || !out || bytes != q35_seq_mark_bytes(s))
     return osmos_fail(err, "no sequence, or a mark's room not its size");
+  (void)lsa_closer_join(s->f->closer);
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step (its states part written): no mark of it");
   if (hipDeviceSynchronize() != hipSuccess)
@@ -257,6 +262,7 @@ bool q35_seq_mark_load(Q35Seq *s, const void *in, uint64_t bytes, char err[OSMOS
 {
   if (!s || !in || bytes != q35_seq_mark_bytes(s))
     return osmos_fail(err, "no sequence, or a mark not its size");
+  (void)lsa_closer_join(s->f->closer);
   Header h;
   memcpy(&h, in, sizeof h);
   const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, q35_identity(s->f));

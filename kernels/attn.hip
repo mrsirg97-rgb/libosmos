@@ -475,6 +475,7 @@ __global__ __launch_bounds__(kDThreads) void index_score_dot4_kernel(
 
 // a float's order as an unsigned's
 __device__ inline uint32_t order(float f) {
+  if (isnan(f)) return 0u;
   const uint32_t u = __float_as_uint(f);
   return (u & 0x80000000u) ? ~u : u | 0x80000000u;
 }
@@ -673,9 +674,14 @@ extern "C" bool ops_index_score_rows(const float* q, const void* keys, uint32_t 
   if (head_dim % kIxStep || keys_fmt > KV_FP4_POW2 || head_dim % kv_block((KvFmt) keys_fmt)) return false;
   constexpr int threads = (kIxHeads * 1 / kIxR) * (kIxRows / kIxC);
   const uint32_t tiles = (uint32_t) (((uint64_t) list_stride * block + kIxRows - 1) / kIxRows);
-  index_score_kernel<1, true, true><<<dim3(tiles, n_tok), threads, 0, st(stream)>>>(
-      q, (const uint8_t*) keys, keys_fmt, w, pos, ratio, heads, head_dim, n_tok, score, stride, list, n_list,
-      list_stride, block);
+  if (keys_fmt == KV_FP4_POW2)
+    index_score_kernel<1, true, true><<<dim3(tiles, n_tok), threads, 0, st(stream)>>>(
+        q, (const uint8_t*) keys, keys_fmt, w, pos, ratio, heads, head_dim, n_tok, score, stride, list, n_list,
+        list_stride, block);
+  else
+    index_score_kernel<1, true, false><<<dim3(tiles, n_tok), threads, 0, st(stream)>>>(
+        q, (const uint8_t*) keys, keys_fmt, w, pos, ratio, heads, head_dim, n_tok, score, stride, list, n_list,
+        list_stride, block);
   return ok();
 }
 

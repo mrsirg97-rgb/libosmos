@@ -10,6 +10,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/quant.h"
 #include "osmos/model/moe_route.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/err.h"
 
 /* every Engram row the step reads - each sub-batch's tokens' rows for each of its Engram layers (the layers ascending:
@@ -20,7 +21,8 @@ bool fwd_engram_issue(Forward *f, char *err)
 {
   const Geometry *g = f->g;
   const uint32_t cols = (uint32_t)g->engram_cols, hd = (uint32_t)g->engram_head_dim;
-  uint64_t at = 0, rb = 0; /* (a step that failed or stopped before its Engram layers: rowstream_issue settles it) */
+  (void)rowstream_wait(&f->eg_rs); /* ensure any prior aborted step's readers are done before overwriting eg_off */
+  uint64_t at = 0, rb = 0;
   for (uint32_t k = 0; k < f->n_sub; k++)
     for (int l = 0, nth = 0; l < f->n_layers; l++)
     {
@@ -69,21 +71,6 @@ bool fwd_engram(Forward *f, int l, int nth, char *err)
   return ok || osmos_fail(err, "a GPU call failed (Engram)");
 }
 
-/* a bump allocator over the pinned staging region and its device copy: a table's host and device addresses */
-typedef struct Carve
-{
-  uint8_t *host, *dev;
-  uint64_t used;
-} Carve;
-
-static void *carve(Carve *c, uint64_t bytes, void **dev)
-{
-  const uint64_t at = (c->used + 15) & ~(uint64_t)15;
-  c->used = at + bytes;
-  *dev = c->dev + at;
-  return c->host + at;
-}
-
 static int cmp_expert(const void *a, const void *b)
 {
   const int32_t *x = a, *y = b;
@@ -125,7 +112,7 @@ typedef struct Rest
   uint32_t n, *dx, *dy;
 } Rest;
 
-static Rest rest_entries(Carve *c, uint32_t nd, const int32_t *cnt_j, const uint32_t *nq, const void *const *w0,
+static Rest rest_entries(MoeStage *c, uint32_t nd, const int32_t *cnt_j, const uint32_t *nq, const void *const *w0,
                          const void *const *w1, uint32_t nmat, const uint32_t *slot0, const uint32_t *base, uint32_t xs,
                          uint32_t ys)
 {
@@ -139,10 +126,12 @@ static Rest rest_entries(Carve *c, uint32_t nd, const int32_t *cnt_j, const uint
     }
   qsort(key, r.n, sizeof *key, cmp_u64);
   const uint32_t room = r.n ? r.n : 1;
-  const void **tab = carve(c, nmat * room * sizeof *tab, (void **)&r.dtab);
+  const void **tab = moe_stage_carve(c, nmat * room * sizeof *tab, (void **)&r.dtab);
   uint32_t *x, *y;
-  r.cnt = carve(c, room * 4, (void **)&r.dcnt);
-  x = carve(c, room * 4, (void **)&r.dx), y = carve(c, room * 4, (void **)&r.dy);
+  r.cnt = moe_stage_carve(c, room * 4, (void **)&r.dcnt);
+  x = moe_stage_carve(c, room * 4, (void **)&r.dx), y = moe_stage_carve(c, room * 4, (void **)&r.dy);
+  if (!tab || !r.cnt || !x || !y) /* the staging buffer overflowed: r.cnt NULL, the caller's refusal (never n == 0) */
+    return (Rest){0};
   for (uint32_t p = 0; p < r.n; p++)
   {
     const uint32_t j = (uint32_t)(key[p] >> 16 & 0xFFFFFF), q = (uint32_t)(key[p] & 0xFFFF);
@@ -242,23 +231,6 @@ bool fwd_moe(Forward *f, int l, char *err)
   for (uint32_t m = 0; m < P; m++)
     f->picks[(uint32_t)l * E + (uint32_t)ids[m]]++;
   const uint32_t nd = rt.runs, slots = rt.slots, *base = rt.start, *slot0 = rt.slot0, *row_of = rt.row;
-  uint32_t ne = 0; /* the tables' entries: an expert a part of at most MM_MAX_TOKENS of its pairs (mm_group's) */
-  for (uint32_t j = 0; j < nd; j++)
-    ne += (rt.count[j] + MM_MAX_TOKENS - 1) / MM_MAX_TOKENS;
-  /* the layer's tables, carved from one pinned region and sent in one copy */
-  Carve c = {f->r_up, (uint8_t *)b->up, 0};
-  const void **tab, **dtab;
-  int32_t *cnt, *order, *gidx, *hidx, *pidx, *dcnt, *dorder, *dgidx, *dhidx, *dpidx;
-  uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
-  tab = carve(&c, 3 * ne * sizeof *tab, (void **)&dtab), cnt = carve(&c, ne * 4, (void **)&dcnt);
-  order = carve(&c, P * 4, (void **)&dorder), pidx = carve(&c, P * 4, (void **)&dpidx);
-  /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
-  gidx = carve(&c, slots * 4, (void **)&dgidx), hidx = carve(&c, slots * 4, (void **)&dhidx);
-  xg = carve(&c, ne * 4, (void **)&dxg), yg = carve(&c, ne * 4, (void **)&dyg);
-  xd = carve(&c, ne * 4, (void **)&dxd), yd = carve(&c, ne * 4, (void **)&dyd);
-  memcpy(gidx, rt.gidx, slots * 4), memcpy(hidx, rt.hidx, slots * 4);
-  for (uint32_t r = 0; r < P; r++)
-    pidx[r] = (int32_t)rt.by[r];
   uint32_t unit_of[OPS_MAX_EXPERTS];
   for (uint32_t j = 0; j < nd; j++)
   {
@@ -279,6 +251,30 @@ bool fwd_moe(Forward *f, int l, char *err)
     fwd_probe(f, "moe_out", l, f->at, b->moe, (uint64_t)n * D, false);
     return true;
   }
+  uint32_t ne = 0; /* the tables' entries: an expert a part of at most MM_MAX_TOKENS of its pairs (mm_group's) */
+  for (uint32_t j = 0; j < nd; j++)
+    ne += (rt.count[j] + MM_MAX_TOKENS - 1) / MM_MAX_TOKENS;
+  /* the layer's tables, carved from one pinned region and sent in one copy */
+  MoeStage c = {f->r_up, (uint8_t *)b->up, 0, FWD_UP_BYTES((uint64_t)f->max_tokens * g->n_used)};
+  const void **tab, **dtab;
+  int32_t *cnt, *order, *gidx, *hidx, *pidx, *dcnt, *dorder, *dgidx, *dhidx, *dpidx;
+  uint32_t *xg, *yg, *xd, *yd, *dxg, *dyg, *dxd, *dyd;
+  tab = moe_stage_carve(&c, 3 * ne * sizeof *tab, (void **)&dtab);
+  cnt = moe_stage_carve(&c, ne * 4, (void **)&dcnt);
+  order = moe_stage_carve(&c, P * 4, (void **)&dorder);
+  pidx = moe_stage_carve(&c, P * 4, (void **)&dpidx);
+  /* an expert's slots: its tokens, padded to whole tiles - at most P + (MM_TILE - 1) an expert */
+  gidx = moe_stage_carve(&c, slots * 4, (void **)&dgidx);
+  hidx = moe_stage_carve(&c, slots * 4, (void **)&dhidx);
+  xg = moe_stage_carve(&c, ne * 4, (void **)&dxg);
+  yg = moe_stage_carve(&c, ne * 4, (void **)&dyg);
+  xd = moe_stage_carve(&c, ne * 4, (void **)&dxd);
+  yd = moe_stage_carve(&c, ne * 4, (void **)&dyd);
+  if (!tab || !cnt || !order || !pidx || !gidx || !hidx || !xg || !yg || !xd || !yd)
+    return osmos_fail(err, "the experts' staging buffer overflowed");
+  memcpy(gidx, rt.gidx, slots * 4), memcpy(hidx, rt.hidx, slots * 4);
+  for (uint32_t r = 0; r < P; r++)
+    pidx[r] = (int32_t)rt.by[r];
   /* the entries (an expert's parts of MM_MAX_TOKENS: its slots and rows from part q's first) in ascending count,
      then expert, then part: group()'s runs of the same column tiles contiguous */
   int32_t cnt_j[OPS_MAX_EXPERTS];
@@ -320,6 +316,8 @@ bool fwd_moe(Forward *f, int l, char *err)
     gu = rest_entries(&c, nd, cnt_j, nq, ex_g, ex_u, 2, slot0, base, D, FF);
   if (ok && parts && npu_dn)
     dn = rest_entries(&c, nd, cnt_j, nq, ex_d, NULL, 1, slot0, base, FF, D);
+  if (ok && (!gu.cnt || !dn.cnt)) /* a table not staged: refused, never its entries skipped */
+    return osmos_fail(err, "the experts' staging buffer overflowed");
   const bool gu_on = parts && npu_gu, dn_on = parts && npu_dn;
   ok = ok && fwd_put_async(b->up, f->r_up, c.used) && ops_gather_rows(b->rwp, b->rw, dpidx, P, 1, NULL) &&
        mm_x16_rows(b->xf, D, dgidx, slots, D, b->xe16, b->overflow, NULL) &&

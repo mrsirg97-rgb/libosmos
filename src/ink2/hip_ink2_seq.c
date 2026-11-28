@@ -164,8 +164,18 @@ bool ink2_seq_rollback(Ink2Seq *s, uint32_t n)
     s->kw[l].held -= n, s->vw[l].held -= n;
   }
   s->pos -= (int32_t)n, s->reach -= n;
-  if (s->mend > s->pos) /* the drafter's context ends with the sequence */
-    s->mend = s->pos;
+  if (s->mend > s->pos)
+  {
+    /* the drafter's context cut to the position: a local layer's ring (window + 2 blocks) still holds the window's
+       rows past a rollback of a block or less (a verify's); a deeper one's may be overwritten - seeded again from
+       here. mlast the old end's either way: no draft until the next seed */
+    const Ink2Mtp *m = s->f->mtp;
+    if (!m || s->mend - s->pos > m->block || s->mfrom >= s->pos)
+      s->mfrom = s->mend = 0;
+    else
+      s->mend = s->pos;
+    s->mlast_ok = false;
+  }
   return true;
 }
 
@@ -260,7 +270,7 @@ bool ink2_seq_reset(Ink2Seq *s, char err[OSMOS_ERR])
     s->kw[l].held = s->vw[l].held = 0;
   }
   s->pos = 0, s->reach = 0, s->prompt_end = 0, s->failed = !ok;
-  s->mfrom = s->mend = 0, s->tap_step = 0;
+  s->mfrom = s->mend = 0, s->mlast_ok = false, s->tap_step = 0;
   return ok;
 }
 
@@ -277,7 +287,7 @@ static void settle(Ink2Seq *s, int32_t pos, bool mark)
       s->kw[l].held = s->vw[l].held = (uint32_t)pos;
   }
   s->pos = pos, s->reach = 0, s->prompt_end = 0, s->failed = false;
-  s->mfrom = s->mend = 0; /* the drafter's context not saved: seeded again from here */
+  s->mfrom = s->mend = 0, s->mlast_ok = false; /* the drafter's context not saved: seeded again from here */
   s->tap_step = 0;        /* no step's taps its own: a seed waits for its next step */
 }
 
@@ -302,15 +312,18 @@ bool ink2_seq_load_from(Ink2Seq *s, uint64_t bytes, StateSource src, void *ctx, 
     return osmos_fail(err, "no sequence");
   Head h;
   if (bytes < sizeof h || !src(ctx, &h, sizeof h))
-    return settle(s, 0, false), osmos_fail(err, "a state too short, or its source failed");
+    return (void)ink2_seq_reset(s, NULL), osmos_fail(err, "a state too short, or its source failed");
   const char *bad = state_head_check(h.magic, STATE_MAGIC, h.version, STATE_VERSION, h.identity, ink2_identity(s->f));
   if ((bad = bad ? bad : state_pos_check(h.pos, s->f->max_ctx)))
-    return settle(s, 0, false), osmos_fail(err, "%s", bad);
+    return (void)ink2_seq_reset(s, NULL), osmos_fail(err, "%s", bad);
   if (bytes != bytes_at(s, h.pos, false))
-    return settle(s, 0, false), osmos_fail(err, "a state not its position's size");
+    return (void)ink2_seq_reset(s, NULL), osmos_fail(err, "a state not its position's size");
   Part p[MAX_PARTS];
   const bool ok = !state_parts_load(&h, sizeof h, p, parts(s, h.pos, false, true, p), src, ctx);
-  settle(s, ok ? h.pos : 0, false);
+  if (ok)
+    settle(s, h.pos, false);
+  else
+    (void)ink2_seq_reset(s, NULL);
   return ok || osmos_fail(err, "a damaged state, or its source or a GPU copy failed (the load)");
 }
 

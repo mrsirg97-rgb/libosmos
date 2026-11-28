@@ -384,6 +384,52 @@ int main(void)
   printf("  a state handed over, not copied: RAM's take-back the buffer put; streamed straight to the folder (none of "
          "it in RAM) and taken back in pieces, a save failing part way leaving nothing, no folder not kept\n");
 
+  /* a put whose trim fails to write RAM's least recently used: the new one not kept, the folder's untouched (0.19.0
+     review: the trim's drop moved the new one out of the last index, and the last - a folder entry - was dropped) */
+  if (geteuid() != 0) /* (root writes a read-only folder) */
+  {
+    clear();
+    SlotsOptions rw = opts(dir, 8, 0, 0, 7);
+    rw.ram_bytes = 2 * STATE;
+    assert((s = slots_create(&rw, err)));
+    put(s, 1, N, STATE, true), put(s, 2, N, STATE * 3, true), put(s, 3, N, STATE * 3, true); /* RAM: 1; folder: 2, 3 */
+    assert(slots_in_ram(s) == 1 && slots_in_dir(s) == 2);
+    assert(chmod(dir, 0500) == 0);
+    int32_t *t8 = conv(8, N);
+    bool kept8 = true;
+    assert(!slots_put(s, t8, N, state(8, 2 * STATE), 2 * STATE, &kept8, err) && !kept8);
+    assert(chmod(dir, 0700) == 0);
+    assert(slots_in_ram(s) == 0 && slots_in_dir(s) == 2);
+    for (int k = 2; k <= 3; k++)
+    {
+      int32_t *p = conv(k, N + 50);
+      assert(slots_find(s, p, N + 50, 0, &len) >= 0);
+      free(p);
+    }
+    free(t8);
+    slots_destroy(s);
+    printf("  a put whose trim fails: the new one not kept, the folder's kept\n");
+  }
+
+  /* two identities sharing one folder with identical tokens do not overwrite each other's files */
+  clear();
+  SlotsOptions id_a = opts(dir, 1, 0, 0, 101), id_b = opts(dir, 1, 0, 0, 202);
+  Slots *sa = slots_create(&id_a, err), *sb = slots_create(&id_b, err);
+  assert(sa && sb);
+  put(sa, 1, N, STATE, true);
+  assert(slots_flush(sa, err));
+  int32_t *t_same = conv(1, N);
+  bool kept_b = false;
+  assert(slots_put(sb, t_same, N, state(2, STATE), STATE, &kept_b, err) && kept_b && slots_flush(sb, err));
+  free(t_same);
+  assert(files(".bin") == 2 && files(".meta") == 2);
+  slots_destroy(sa), slots_destroy(sb);
+  assert((sa = slots_create(&id_a, err)) && slots_in_dir(sa) == 1);
+  assert((sb = slots_create(&id_b, err)) && slots_in_dir(sb) == 1);
+  take_back(sa, 1, N, STATE);
+  slots_destroy(sa), slots_destroy(sb);
+  printf("  shared folder: two identities with identical token prefixes keep distinct slot files\n");
+
   char cmd[600];
   snprintf(cmd, sizeof cmd, "rm -rf %s", dir);
   assert(system(cmd) == 0);

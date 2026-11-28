@@ -599,6 +599,43 @@ static void test_pass_fresh(int fd)
   printf("  pass: a unit read for it has no place from its past\n");
 }
 
+/* pool_pass when p->now == 0 still marks a fresh unit stale so it goes before a unit released at time 0;
+   and a dead spare of another size is freed before evicting a live same-size unit when spares cover budget */
+static void test_pass_zero_and_spares(int fd)
+{
+  char err[OSMOS_ERR] = "";
+  const PoolUnit u[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 8 * KB, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 16 * KB, 4 * KB}}, .n_parts = 1}};
+  Pool *p = make(u, 3, 8 * KB, err);
+  assert(p);
+  const void *dev[POOL_PARTS];
+  assert(pool_pin(p, 0, dev) == POOL_WAIT), finish(p, find_read(0), true), pool_release(p, 0, 0);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), true), pool_pass(p, 1); /* p->now is still 0 */
+  /* 1 was passed (stale), 0 was released at 0 (not stale): 2 takes 1's room, keeping 0 */
+  assert(pool_pin(p, 2, dev) == POOL_WAIT && pool_state(p, 1) == POOL_COLD && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(2), true), pool_release(p, 2, 0);
+  check(p, u, 3, 8 * KB);
+  pool_destroy(p);
+  assert(mem.n == 0);
+
+  /* dead spare of another size freed before evicting a live same-size unit */
+  const PoolUnit s[] = {{.part = {{fd, 0, 4 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 8 * KB, 2 * KB}}, .n_parts = 1},
+                        {.part = {{fd, 16 * KB, 4 * KB}}, .n_parts = 1}};
+  p = make(s, 3, 8 * KB, err);
+  assert(p);
+  assert(pool_pin(p, 0, dev) == POOL_WAIT), finish(p, find_read(0), true), pool_release(p, 0, 10);
+  assert(pool_pin(p, 1, dev) == POOL_WAIT), finish(p, find_read(1), false); /* 2 KiB dead spare; 6 KiB of 8 KiB used */
+  /* 2 (4 KiB) needs 4 KiB; 2 KiB free + 2 KiB dead spare == 4 KiB -> frees spare, keeps live unit 0 */
+  assert(pool_pin(p, 2, dev) == POOL_WAIT && pool_state(p, 0) == POOL_PINNED);
+  finish(p, find_read(2), true), pool_release(p, 2, 20);
+  check(p, s, 3, 8 * KB);
+  pool_destroy(p);
+  assert(mem.n == 0);
+  printf("  pass at now=0 and dead spare before evict: verified\n");
+}
+
 /* a read ahead never held (a prompt's prefetch of an expert not picked) has no place from its past either: once its
    time passes it is the first stale to go */
 static void test_want_fresh(int fd)
@@ -996,6 +1033,7 @@ int main(void)
   test_stale(a);
   test_pass(a);
   test_pass_fresh(a);
+  test_pass_zero_and_spares(a);
   test_want_fresh(a);
   test_unit_bytes(a);
   test_place(a);

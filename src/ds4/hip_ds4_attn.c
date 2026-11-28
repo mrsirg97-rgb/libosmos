@@ -72,10 +72,16 @@ static bool compress_rows(Forward *f, int l, char *err)
   const uint32_t r = (uint32_t)g->compress[l], hd = g->head_dim, D = g->n_embd, n = f->n;
   const uint32_t RD = g->rope_dim, ih = g->ix_head_dim;
   Layer a = {l, r};
-  bool ok = fwd_mat(f, L->comp_kv, fwd_dev(f, L->comp_kv), hd, D, b->x, D, n, r == 1 ? b->lat : b->kvc, hd) &&
-            (r == 1 || (fwd_mat(f, L->comp_gate, fwd_dev(f, L->comp_gate), hd, D, b->x, D, n, b->scg, hd) &&
-                        runs(f, pend_run, &a))) &&
-            ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, n, b->lat, hd, NULL);
+  bool ok = r == 1 ? fwd_mat(f, L->comp_kv, fwd_dev(f, L->comp_kv), hd, D, b->x, D, n, b->lat, hd)
+                   : fwd_mat2(f, L->comp_kv, fwd_dev(f, L->comp_kv), hd, b->kvc, hd, L->comp_gate,
+                              fwd_dev(f, L->comp_gate), hd, b->scg, hd, D, b->x, D, n, false) &&
+                         runs(f, pend_run, &a);
+  bool any_complete = r == 1;
+  for (uint32_t i = 0; !any_complete && i < n; i++)
+    any_complete = (uint32_t)(f->pin->pos[i] + 1) % r == 0;
+  if (!any_complete)
+    return ok || osmos_fail(err, "a GPU call failed (the compressor)");
+  ok = ok && ops_rms(b->lat, hd, hd, F(f, L->comp_norm), g->rms_eps, n, b->lat, hd, NULL);
   for (uint32_t i = 0; i < n; i++) /* a row's first position (a token completing none: unused) */
     f->pin->rpos[l][i] = f->pin->pos[i] + 1 - (int32_t)r;
   ok = ok && fwd_put_async(b->rpos, f->pin->rpos[l], (uint64_t)n * 4);

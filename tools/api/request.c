@@ -18,11 +18,12 @@ const Json *request_effort(const Json *body)
   return eff && eff->type != JSON_NULL ? eff : json_get(json_get(body, "chat_template_kwargs"), "reasoning_effort");
 }
 
-Json *request_tools(const Json *body)
+bool request_tools(const Json *body, Json **out, char err[OSMOS_ERR])
 {
+  *out = NULL;
   const Json *tools = json_get(body, "tools");
   if (!tools || tools->type != JSON_ARRAY || !tools->n)
-    return NULL;
+    return true;
   JsonBuf b = {0};
   json_puts(&b, "[");
   for (size_t i = 0; i < tools->n; i++)
@@ -37,7 +38,10 @@ Json *request_tools(const Json *body)
   char jerr[OSMOS_ERR] = "";
   Json *t = b.oom ? NULL : json_parse_within(b.p, b.n, API_TREE_MAX, NULL, jerr);
   free(b.p);
-  return t;
+  if (!t)
+    return osmos_fail(err, "tools: %s", jerr[0] ? jerr : "out of memory");
+  *out = t;
+  return true;
 }
 
 /* the body's response_format as the schema a template is told to answer by, its JSON into out: nothing for none

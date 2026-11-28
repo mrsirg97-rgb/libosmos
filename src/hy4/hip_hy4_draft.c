@@ -18,6 +18,7 @@
 #include "osmos/gpu/mv.h"
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
+#include "osmos/run/draft.h"
 #include "osmos/gpu/upload.h"
 #include "osmos/model/qtype.h"
 #include "osmos/model/safetensors.h"
@@ -46,8 +47,7 @@ struct Hy4Dfly
   bool q8;           /* the matrices Q8_0 (ggml's rounding of the file's BF16), else as the file holds them */
   uint32_t wtype;    /* the layers' and the correction's matrices' type: QTYPE_Q8_0 or QTYPE_BF16 */
   uint32_t ehtype;   /* the fusion's: QTYPE_Q8_0 or QTYPE_F32 */
-  void *head8;       /* q8: the target's head as Q8_0 for the drafts' picks (NULL: the target's own) */
-  void *head4;       /* the drafts' head as Q4_0 (half head8's reads; NULL: head8's or the target's) */
+  void *head4;       /* q8: the drafts' head as Q4_0 (NULL: f->head8 or the target's output) */
   void **dev; /* the file's tensors on the GPU, by index (the matrices alone) */
   Layer layer[HY4_DFLY_LAYERS];
   float *eh;  /* the fusion's eh_proj, its rows times its gate (F32: gate * (W x) = (gate W) x) */
@@ -324,16 +324,9 @@ bool hy4_dfly_load(Hy4Forward *f, const char *path, bool q8, char err[OSMOS_ERR]
               osmos_fail(err, "DFly2: its shared tensors not read into GPU memory"));
   ledger_host_free(f->ledger, pin);
   const GgufTensor *out = f->w->output;
-  if (ok && q8 && !f->head8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
-  { /* the drafts' head: the target's own as Q8_0 (a draft's precision moves its acceptance, never the output) */
-    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
-    ok = (x && hy4_q8_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head8)) ||
-         osmos_fail(err, "DFly2: the head's Q8_0 copy not made (BF16 heads alone)");
-    free(x);
-  }
   if (ok && q8 && (out->type == QTYPE_BF16 || out->type == QTYPE_F32))
   { /* the engine's (q8) drafts' head Q4_0: a round reads it once a draft */
-    float *x = out->type == QTYPE_BF16 ? tensor_f32(f->w->model, out, &(uint64_t){0}) : NULL;
+    float *x = tensor_f32(f->w->model, out, &(uint64_t){0});
     ok = (x && q4_up(&d->bufs, x, out->dims[1], (uint32_t)out->dims[0], &d->head4)) || osmos_fail(err, "DFly2: the head's Q4_0 copy");
     free(x);
   }
@@ -431,7 +424,7 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          ops_swiglu(d->ga, d->up, d->ff, INFINITY, NULL, R, d->act, f->st) &&
          mat(f, d->wtype, L->ffn_down, D, d->ff, d->act, R, d->y) && ops_add(d->h, d->y, (uint64_t)R * D, f->st);
   }
-  ok = ok && hy4_draft_part(f, 25, &pt) && ops_rms(d->h, D, D, d->final_norm, eps, R, d->z, D, f->st);
+  ok = ok && hy4_draft_part(f, 25, &pt) && ops_rms(d->h + D, D, D, d->final_norm, eps, R - 1, d->z + D, D, f->st);
   /* the chain: draft j from row j's hidden corrected by the token before it (the anchor's, then each draft's) */
   for (uint32_t j = 1; ok && j < R; j++)
   {
@@ -445,21 +438,23 @@ int hy4_seq_draft(Hy4Forward *f, Hy4Seq *s, int32_t y, uint32_t most, float conf
          mat(f, d->wtype, d->corr_down, D, d->corr_ff, d->act, 1, d->c) &&
          ops_add(d->c, d->z + (uint64_t)j * D, D, f->st) && hy4_draft_part(f, 26, &pt) &&
          (d->head4 ? mat(f, QTYPE_Q4_0, d->head4, V, D, d->c, 1, d->logits)
-          : d->head8 || f->head8 ? mat(f, QTYPE_Q8_0, d->head8 ? d->head8 : f->head8, V, D, d->c, 1, d->logits)
-                   : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
+          : f->head8 ? mat(f, QTYPE_Q8_0, f->head8, V, D, d->c, 1, d->logits)
+                     : hy4_mat(f, f->w->output, V, D, d->c, 1, d->logits, false)) &&
          hy4_dfly_pick(d->logits, V, d->pick + (j - 1), d->prob + (j - 1), f->st) && hy4_draft_part(f, 27, &pt);
   }
   ok = ok && hipMemcpyAsync(d->pin_pick, d->pick, most * 4, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipMemcpyAsync(d->pin_prob, d->prob, most * F, hipMemcpyDeviceToHost, f->st) == hipSuccess &&
        hipStreamSynchronize(f->st) == hipSuccess;
   if (!ok)
+  {
+    (void)hipStreamSynchronize(f->st);
     return osmos_fail(err, "DFly2: a GPU call failed (a draft)"), -1;
+  }
   int k = 0;
   float cum = 1.0f;
   for (; k < (int)most; k++)
   {
-    cum *= d->pin_prob[k];
-    if (d->pin_prob[k] < conf_min || cum < cum_min)
+    if (!draft_accept(d->pin_prob[k], conf_min, cum_min, &cum))
       break;
     drafts[k] = d->pin_pick[k], conf[k] = d->pin_prob[k];
   }

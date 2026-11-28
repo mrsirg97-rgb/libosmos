@@ -34,10 +34,11 @@ __global__ __launch_bounds__(kRouteThreads) void route_kernel(const int32_t* idx
                                                               const void* const* tab,
                                                               int32_t* gidx, int32_t* sidx, float* wsel, int32_t* cnt,
                                                               int32_t* xrow, const void** wptr, int32_t* fault) {
+  constexpr int kWaves = kRouteThreads / 32;
   __shared__ int32_t count[ROUTE_MAX_EXPERTS], start[ROUTE_MAX_EXPERTS];
   __shared__ int32_t run[ROUTE_MAX_EXPERTS], group[kRouteThreads];
-  __shared__ uint64_t pk[kWords][kRouteThreads];
-  __shared__ int32_t fp[kRouteThreads];
+  __shared__ int32_t w_start[kWaves], w_fp[kWaves];
+  __shared__ uint64_t w_pk[kWords][kWaves];
   __shared__ int32_t bad, total, from[kBuckets + 2];
   const uint32_t tid = threadIdx.x, nk = n * k;
   for (uint32_t e = tid; e < ROUTE_MAX_EXPERTS; e += kRouteThreads) count[e] = 0, run[e] = 0;
@@ -58,35 +59,58 @@ __global__ __launch_bounds__(kRouteThreads) void route_kernel(const int32_t* idx
     return;
   }
   // an expert's entries: c / chunk full ones (count chunk), then one of the rest (c % chunk) if any - their counts'
-  // counters, and the rows, prefix-summed together (Hillis-Steele over the experts)
+  // counters, and the rows, prefix-summed together (intra-wave shuffle scan + 32-wave scan: fits 48 KB static LDS)
   const int32_t c_own = tid < E ? count[tid] : 0, full = c_own / (int32_t) chunk, rest = c_own % (int32_t) chunk;
   uint64_t own[kWords];
   for (int w = 0; w < kWords; w++) own[w] = 0;
   if (rest) own[(rest - 1) / 4] += (uint64_t) 1 << (((rest - 1) % 4) * 16);
-  start[tid] = c_own, fp[tid] = full;
-  for (int w = 0; w < kWords; w++) pk[w][tid] = own[w];
+  const uint32_t lane = tid & 31u, wave = tid >> 5;
+  int32_t s_inc = c_own, f_inc = full;
+  uint64_t p_inc[kWords];
+  for (int w = 0; w < kWords; w++) p_inc[w] = own[w];
+  for (uint32_t d = 1; d < 32; d <<= 1) {
+    const int32_t sa = __shfl_up(s_inc, d, 32), fa = __shfl_up(f_inc, d, 32);
+    if (lane >= d) s_inc += sa, f_inc += fa;
+    for (int w = 0; w < kWords; w++) {
+      const uint32_t lo = __shfl_up((uint32_t) p_inc[w], d, 32);
+      const uint32_t hi = __shfl_up((uint32_t) (p_inc[w] >> 32), d, 32);
+      if (lane >= d) p_inc[w] += ((uint64_t) hi << 32) | lo;  // (fields never carry: each under 65,536)
+    }
+  }
+  if (lane == 31) {
+    w_start[wave] = s_inc, w_fp[wave] = f_inc;
+    for (int w = 0; w < kWords; w++) w_pk[w][wave] = p_inc[w];
+  }
   __syncthreads();
-  for (uint32_t d = 1; d < kRouteThreads; d <<= 1) {
-    const int32_t a = tid >= d ? start[tid - d] : 0, f = tid >= d ? fp[tid - d] : 0;
-    uint64_t b[kWords];
-    for (int w = 0; w < kWords; w++) b[w] = tid >= d ? pk[w][tid - d] : 0;
-    __syncthreads();
-    start[tid] += a, fp[tid] += f;
-    for (int w = 0; w < kWords; w++) pk[w][tid] += b[w];  // (fields never carry: each under 65,536)
-    __syncthreads();
+  if (wave == 0) {
+    int32_t ws = w_start[lane], wf = w_fp[lane];
+    uint64_t wp[kWords];
+    for (int w = 0; w < kWords; w++) wp[w] = w_pk[w][lane];
+    for (uint32_t d = 1; d < 32; d <<= 1) {
+      const int32_t sa = __shfl_up(ws, d, 32), fa = __shfl_up(wf, d, 32);
+      if (lane >= d) ws += sa, wf += fa;
+      for (int w = 0; w < kWords; w++) {
+        const uint32_t lo = __shfl_up((uint32_t) wp[w], d, 32);
+        const uint32_t hi = __shfl_up((uint32_t) (wp[w] >> 32), d, 32);
+        if (lane >= d) wp[w] += ((uint64_t) hi << 32) | lo;
+      }
+    }
+    w_start[lane] = ws, w_fp[lane] = wf;
+    for (int w = 0; w < kWords; w++) w_pk[w][lane] = wp[w];
+    if (lane == 31) {  // each count's first entry, the most first: from[c] .. from[c] + its total
+      int32_t at = wf;  // the full chunks first (count chunk), then each count under it
+      from[chunk] = 0;
+      for (int v = (int) chunk - 1; v >= 1; v--) from[v] = at, at += (int32_t) field(wp, v);
+      total = at;
+    }
   }
-  start[tid] -= c_own;
-  if (tid == kRouteThreads - 1) {  // each count's first entry, the most first: from[c] .. from[c] + its total
-    uint64_t all[kWords];
-    for (int w = 0; w < kWords; w++) all[w] = pk[w][tid];
-    int32_t at = fp[tid];  // the full chunks first (count chunk), then each count under it
-    from[chunk] = 0;
-    for (int v = (int) chunk - 1; v >= 1; v--) from[v] = at, at += (int32_t) field(all, v);
-    total = at;
-  }
+  __syncthreads();
+  const int32_t ws_pre = wave ? w_start[wave - 1] : 0;
+  const int32_t wf_pre = wave ? w_fp[wave - 1] : 0;
+  start[tid] = s_inc + ws_pre - c_own;
   uint64_t before[kWords];  // the entries of each count under chunk before this expert's, and its full chunks' first
-  for (int w = 0; w < kWords; w++) before[w] = pk[w][tid] - own[w];
-  const int32_t full_at = fp[tid] - full;
+  for (int w = 0; w < kWords; w++) before[w] = p_inc[w] + (wave ? w_pk[w][wave - 1] : 0) - own[w];
+  const int32_t full_at = f_inc + wf_pre - full;
   __syncthreads();
   const uint32_t G = kRouteThreads / k;  // tokens a group
   for (uint32_t t0 = 0; t0 < n; t0 += G) {

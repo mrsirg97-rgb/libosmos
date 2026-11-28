@@ -118,11 +118,14 @@ extern "C" uint64_t q4x_kv_row_bytes(uint32_t values) {
 
 extern "C" bool q4x_kv_put(const float* k, const float* v, uint32_t n_tok, uint32_t values, void* kc, void* vc,
                            void* stream) {
-  if (!k || !v || !kc || !vc || !n_tok || !values || values % Q4X_KV_BLOCK) return false;
+  if (!k || !kc || (v != nullptr) != (vc != nullptr) || !n_tok || !values || values % Q4X_KV_BLOCK) return false;
   const uint32_t blocks = n_tok * values / Q4X_KV_BLOCK;
   kv_put_kernel<<<(blocks + 255) / 256, 256, 0, st(stream)>>>(k, blocks, (uint8_t*) kc);
   if (!ok()) return false;
-  kv_put_kernel<<<(blocks + 255) / 256, 256, 0, st(stream)>>>(v, blocks, (uint8_t*) vc);
-  return ok();
+  if (v) {
+    kv_put_kernel<<<(blocks + 255) / 256, 256, 0, st(stream)>>>(v, blocks, (uint8_t*) vc);
+    return ok();
+  }
+  return true;
 }
 

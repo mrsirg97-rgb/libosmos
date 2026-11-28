@@ -186,6 +186,8 @@ bool q4x_seq_rollback(Q4xSeq *s, uint32_t n)
   s->pos -= (int32_t)n, s->back -= n;
   if (s->df_pos > s->pos) /* the drafter's context past the position dropped (its rows written again when fed) */
     s->df_pos = s->pos, s->df_lo = s->df_lo < s->df_pos ? s->df_lo : s->df_pos;
+  if (s->pend_pos >= s->pos)
+    s->pend_pos = -1;
   s->cur = (s->cur + Q4X_SLOTS - n) % Q4X_SLOTS;
   return true;
 }
@@ -258,7 +260,8 @@ bool q4x_seq_mark_load(Q4xSeq *s, const void *in, uint64_t bytes, char err[OSMOS
   const char *bad = state_head_check(h.magic, MARK_MAGIC, h.version, STATE_VERSION, h.identity, q4x_identity(s->f));
   if ((bad = bad ? bad : state_pos_check(h.pos, (uint32_t)s->pos))) /* (a mark at or below the sequence's position) */
     return osmos_fail(err, "%s", bad);
-  if (h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM || (bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab)))
+  if (h.n_last < 0 || h.n_last > Q4X_MAX_NGRAM || h.pend_pos < -1 || h.pend_pos >= h.pos ||
+      (bad = state_tokens_check(h.last, h.n_last, (uint32_t)s->f->w->geo.n_vocab)))
     return osmos_fail(err, "%s", bad ? bad : "a mark whose fields are out of range");
   if (s->broken)
     return osmos_fail(err, "a sequence after a failed step: its rows below the mark not known (load a state)");

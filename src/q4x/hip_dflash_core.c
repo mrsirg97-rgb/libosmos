@@ -13,6 +13,7 @@
 #include "osmos/gpu/ops.h"
 #include "osmos/gpu/q4x_ops.h"
 #include "dflash_core.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 #define F sizeof(float)
@@ -148,20 +149,22 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
             h->embed(h->ctx, d->tok, B, d->h);
   for (int l = 0; ok && l < g->n_layers; l++)
     ok = block_layer(h, df, d, r, l, B, pos0, ctx_from);
-  /* the block's places after the anchor: the norm, the head, the selector */
+  if (!n)
+    return 0;
+  /* the block's places after the anchor: the norm, the head, the selector (only the n requested rows) */
   ok = ok && ops_rms(d->h, D, D, f32(h, df->output_norm), g->eps, B, d->hn, D, s);
   if (ok && h->seen)
     h->seen(h->ctx, d->hn, (uint64_t)B * D);
-  ok = ok && h->head(h->ctx, d->hn + D, D, B - 1, d->logits) &&
-       q4x_df_topk(d->logits, B - 1, V, K, d->val, d->idx, s) &&
-       h->mat(h->ctx, df->sel_proj, R, D, d->hn + D, D, B - 1, d->hp, R) &&
-       q4x_df_select(d->val, d->idx, B - 1, K, d->hp, R, h->dev(h->ctx, df->sel_pred), h->dev(h->ctx, df->sel_succ), y,
+  ok = ok && h->head(h->ctx, d->hn + D, D, n, d->logits) &&
+       q4x_df_topk(d->logits, n, V, K, d->val, d->idx, s) &&
+       h->mat(h->ctx, df->sel_proj, R, D, d->hn + D, D, n, d->hp, R) &&
+       q4x_df_select(d->val, d->idx, n, K, d->hp, R, h->dev(h->ctx, df->sel_pred), h->dev(h->ctx, df->sel_succ), y,
                      d->path, s) &&
-       q4x_top(d->logits, V, B - 1, V, d->top_id, d->top_p, s) &&
-       hipMemcpyAsync(d->pin_path, d->path, (B - 1) * 4, hipMemcpyDeviceToHost, s) == hipSuccess &&
-       hipMemcpyAsync(d->pin_idx, d->idx, (B - 1) * K * 4, hipMemcpyDeviceToHost, s) == hipSuccess &&
-       hipMemcpyAsync(d->pin_val, d->val, (B - 1) * K * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
-       hipMemcpyAsync(d->pin_p, d->top_p, (B - 1) * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
+       q4x_top(d->logits, V, n, V, d->top_id, d->top_p, s) &&
+       hipMemcpyAsync(d->pin_path, d->path, n * 4, hipMemcpyDeviceToHost, s) == hipSuccess &&
+       hipMemcpyAsync(d->pin_idx, d->idx, n * K * 4, hipMemcpyDeviceToHost, s) == hipSuccess &&
+       hipMemcpyAsync(d->pin_val, d->val, n * K * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
+       hipMemcpyAsync(d->pin_p, d->top_p, n * F, hipMemcpyDeviceToHost, s) == hipSuccess &&
        (!h->before_sync || h->before_sync(h->ctx)) && hipStreamSynchronize(s) == hipSuccess;
   if (!ok)
     return osmos_fail(err, "a GPU call failed (a draft)"), -1;
@@ -181,8 +184,7 @@ int df_draft(const DfHost *h, const Q4xDflash *df, DfBuf *d, const DfRings *r, i
     if (c == K)
       return osmos_fail(err, "the selector's pick not one of its candidates"), -1;
     const float p = d->pin_p[kept] * expf(val[c] - val[0]);
-    cum *= p;
-    if (p < conf_min || cum < cum_min)
+    if (!draft_accept(p, conf_min, cum_min, &cum))
       break;
     drafts[kept] = d->pin_path[kept], conf[kept] = p;
   }

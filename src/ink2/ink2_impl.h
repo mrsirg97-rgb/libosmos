@@ -13,6 +13,7 @@
 #include "osmos/ink2/mtp.h"
 #include "osmos/mem/host_slots.h"
 #include "osmos/mem/membrane.h"
+#include "osmos/mem/moe_stage.h"
 #include "osmos/gpu/overflow.h"
 
 /* a conv tail's rows past its 2 keep: a step of at most these appended in place (a decode's, a drafted round's); a
@@ -89,6 +90,7 @@ struct Ink2Seq
   uint16_t *mk[INK2_MTP_MAX_LAYERS], *mv[INK2_MTP_MAX_LAYERS];
   uint32_t mrows[INK2_MTP_MAX_LAYERS];
   float *mlast;
+  bool mlast_ok; /* mlast the taps of mend - 1 (a rollback's end not seeded: no draft until the next seed) */
   int32_t mfrom, mend, tap_pos0;
   uint32_t tap_row0;
   uint64_t tap_step; /* the forward's step that wrote its taps (Ink2Forward.steps; 0: none) - a seed reads its own */
@@ -158,7 +160,7 @@ struct Ink2Forward
   HostSlots *slots, *stream;
   Membrane *mem;
   /* the step's buffers (max_tokens rows) */
-  int32_t *ids_d;
+  int32_t *ids_d, *pin_tok;
   float *h, *blocks, *a3, *xn, *kn, *vn, *q, *k, *v, *kc, *vc, *rel, *gate, *sink, *att, *dyn, *o, *r, *moe, *logit,
       *tmp, *res_sc, *eg, *eu, *ed, *head, *logits;
   /* the picks, their weights after them (pick + the step's pairs); the next layer's guessed (gw their weights) */
@@ -168,11 +170,12 @@ struct Ink2Forward
   const int32_t *m_row;
   void *x16, *xe16; /* mm's f16 activations: a dense matrix's input (MM_MAX_TOKENS rows), the experts' slots */
   OverflowFlag ovf;  /* the step flag's reset (osmos/gpu/overflow.h): owed when one failed */
-  int32_t *overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
+  int32_t *overflow, *pin_overflow; /* an activation past f16's range in the step (mm_x16's flag): the step refused */
   uint32_t head_rows; /* the head's rows a launch (f->head's) */
   AttnCore *attn[2]; /* a sliding layer's attention, a full layer's (attn_core: their scratch ed, borrowed) */
   /* moe's tables: the counting sort's, the entries' keys, the region built on the host and its device copy */
   uint32_t *m_at, *m_by, *m_run; /* the read's routing (moe_route): its scratch, sorted rows' pairs, runs */
+  int32_t *m_gidx, *m_hidx;      /* moe_route's slot scratch (copied compact into m_build via MoeStage) */
   uint64_t *m_key;
   MoeEntry *m_ent;                   /* its entries (moe_entries) */
   const void *(*m_ex)[POOL_PARTS];   /* each run's expert's parts in memory (membrane_wait's) */
@@ -231,7 +234,8 @@ static inline uint64_t ink2_table_entries(uint64_t P, uint64_t E) { return P + E
 static inline uint64_t ink2_table_slots(uint64_t P, uint64_t E) { return P + E * (MM_TILE - 1); }
 static inline uint64_t ink2_table_bytes(uint64_t P, uint64_t E)
 {
-  return ink2_table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + ink2_table_slots(P, E) * 2 * 4 + P * 4 * 4;
+  return ink2_table_entries(P, E) * (3 * sizeof(void *) + 5 * 4) + ink2_table_slots(P, E) * 2 * 4 + P * 4 * 4 +
+         16 * MOE_STAGE_ALIGN;
 }
 double ink2_pf_now(void);
 void ink2_pf(Ink2Forward *f, int b);

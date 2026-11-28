@@ -277,6 +277,16 @@ int main(void)
                    shift, q.builds, cold, (double)left / GIB);
         }
       }
+  /* wobble-induced bracket inversion: over <= ok must never underflow uint64_t */
+  {
+    Engine q = {113 * GIB, 9 * GIB, 8 * GIB, 116 * GIB, 40, 6, 0, 0, 0, 0, 1500 * GIB / 1000, INT64_MAX, 0};
+    budget = 0;
+    assert(fit_sized(build, unbuild, &q, GIB, &budget, err) && q.live);
+    assert(budget >= q.dense && budget <= q.dense + q.experts);
+    unbuild(&q);
+    printf("  wobble inversion (1.50 GiB): converged safely to %.2f GiB in %d builds\n", (double)budget / GIB,
+           q.builds);
+  }
   printf("[test_fit] ok\n");
   return 0;
 }

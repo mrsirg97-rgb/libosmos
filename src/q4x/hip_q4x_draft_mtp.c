@@ -2,6 +2,7 @@
 
 #include "osmos/gpu/mm.h"
 #include "q4x_impl.h"
+#include "osmos/run/draft.h"
 #include "osmos/err.h"
 
 /* Qwen's MTP head (osmos/q4x/forward.h, q4x_mtp_seed / q4x_mtp_draft): llama.cpp's graph_mtp - h normed a stream, the
@@ -72,7 +73,7 @@ bool q4x_mtp_seed(Q4xForward *f, Q4xSeq *s, int32_t from, int32_t to, char err[O
     ok = ok && copy(m->hin, rows + (uint64_t)(at - 1) * hd, n * hd * F);
   else
     ok = ok && first_h(f, s, from, m->hin) && (n == 1 || copy(m->hin + hd, rows, (n - 1) * hd * F));
-  ok = ok && head_in(f, n) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, L->hc_attn_inject, n, false) &&
+  ok = ok && head_in(f, n) && q4x_mix(f, L->hc_attn_norm, L->hc_attn_down, L->hc_attn_up, NULL, n, false) &&
        q4x_attention_kv(f, L, &(Q4xCache){s->mkc, s->mvc, s->mixk, s->mixr, from, 0, n}, 1, n) &&
        copy(s->pend, rows + (uint64_t)(to - 1 - s->step_pos0) * hd, hd * F);
   if (!ok) /* its f16 overflow, if any, the next draft's or step's read finds (the flag accumulates) */
@@ -126,6 +127,8 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
       return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
     if (!s[i] || s[i]->f != f)
       return osmos_fail(err, "a sequence of another forward");
+    if (y[i] < 0 || y[i] >= f->w->geo.n_vocab)
+      return osmos_fail(err, "a token outside the vocabulary");
     for (uint32_t j = 0; j < i; j++)
       if (s[j] == s[i])
         return osmos_fail(err, "a sequence twice");
@@ -151,8 +154,7 @@ bool q4x_mtp_draft_all(Q4xForward *f, Q4xSeq *const *s, const int32_t *y, uint32
     for (uint32_t j = 0; ok && j < na; j++)
     {
       const uint32_t i = who[j];
-      cum[j] *= p[j];
-      if (p[j] < conf_min || cum[j] < cum_min)
+      if (!draft_accept(p[j], conf_min, cum_min, &cum[j]))
         continue;
       drafts[(uint64_t)i * stride + counts[i]] = id[j], conf[(uint64_t)i * stride + counts[i]] = p[j], counts[i]++;
       if ((uint32_t)counts[i] >= max || (uint32_t)(pos[j] + 1) >= f->max_ctx)

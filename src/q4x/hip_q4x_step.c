@@ -41,8 +41,9 @@ static bool embed(Q4xForward *f, const Q4xRun *r, uint32_t runs, const int32_t *
   if (f->stream_ngram && !q4x_ple_issue(f, n)) /* the rows read while the GPU embeds and runs the layers before */
     return false;
   return hipMemcpyAsync(b->tok, b->pin_tok, n * 4, hipMemcpyHostToDevice, NULL) == hipSuccess &&
-         hipMemcpyAsync(b->ple_rows, b->pin_rows, (uint64_t)n * g->ple_heads * 4, hipMemcpyHostToDevice, NULL) ==
-             hipSuccess &&
+         (f->stream_ngram ||
+          hipMemcpyAsync(b->ple_rows, b->pin_rows, (uint64_t)n * g->ple_heads * 4, hipMemcpyHostToDevice, NULL) ==
+              hipSuccess) &&
          q4x_pin_sent(f) &&
          q4x_rows(e->type, q4x_dev(f, e), e->bytes / e->dims[1], (uint32_t)e->dims[0], b->tok, n, b->x, NULL) &&
          q4x_streams(b->x, n, (uint32_t)g->hc, (uint32_t)g->n_embd, b->h, NULL);
@@ -186,25 +187,61 @@ static uint32_t unwanted(const Q4xRun *r)
   return skip <= 0 ? 0 : skip < (int64_t)r->n ? (uint32_t)skip : r->n;
 }
 
-/* the output head over the step's mixed rows: every row in one call, or - a run with tokens before its prompt's
-   end - each run's wanted tail alone into its rows (a token's sums its own: the same bits) */
+/* the output head over the step's mixed rows: every row in one call, or - when some runs skip tokens before their
+   prompt's end - coalesced contiguous spans, or gathered into b.x / b.ga for a single weight read when spans are
+   scattered (each row's logits land at row0 + t, untouched rows stay untouched, and every token's bits are its own) */
 static bool head(Q4xForward *f, const Q4xRun *r, uint32_t runs, uint32_t n, uint32_t row0)
 {
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint32_t V = (uint32_t)g->n_vocab, D = (uint32_t)g->n_embd;
-  bool all = true;
-  for (uint32_t i = 0; i < runs; i++)
-    all = all && !unwanted(&r[i]);
-  if (all)
-    return q4x_mat(f, f->w->output, V, D, b->mixed, D, n, b->logits + (uint64_t)row0 * V, V, n <= MM_MAX_TOKENS);
+  uint32_t sp_t[Q4X_MAX_RUNS], sp_k[Q4X_MAX_RUNS], ns = 0, total = 0;
   for (uint32_t i = 0; i < runs; i++)
   {
-    const uint32_t t = r[i].t0 + unwanted(&r[i]), k = r[i].n - unwanted(&r[i]);
-    if (k && !q4x_mat(f, f->w->output, V, D, b->mixed + (uint64_t)t * D, D, k, b->logits + (uint64_t)(row0 + t) * V, V,
-                      false))
-      return false;
+    const uint32_t u = unwanted(&r[i]), t = r[i].t0 + u, k = r[i].n - u;
+    if (!k)
+      continue;
+    if (ns && sp_t[ns - 1] + sp_k[ns - 1] == t)
+      sp_k[ns - 1] += k;
+    else
+      sp_t[ns] = t, sp_k[ns] = k, ns++;
+    total += k;
   }
+  if (!total)
+    return true;
+  if (ns == 1)
+  {
+    const bool all = sp_t[0] == 0 && sp_k[0] == n;
+    return q4x_mat(f, f->w->output, V, D, b->mixed + (uint64_t)sp_t[0] * D, D, sp_k[0],
+                   b->logits + (uint64_t)(row0 + sp_t[0]) * V, V, all && n <= MM_MAX_TOKENS);
+  }
+  const uint64_t ga_floats = (uint64_t)f->max_tokens * (uint64_t)g->n_used * (uint64_t)g->ff_exp;
+  if ((uint64_t)total * V <= ga_floats)
+  {
+    uint32_t dst = 0;
+    for (uint32_t s = 0; s < ns; s++)
+    {
+      if (hipMemcpyAsync(b->x + (uint64_t)dst * D, b->mixed + (uint64_t)sp_t[s] * D,
+                         (uint64_t)sp_k[s] * D * sizeof(float), hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+        return false;
+      dst += sp_k[s];
+    }
+    if (!q4x_mat(f, f->w->output, V, D, b->x, D, total, b->ga, V, false))
+      return false;
+    dst = 0;
+    for (uint32_t s = 0; s < ns; s++)
+    {
+      if (hipMemcpyAsync(b->logits + (uint64_t)(row0 + sp_t[s]) * V, b->ga + (uint64_t)dst * V,
+                         (uint64_t)sp_k[s] * V * sizeof(float), hipMemcpyDeviceToDevice, NULL) != hipSuccess)
+        return false;
+      dst += sp_k[s];
+    }
+    return true;
+  }
+  for (uint32_t s = 0; s < ns; s++)
+    if (!q4x_mat(f, f->w->output, V, D, b->mixed + (uint64_t)sp_t[s] * D, D, sp_k[s],
+                 b->logits + (uint64_t)(row0 + sp_t[s]) * V, V, false))
+      return false;
   return true;
 }
 
@@ -220,39 +257,52 @@ bool q4x_step(Q4xForward *f, Q4xSeq *const *seqs, const uint32_t *lens, uint32_t
     if (seqs[i] && seqs[i]->broken)
       return osmos_fail(err, "a sequence after a failed step (its states part written): load it, or make another");
   const uint32_t n = runs_of(f, seqs, lens, runs, r);
-  f->steps++;
   if (!n || (uint64_t)row0 + n > f->max_tokens)
     return osmos_fail(err, "a run of no tokens, a sequence twice, of another forward or past its context, or the rows "
                          "past the forward's max_tokens");
+  f->steps++;
   const Q4xGeometry *g = &f->w->geo;
   Q4xBuf *b = &f->b;
   const uint64_t hd = (uint64_t)g->hc * g->n_embd;
   for (uint32_t i = 0; i < runs; i++) /* from here a failure leaves the rings part written: advance clears it */
     r[i].s->broken = true;
   memset(b->slot + row0, 0xff, n * sizeof *b->slot); /* the step's rows: none kept until it is whole (-1) */
-  if (!embed(f, r, runs, tokens, n))
-    return osmos_fail(err, "a GPU call failed (the embedding)");
+  const char *stage = "the embedding";
+  bool ok = embed(f, r, runs, tokens, n);
   bool pending = false;
-  for (int l = 0; l < g->n_layers; l++)
+  for (int l = 0; ok && l < g->n_layers; l++)
   {
-    if (!layer(f, r, runs, l, n, &pending))
-      return osmos_fail(err, "a GPU call failed (a layer)");
-    q4x_seen(f, "l_last", l, b->h, n * hd);
+    stage = "a layer";
+    ok = layer(f, r, runs, l, n, &pending);
+    if (ok)
+      q4x_seen(f, "l_last", l, b->h, n * hd);
   }
   const Q4xWeights *w = f->w;
-  if (!q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending)) /* the last MoE's into b.h */
-    return osmos_fail(err, "a GPU call failed (the end mixer)");
+  if (ok)
+    stage = "the end mixer", ok = q4x_mix(f, w->out_hc_norm, w->out_hc_down, w->out_hc_up, NULL, n, pending);
   /* the head's h: the residual the end mixer read, at the step's rows (each sequence's place: advance) */
-  if (f->mtp && hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float),
-                               hipMemcpyDeviceToDevice, NULL) != hipSuccess)
-    return osmos_fail(err, "a GPU call failed (the MTP head's rows)");
-  q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd);
-  const bool done = head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
-  hipDeviceSynchronize();
+  if (ok && f->mtp)
+    stage = "the MTP head's rows",
+    ok = hipMemcpyAsync(f->m.hid + (uint64_t)row0 * hd, b->h, (uint64_t)n * hd * sizeof(float), hipMemcpyDeviceToDevice,
+                        NULL) == hipSuccess;
+  if (ok)
+    q4x_seen(f, "result_norm", -1, b->mixed, (uint64_t)n * g->n_embd), stage = "the logits";
+  const bool done = ok && head(f, r, runs, n, row0) && q4x_overflow_read(f) && hipStreamSynchronize(NULL) == hipSuccess;
+  if (!done)
+  {
+    (void)hipDeviceSynchronize(); /* drain any side-stream work before releasing membrane holds */
+    f->inj_side = false;
+    f->moe_side = false;
+    f->st = NULL;
+  }
   if (f->mem)
     membrane_end(f->mem); /* the step's holds ended (its experts' kernels done) */
   if (!done)
-    return osmos_fail(err, "a GPU call failed (the logits)");
+  {
+    char rerr[OSMOS_ERR] = "";
+    overflow_reset(&f->ovf, rerr);
+    return osmos_fail(err, "a GPU call failed (%s)", stage);
+  }
   if (!q4x_overflow_ok(f, err))
     return false;
   for (uint32_t i = 0; i < runs; i++)
@@ -271,8 +321,8 @@ const float *q4x_logits(const Q4xForward *f) { return f ? f->b.logits : NULL; }
 void q4x_kept_view(const Q4xForward *f, KeptView *k)
 {
   *k = (KeptView){0};
-  if (f) /* (the picks' scratch: the MoE's table, free between steps) */
-    *k = (KeptView){f->b.slot, f->max_tokens, f->b.logits, (uint32_t)f->w->geo.n_vocab, f->b.cnt, f->b.top_part, NULL,
+  if (f) /* (the picks' scratch: b->tok is always max_tokens * 4 and free between steps) */
+    *k = (KeptView){f->b.slot, f->max_tokens, f->b.logits, (uint32_t)f->w->geo.n_vocab, f->b.tok, f->b.top_part, NULL,
                     NULL, NULL, NULL};
 }
 
