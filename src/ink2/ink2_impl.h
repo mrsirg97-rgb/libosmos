@@ -90,6 +90,7 @@ struct Ink2Seq
   uint16_t *mk[INK2_MTP_MAX_LAYERS], *mv[INK2_MTP_MAX_LAYERS];
   uint32_t mrows[INK2_MTP_MAX_LAYERS];
   float *mlast;
+  bool mlast_ok; /* mlast the taps of mend - 1 (a rollback's end not seeded: no draft until the next seed) */
   int32_t mfrom, mend, tap_pos0;
   uint32_t tap_row0;
   uint64_t tap_step; /* the forward's step that wrote its taps (Ink2Forward.steps; 0: none) - a seed reads its own */

@@ -193,7 +193,7 @@ bool ink2_mtp_seq_make(Ink2Seq *s)
         ledger_malloc(f->ledger, (void **)&s->mv[l], bytes) != hipSuccess)
       return false;
   }
-  s->mfrom = s->mend = 0;
+  s->mfrom = s->mend = 0, s->mlast_ok = false;
   return ledger_malloc(f->ledger, (void **)&s->mlast, (uint64_t)f->mtp->n_taps * f->mtp->n_embd * 4) == hipSuccess;
 }
 
@@ -277,7 +277,7 @@ bool ink2_seq_seed(Ink2Forward *f, Ink2Seq *s, int32_t from, int32_t to, char er
   if (overflow)
     return overflow_reset(&d->ovf, NULL), osmos_fail(err, "the drafter's context past f16's range");
   s->mfrom = new_mfrom;
-  s->mend = to;
+  s->mend = to, s->mlast_ok = true;
   return true;
 }
 
@@ -329,7 +329,7 @@ int ink2_seq_draft(Ink2Forward *f, Ink2Seq *s, int32_t y, uint32_t max, float co
     return -1;
   if (y < 0 || y >= f->w->geo.n_vocab)
     return osmos_fail(err, "a token not of the vocabulary"), -1;
-  if (s->mend != s->pos || s->mfrom >= s->mend)
+  if (s->mend != s->pos || s->mfrom >= s->mend || !s->mlast_ok)
     return osmos_fail(err, "the drafter's context not seeded to the sequence's position"), -1;
   const Ink2Mtp *m = f->mtp;
   Ink2MtpDev *d = &f->md;
