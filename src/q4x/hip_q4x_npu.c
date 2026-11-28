@@ -107,7 +107,8 @@ bool q4x_npu_make(Q4xForward *f, const char *dir, float share, char err[OSMOS_ER
   return true;
 }
 
-int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff)
+int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, const Q4xExpertTiles *et,
+                 uint32_t D, uint32_t ff)
 {
   const Q4xGeometry *g = &f->w->geo;
   const int l = (int)(L - f->w->layer);
@@ -121,8 +122,9 @@ int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBo
     return 0;
   Q4xBuf *b = &f->b;
   const int r = Q4X_TILE_RUNS - 1;
-  if (!npu_select_q4x(b->cnt, bd->first[r], bd->count[r], want, (const void *const *)b->ptr, bd->entries, b->xg, b->yg,
-                      b->xd, b->yd, b->gidx, D, ff, f->npu_sel, f->npu_nsel, f->npu_tok, f->npu_slot, NULL) ||
+  /* et's tables, the ones the GPU's matmuls read (a streamed layer's compact, not b's): a part taken is zeroed there */
+  if (!npu_select_q4x(et->cnt, bd->first[r], bd->count[r], want, (const void *const *)et->ptr[0], bd->entries, et->xg,
+                      et->yg, et->xd, et->yd, et->gidx, D, ff, f->npu_sel, f->npu_nsel, f->npu_tok, f->npu_slot, NULL) ||
       !npu_pack_a(b->mixed, D, f->npu_tok, want, npu_a(f->npu), NULL) ||
       hipEventRecord(f->npu_packed, NULL) != hipSuccess)
     return -1;

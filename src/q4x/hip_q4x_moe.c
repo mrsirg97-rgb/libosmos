@@ -88,9 +88,11 @@ static bool host_tiles(Q4xForward *f, int l, uint32_t e, Q4xExpertBounds *bd, Q4
   uint32_t *yg = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&et->yg);
   uint32_t *xd = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&et->xd);
   uint32_t *yd = moe_stage_carve(&st, (uint64_t)ne * 4, (void **)&et->yd);
-  const void **ptr[Q4X_GROUP_TENSORS];
+  /* the three tensors' pointers one block, stride ne (bd->entries): the layout npu_select_q4x reads */
+  const void **ptr[Q4X_GROUP_TENSORS], **ptr_dev = NULL;
+  ptr[0] = moe_stage_carve(&st, (uint64_t)Q4X_GROUP_TENSORS * ne * sizeof *ptr[0], (void **)&ptr_dev);
   for (int t = 0; t < Q4X_GROUP_TENSORS; t++)
-    ptr[t] = moe_stage_carve(&st, (uint64_t)ne * sizeof *ptr[t], (void **)&et->ptr[t]);
+    ptr[t] = ptr[0] ? ptr[0] + (uint64_t)t * ne : NULL, et->ptr[t] = ptr_dev ? ptr_dev + (uint64_t)t * ne : NULL;
   int32_t *gidx = moe_stage_carve(&st, (uint64_t)rt.slots * 4, (void **)&et->gidx);
   int32_t *hidx = moe_stage_carve(&st, (uint64_t)rt.slots * 4, (void **)&et->hidx);
   int32_t *where = moe_stage_carve(&st, (uint64_t)e * 4, (void **)&et->where);
@@ -217,9 +219,10 @@ bool q4x_moe(Q4xForward *f, const Q4xLayer *L, uint32_t n)
   if ((streamed ? !host_tiles(f, (int)(L - f->w->layer), e, &bd, &et, D, ff)
                 : !q4x_expert_tiles(b->ids, e, k, E, D, ff, &et, NULL)))
     return false;
-  /* the NPU's share of a prompt step's whole entries, taken from the tables (hip_q4x_npu.c): each kind's packed
+  /* the NPU's share of a prompt step's whole entries, taken from the step's tables (et: b's, or a streamed layer's
+     compact ones - hip_q4x_npu.c): each kind's packed
      before the GPU's matmuls of it are queued, run beside them, its rows where theirs go */
-  const int npu_res = q4x_npu_take(f, L, n, &bd, D, ff);
+  const int npu_res = q4x_npu_take(f, L, n, &bd, &et, D, ff);
   if (npu_res < 0)
     return false;
   const bool npu = npu_res > 0;

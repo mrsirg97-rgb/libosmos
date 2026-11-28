@@ -231,7 +231,8 @@ bool q4x_overflow_ok(Q4xForward *f, char *err);
 const void *q4x_dev(const Q4xForward *f, const GgufTensor *t);
 /* the NPU's (hip_q4x_npu.c): a layer's share of n tokens' picks taken from its tables and packed (0: none); its gate and
    up, then its down, once the GPU's of each are queued */
-int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, uint32_t D, uint32_t ff);
+int q4x_npu_take(Q4xForward *f, const Q4xLayer *L, uint32_t n, const Q4xExpertBounds *bd, const Q4xExpertTiles *et,
+                 uint32_t D, uint32_t ff);
 bool q4x_npu_gate_up(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
 bool q4x_npu_pack_down(Q4xForward *f, uint32_t ff);
 bool q4x_npu_down(Q4xForward *f, const Q4xLayer *L, uint32_t D, uint32_t ff);
